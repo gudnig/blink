@@ -1,4 +1,3 @@
-
 use std::ops::Deref;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -18,6 +17,12 @@ impl LispNode {
     }
 }
 
+impl fmt::Display for LispNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlinkValue(pub Rc<RefCell<LispNode>>);
 
@@ -29,6 +34,7 @@ impl Deref for BlinkValue {
     }
 }
 
+#[allow(dead_code)]
 impl BlinkValue {
     pub fn is_nil(&self) -> bool {
         matches!(self.borrow().value, Value::Nil)
@@ -107,6 +113,57 @@ impl fmt::Debug for Value {
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
             Value::Nil => write!(f, "nil"),
         }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "{}", n),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Str(s) => write!(f, "\"{}\"", s),
+            Value::Symbol(s) => write!(f, "{}", s),
+            Value::Keyword(s) => write!(f, ":{}", s),
+            Value::List(xs) => {
+                write!(f, "(")?;
+                for (i, val) in xs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", val.borrow())?;
+                }
+                write!(f, ")")
+            }
+            Value::Vector(xs) => {
+                write!(f, "[")?;
+                for (i, val) in xs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", val.borrow())?;
+                }
+                write!(f, "]")
+            }
+            Value::Map(m) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in m.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{} {}", k, v.borrow())?;
+                }
+                write!(f, "}}")
+            }
+            Value::FuncUserDefined { .. } => write!(f, "#<fn>"),
+            Value::NativeFunc(_) => write!(f, "#<native-fn>"),
+            Value::Nil => write!(f, "nil"),
+        }
+    }
+}
+
+impl fmt::Display for BlinkValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.borrow().value)
     }
 }
 
@@ -190,6 +247,7 @@ pub fn sym(s: &str) -> BlinkValue {
     sym_at(s, None)
 }
 
+#[allow(dead_code)]
 pub fn keyword(k: &str) -> BlinkValue {
     keyword_at(k, None)
 }

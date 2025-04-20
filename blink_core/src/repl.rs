@@ -30,7 +30,7 @@ pub fn start_repl() {
         match read_multiline(&mut rl) {
             Ok(line) if line.trim() == "exit" => break,
             Ok(code) => match run_line(&code, &mut ctx) {
-                Ok(val) => println!("=> {:?}", val.borrow()),
+                Ok(val) => println!("=> {}", val.borrow().value),
                 Err(e) => {
                     println!("⚠️  Error: {e}");
                     if DEBUG_POS {

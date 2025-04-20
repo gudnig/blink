@@ -298,7 +298,7 @@ fn special_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, 
 
 fn special_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
     let pos = args.get(0).map(get_pos).flatten();
-    if args.len() != 1 {
+    if args.len() != 1 && args.len() != 2 {
         return Err(LispError::ArityMismatch {
             expected: 1,
             got: args.len(),
@@ -306,6 +306,8 @@ fn special_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkVal
             pos: None,
         });
     }
+
+    
 
     let modname = match &args[0].borrow().value {
         Value::Str(s) => s.clone(),
@@ -316,6 +318,18 @@ fn special_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkVal
     };
 
     let path = format!("lib/{}.blink", modname);
+
+    if args.len() == 2 {
+        let options_val = eval(args[1].clone(), ctx)?;
+        let borrowed = options_val.borrow();
+        if let Value::Map(opt_map) = &borrowed.value {
+            // If the url is provided download the plugin and it will be loaded below
+            if let Some(url_val) = opt_map.get(":url").or_else(|| opt_map.get("url")) {
+                maybe_download(&path, Some(s.clone()))?;
+            }
+        }
+    }
+
     let code = fs::read_to_string(&path)
         .map_err(|_| LispError::EvalError {
             message: format!("Failed to read module file: {}", path),
@@ -497,6 +511,17 @@ fn special_native_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<B
         }),
     };
 
+    if args.len() == 2 {
+        let options_val = eval(args[1].clone(), ctx)?;
+        let borrowed = options_val.borrow();
+        if let Value::Map(opt_map) = &borrowed.value {
+            // If the url is provided download the plugin and it will be loaded below
+            if let Some(url_val) = opt_map.get(":url").or_else(|| opt_map.get("url")) {
+                maybe_download(&plugin_path, Some(s.clone()))?;
+            }
+        }
+    }
+
     let filename = format!("native/lib{}.so", libname);
 
     let lib = unsafe { Library::new(&filename) }
@@ -579,6 +604,11 @@ fn special_compile_plugin(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<
                         _verbose = true;
                     }
                 }
+                if let Some(url_val) = opt_map.get(":url").or_else(|| opt_map.get("url")) {
+                    if let Value::Str(s) = &url_val.borrow().value {
+                        maybe_download(&plugin_path, Some(s.clone()))?;
+                    }
+                }
             } else {
                 return Err(LispError::EvalError {
                     message: "Second argument to compile-plugin must evaluate to a map".into(),
@@ -639,5 +669,23 @@ fn special_compile_plugin(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<
             message: format!("Failed to invoke cargo: {}", e),
             pos,
         }),
+    }
+}
+
+
+fn maybe_download(path: &str, url_opt: Option<String>) -> Result<(), LispError> {
+    if std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+    if let Some(url) = url_opt {
+        let bytes = reqwest::blocking::get(&url)?.bytes()?;
+        std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap())?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    } else {
+        Err(LispError::EvalError {
+            message: format!("Missing file: {}, and no :url provided", path),
+            pos: None,
+        })
     }
 }
