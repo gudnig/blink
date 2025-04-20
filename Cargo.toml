@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "blink_core",
+    "blink_runtime"
+]
+
+resolver = "2"

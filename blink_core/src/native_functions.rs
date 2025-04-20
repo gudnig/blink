@@ -1,0 +1,358 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use crate::env::Env;
+use crate::value::{bool_val, bool_val_at, list_val, list_val_at, map_val_at, nil, num_at, str_val_at, vector_val_at, BlinkValue, Value};
+pub fn native_add(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let sum: f64 = args
+        .into_iter()
+        .map(|arg| {
+            let node = arg.borrow();
+            match &node.value {
+                Value::Number(n) => Ok(*n),
+                _ => Err("+ expects numbers".to_string()),
+            }
+        })
+        .collect::<Result<Vec<f64>, _>>()?
+        .into_iter()
+        .sum();
+
+    Ok(num_at(sum, pos))
+}
+
+pub fn native_sub(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let mut nums: Vec<f64> = args
+        .into_iter()
+        .map(|v| {
+            let node = v.borrow();
+            match &node.value {
+                Value::Number(n) => Ok(*n),
+                _ => Err("- expects numbers".to_string()),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    let first = nums.remove(0);
+    let result = if nums.is_empty() {
+        -first
+    } else {
+        nums.into_iter().fold(first, |a, b| a - b)
+    };
+
+    Ok(num_at(result, pos))
+}
+
+pub fn native_mul(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let mut product = 1.0;
+    for arg in args {
+        let node = arg.borrow();
+        match &node.value {
+            Value::Number(n) => product *= n,
+            _ => return Err("* expects numbers".into()),
+        }
+    }
+    Ok(num_at(product, pos))
+}
+
+pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let mut nums: Vec<f64> = args.into_iter().map(|v| {
+        let node = v.borrow();
+        match &node.value {
+            Value::Number(n) => Ok(*n),
+            _ => Err("/ expects numbers".to_string()),
+        }
+    }).collect::<Result<_, _>>()?;
+
+    let first = nums.remove(0);
+    let result = if nums.is_empty() {
+        1.0 / first
+    } else {
+        nums.into_iter().fold(first, |a, b| a / b)
+    };
+    Ok(num_at(result, pos))
+}
+
+pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    if args.len() < 2 {
+        return Ok(bool_val(true));
+    }
+
+    let first_ref = args[0].borrow();
+    let first_val = &first_ref.value;
+
+    for other in &args[1..] {
+        let other_ref = other.borrow();
+        let other_val = &other_ref.value;
+
+        if first_val.type_tag() != other_val.type_tag() {
+            return Ok(bool_val(false));
+        }
+
+        if format!("{:?}", first_val) != format!("{:?}", other_val) {
+            return Ok(bool_val(false));
+        }
+    }
+
+    Ok(bool_val_at(true, pos))
+}
+
+pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    if args.len() != 1 {
+        return Err("not expects one argument".into());
+    }
+    let result = match &args[0].borrow().value {
+        Value::Bool(b) => !*b,
+        Value::Nil => true,
+        _ => false,
+    };
+    Ok(bool_val_at(result, pos))
+}
+
+pub fn native_map(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    if args.len() != 2 {
+        return Err("map expects 2 arguments".into());
+    }
+    let func = args[0].clone();
+    let list = match &args[1].borrow().value {
+        Value::List(xs) => xs.clone(),
+        _ => return Err("map expects a list as second argument".into()),
+    };
+    let mut results = Vec::new();
+    for val in list {
+        if let Value::NativeFunc(f) = &func.borrow().value {
+            results.push(f(vec![val])?);
+        } else {
+            return Err("map only works on native functions for now".into());
+        }
+    }
+    Ok(list_val_at(results, pos))
+}
+
+pub fn native_reduce(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 3 {
+        return Err("reduce expects 3 arguments".into());
+    }
+    let func = args[0].clone();
+    let initial = args[1].clone();
+    let list = match &args[2].borrow().value {
+        Value::List(xs) => xs.clone(),
+        _ => return Err("reduce expects a list as third argument".into()),
+    };
+    let mut acc = initial;
+    for val in list {
+        if let Value::NativeFunc(f) = &func.borrow().value {
+            acc = f(vec![acc, val])?;
+        } else {
+            return Err("reduce only works on native functions for now".into());
+        }
+    }
+    Ok(acc)
+}
+
+pub fn native_list(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    Ok(list_val(args))
+}
+
+pub fn native_vector(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    Ok(vector_val_at(args, pos))
+}
+
+
+pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() % 2 != 0 {
+        return Err("map expects an even number of arguments".into());
+    }
+
+    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+
+    let mut map = HashMap::new();
+    let mut it = args.into_iter();
+
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        let key_str = match &k.borrow().value {
+            Value::Str(s) => s.clone(),
+            Value::Symbol(s) => s.clone(),
+            Value::Keyword(k) => format!(":{}", k),
+            _ => return Err("map keys must be strings, symbols, or keywords".into()),
+        };
+        map.insert(key_str, v);
+    }
+
+    Ok(map_val_at(map, pos))
+}
+
+pub fn native_print(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    for val in args {
+        print!("{} ", format!("{:?}", val.borrow()));
+    }
+    println!();
+    Ok(nil())
+}
+
+
+
+pub fn native_type_of(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 1 {
+        return Err("type-of expects exactly one argument".into());
+    }
+
+    let arg = &args[0];
+    let type_name = arg.borrow().value.type_tag();
+    let pos = arg.borrow().pos.clone();
+
+    Ok(str_val_at(type_name, pos))
+}
+
+pub fn native_cons(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 2 {
+        return Err("cons expects 2 arguments".into());
+    }
+    let mut new_list = vec![args[0].clone()];
+    match &args[1].borrow().value {
+        Value::List(rest) => new_list.extend(rest.clone()),
+        _ => return Err("second argument to cons must be a list".into()),
+    }
+    Ok(list_val(new_list))
+}
+
+pub fn native_car(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 1 {
+        return Err("car expects 1 argument".into());
+    }
+
+    let arg_ref = args[0].borrow();
+    match &arg_ref.value {
+        Value::List(xs) => xs.get(0).cloned().ok_or_else(|| "car on empty list".into()),
+        _ => Err("car expects a list".into()),
+    }
+}
+
+pub fn native_cdr(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 1 {
+        return Err("cdr expects 1 argument".into());
+    }
+
+    let arg_ref = args[0].borrow();
+    match &arg_ref.value {
+        Value::List(xs) => Ok(list_val(xs.iter().skip(1).cloned().collect())),
+        _ => Err("cdr expects a list".into()),
+    }
+}
+
+pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err("get expects 2 or 3 arguments".into());
+    }
+
+
+    let target_val = &args[0];
+    let key_val = &args[1];
+    let fallback_val = args.get(2).cloned();
+
+
+    let key_pos = key_val.borrow().pos.clone(); // for potential error reporting
+    let target_ref = target_val.borrow();
+    let target = &target_ref.value;
+
+    let key_ref = key_val.borrow();
+    let key = &key_ref.value;
+
+
+    match target {
+        Value::Vector(vec) => {
+            if let Value::Number(n) = key {
+                let idx = n.clone() as usize;
+                if let Some(val) = vec.get(idx).cloned() {
+                    Ok(val)
+                } else if let Some(default) = fallback_val {
+                    Ok(default)
+                } else {
+                    Err(format!(
+                        "Index {} out of bounds{}",
+                        idx,
+                        key_pos
+                            .map(|p| format!(" at {}", p))
+                            .unwrap_or_default()
+                    ))
+                }
+            } else {
+                Err("get on vector expects numeric index".into())
+            }
+        }
+
+        Value::Map(map) => {
+            let kstr = match key {
+                Value::Str(s) => s.clone(),
+                Value::Symbol(s) => s.clone(),
+                Value::Keyword(k) => format!(":{}", k),
+                _ => return Err("get on map expects string, symbol, or keyword key".into()),
+            };
+
+            if let Some(val) = map.get(&kstr) {
+                Ok(val.clone())
+            } else if let Some(default) = fallback_val {
+                Ok(default)
+            } else {
+                Err(format!(
+                    "Key '{}' not found in map{}",
+                    kstr,
+                    key_pos
+                        .map(|p| format!(" at {}", p))
+                        .unwrap_or_default()
+                ))
+            }
+        }
+
+        _ => Err("get only works on vector or map".into()),
+    }
+}
+
+
+
+use crate::value::LispNode;
+
+pub fn register_builtins(env: &Rc<RefCell<Env>>) {
+    let mut e = env.borrow_mut();
+
+    macro_rules! reg {
+        ($name:expr, $func:expr) => {
+            e.set(
+                $name,
+                BlinkValue(Rc::new(RefCell::new(LispNode {
+                    value: Value::NativeFunc($func),
+                    pos: None,
+                }))),
+            );
+        };
+    }
+
+    reg!("+", native_add);
+    reg!("-", native_sub);
+    reg!("*", native_mul);
+    reg!("/", native_div);
+    reg!("=", native_eq);
+    reg!("not", native_not);
+    reg!("map", native_map);
+    reg!("reduce", native_reduce);
+    reg!("list", native_list);
+    reg!("vector", native_vector);
+    reg!("hash-map", native_map_construct);
+    reg!("print", native_print);
+    reg!("type-of", native_type_of);
+    reg!("cons", native_cons);
+    reg!("car", native_car);
+    reg!("cdr", native_cdr);
+    reg!("first", native_car);
+    reg!("rest", native_cdr);
+    reg!("get", native_get);
+}
+
