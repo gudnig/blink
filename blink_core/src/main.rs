@@ -1,10 +1,11 @@
-mod value;
 mod env;
-mod parser;
+mod error;
 mod eval;
 mod native_functions;
+mod parser;
 mod repl;
-mod error;
+mod telemetry;
+mod value;
 
 fn main() {
     repl::start_repl();

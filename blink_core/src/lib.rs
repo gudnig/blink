@@ -1,11 +1,11 @@
-pub mod value;
 pub mod env;
-pub mod parser;
+pub mod error;
 pub mod eval;
 pub mod native_functions;
-pub mod error;
-pub mod repl; // optional — not needed by plugins
+pub mod parser;
+pub mod repl;
+pub mod telemetry;
+pub mod value;
 
 pub use env::Env;
-pub use value::{BlinkValue, Value, LispNode, str_val, num, bool_val}; // add what your plugins use
-
+pub use value::{bool_val, num, str_val, BlinkValue, LispNode, Value}; // add what your plugins use

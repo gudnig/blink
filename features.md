@@ -55,6 +55,11 @@ This document tracks all current and planned features for the Blink Lisp interpr
 - ⬜ (list-plugins) to show active or cached plugins
 - ⬜ (plugin-info <name>) to inspect plugin metadata
 - ⬜ Add plugin error handling for failed builds / bad symbols
+- ⬜ Support `:url` values that point to:
+  - `.bl` files (single-file modules)
+  - `.zip` / `.tar.gz` packages (multi-file)
+  - GitHub or Git repos (cloned into `lib/<name>/`)
+- ⬜ Optional `:entry` key for specifying entry file inside a package
 
 ## 🛠 CLI / Developer Workflow
 

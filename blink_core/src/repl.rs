@@ -1,12 +1,14 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use rustyline::{Editor, Config, CompletionType, EditMode};
-use rustyline::history::FileHistory;
-use crate::parser::{tokenize, parse};
-use crate::eval::{eval, EvalContext};
 use crate::env::Env;
 use crate::error::LispError;
+
+use crate::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
 use crate::value::BlinkValue;
+use rustyline::history::FileHistory;
+use rustyline::{CompletionType, Config, EditMode, Editor};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::eval::{eval, EvalContext};
 
 const DEBUG_POS: bool = true;
 
@@ -23,13 +25,18 @@ pub fn start_repl() {
     let global_env = Rc::new(RefCell::new(Env::new()));
     crate::native_functions::register_builtins(&global_env);
     let mut ctx = EvalContext::new(&mut global_env.borrow_mut());
+    preload_builtin_reader_macros(&mut ctx);
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
     loop {
-        match read_multiline(&mut rl) {
+        // 🌟 Clone the reader macros once for this REPL iteration
+        let reader_macros = ctx.reader_macros.borrow().reader_macros.clone();
+        let mut temp_reader_ctx = crate::parser::ReaderContext { reader_macros };
+
+        match read_multiline(&mut rl, &mut temp_reader_ctx) {
             Ok(line) if line.trim() == "exit" => break,
-            Ok(code) => match run_line(&code, &mut ctx) {
+            Ok(code) => match run_line(&code, &mut ctx, &mut temp_reader_ctx) {
                 Ok(val) => println!("=> {}", val.borrow().value),
                 Err(e) => {
                     println!("⚠️  Error: {e}");
@@ -58,7 +65,10 @@ pub fn start_repl() {
     rl.save_history("history.txt").ok();
 }
 
-fn read_multiline(rl: &mut Editor<(), FileHistory>) -> Result<String, rustyline::error::ReadlineError> {
+pub fn read_multiline(
+    rl: &mut Editor<(), FileHistory>,
+    rcx: &mut ReaderContext,
+) -> Result<String, rustyline::error::ReadlineError> {
     let mut lines = Vec::new();
 
     loop {
@@ -68,7 +78,7 @@ fn read_multiline(rl: &mut Editor<(), FileHistory>) -> Result<String, rustyline:
         lines.push(line);
         let code = lines.join("\n");
 
-        match tokenize(&code).and_then(|mut toks| parse(&mut toks)) {
+        match tokenize(&code).and_then(|mut toks| parse(&mut toks, rcx)) {
             Ok(_) => return Ok(code),
             Err(LispError::ParseError { message, .. }) if message.contains("Unclosed") => continue,
             Err(_) => return Ok(code), // Let the main handler display the error
@@ -76,8 +86,12 @@ fn read_multiline(rl: &mut Editor<(), FileHistory>) -> Result<String, rustyline:
     }
 }
 
-fn run_line(code: &str, ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+fn run_line(
+    code: &str,
+    ctx: &mut EvalContext,
+    reader_macros: &mut ReaderContext,
+) -> Result<BlinkValue, LispError> {
     let mut tokens = tokenize(code)?;
-    let ast = parse(&mut tokens)?;
+    let ast = parse(&mut tokens, reader_macros)?;
     eval(ast, ctx)
 }

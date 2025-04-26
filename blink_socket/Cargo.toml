@@ -1,0 +1,12 @@
+[package]
+name = "blink_socket"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blink_core = { path = "../blink_core" }
+futures = "0.3"
+tokio = { version = "=1.35.1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+rmp-serde = "1.1"
+anyhow = "1.0"

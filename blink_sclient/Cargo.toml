@@ -1,14 +1,10 @@
 [package]
-name = "blink_core"
+name = "blink_sclient"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "blink_core"
-path = "src/lib.rs"
-
 [dependencies]
-rustyline = "15.0.0"
-libloading = "0.8"
+tokio = { version = "1.32", features = ["full"] }
+rmp-serde = "1.1"
 serde = { version = "1.0", features = ["derive"] }
-
+anyhow = "1.0"
