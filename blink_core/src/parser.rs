@@ -1,11 +1,14 @@
+use parking_lot::RwLock;
+
 use crate::env::Env;
 use crate::error::{LispError, SourcePos};
 use crate::eval::EvalContext;
 use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, BlinkValue};
 use crate::value::{LispNode, Value};
-use std::cell::RefCell;
+
 use std::collections::HashMap;
-use std::rc::Rc;
+
+use std::sync::Arc;
 
 pub struct ReaderContext {
     pub reader_macros: HashMap<String, BlinkValue>,
@@ -19,11 +22,11 @@ impl ReaderContext {
     }
 }
 
-fn expand_macro_body(form: BlinkValue, env: Rc<RefCell<Env>>) -> Result<BlinkValue, LispError> {
-    match &form.borrow().value {
+fn expand_macro_body(form: BlinkValue, env: Arc<RwLock<Env>>) -> Result<BlinkValue, LispError> {
+    match &form.read().value {
         Value::Symbol(s) => {
             // If symbol exists in the macro local env, replace it
-            if let Some(val) = env.borrow().get(s) {
+            if let Some(val) = env.read().get(s) {
                 Ok(val)
             } else {
                 Ok(form.clone()) // leave symbol unchanged
@@ -45,7 +48,7 @@ fn expand_macro_body(form: BlinkValue, env: Rc<RefCell<Env>>) -> Result<BlinkVal
 }
 
 fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkValue, LispError> {
-    match &macro_fn.borrow().value {
+    match &macro_fn.read().value {
         Value::FuncUserDefined { params, body, env } => {
             if params.len() != 1 {
                 return Err(LispError::EvalError {
@@ -55,10 +58,10 @@ fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkVal
             }
 
             // Create fresh local env
-            let local_env = Rc::new(RefCell::new(Env::with_parent(env.clone())));
+            let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
 
             // Bind param "x" -> the parsed form (like "foo")
-            local_env.borrow_mut().set(&params[0], form);
+            local_env.write().set(&params[0], form);
 
             let macro_body = body.get(0).ok_or_else(|| LispError::EvalError {
                 message: "Reader macro has no body".into(),
@@ -292,20 +295,20 @@ pub fn parse_all(code: &str) -> Result<Vec<BlinkValue>, LispError> {
 
 pub fn preload_builtin_reader_macros(ctx: &mut EvalContext) {
     fn build_simple_macro(name: &str) -> BlinkValue {
-        BlinkValue(Rc::new(RefCell::new(LispNode {
+        BlinkValue(Arc::new(RwLock::new(LispNode {
             value: Value::FuncUserDefined {
                 params: vec!["x".to_string()],
                 body: vec![list_val(vec![
                     sym(name), // 'quote, 'quasiquote, etc.
                     sym("x"),  // just reference the param symbol "x" at runtime
                 ])],
-                env: Rc::new(RefCell::new(Env::new())), // empty environment
+                env: Arc::new(RwLock::new(Env::new())), // empty environment
             },
             pos: None,
         })))
     }
 
-    let mut rm = ctx.reader_macros.borrow_mut();
+    let mut rm = ctx.reader_macros.write();
 
     // Single character reader macros
     rm.reader_macros

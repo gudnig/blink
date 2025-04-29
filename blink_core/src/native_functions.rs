@@ -1,14 +1,18 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use crate::env::Env;
-use crate::value::{bool_val, bool_val_at, list_val, list_val_at, map_val_at, nil, num_at, str_val_at, vector_val_at, BlinkValue, Value};
+use crate::value::{
+    bool_val, bool_val_at, list_val, list_val_at, map_val_at, nil, num_at, str_val_at,
+    vector_val_at, BlinkValue, Value,
+};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 pub fn native_add(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     let sum: f64 = args
         .into_iter()
         .map(|arg| {
-            let node = arg.borrow();
+            let node = arg.read();
             match &node.value {
                 Value::Number(n) => Ok(*n),
                 _ => Err("+ expects numbers".to_string()),
@@ -22,11 +26,11 @@ pub fn native_add(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_sub(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     let mut nums: Vec<f64> = args
         .into_iter()
         .map(|v| {
-            let node = v.borrow();
+            let node = v.read();
             match &node.value {
                 Value::Number(n) => Ok(*n),
                 _ => Err("- expects numbers".to_string()),
@@ -45,10 +49,10 @@ pub fn native_sub(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_mul(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     let mut product = 1.0;
     for arg in args {
-        let node = arg.borrow();
+        let node = arg.read();
         match &node.value {
             Value::Number(n) => product *= n,
             _ => return Err("* expects numbers".into()),
@@ -58,14 +62,17 @@ pub fn native_mul(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
-    let mut nums: Vec<f64> = args.into_iter().map(|v| {
-        let node = v.borrow();
-        match &node.value {
-            Value::Number(n) => Ok(*n),
-            _ => Err("/ expects numbers".to_string()),
-        }
-    }).collect::<Result<_, _>>()?;
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
+    let mut nums: Vec<f64> = args
+        .into_iter()
+        .map(|v| {
+            let node = v.read();
+            match &node.value {
+                Value::Number(n) => Ok(*n),
+                _ => Err("/ expects numbers".to_string()),
+            }
+        })
+        .collect::<Result<_, _>>()?;
 
     let first = nums.remove(0);
     let result = if nums.is_empty() {
@@ -77,16 +84,16 @@ pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     if args.len() < 2 {
         return Ok(bool_val(true));
     }
 
-    let first_ref = args[0].borrow();
+    let first_ref = args[0].read();
     let first_val = &first_ref.value;
 
     for other in &args[1..] {
-        let other_ref = other.borrow();
+        let other_ref = other.read();
         let other_val = &other_ref.value;
 
         if first_val.type_tag() != other_val.type_tag() {
@@ -102,11 +109,11 @@ pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     if args.len() != 1 {
         return Err("not expects one argument".into());
     }
-    let result = match &args[0].borrow().value {
+    let result = match &args[0].read().value {
         Value::Bool(b) => !*b,
         Value::Nil => true,
         _ => false,
@@ -115,19 +122,18 @@ pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_map(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     if args.len() != 2 {
         return Err("map expects 2 arguments".into());
     }
     let func = args[0].clone();
-    let list = match &args[1].borrow().value {
+    let list = match &args[1].read().value {
         Value::List(xs) => xs.clone(),
         _ => return Err("map expects a list as second argument".into()),
     };
     let mut results = Vec::new();
     for val in list {
-        if let Value::NativeFunc(f) = &func.borrow().value {
+        if let Value::NativeFunc(f) = &func.read().value {
             results.push(f(vec![val])?);
         } else {
             return Err("map only works on native functions for now".into());
@@ -142,13 +148,13 @@ pub fn native_reduce(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     }
     let func = args[0].clone();
     let initial = args[1].clone();
-    let list = match &args[2].borrow().value {
+    let list = match &args[2].read().value {
         Value::List(xs) => xs.clone(),
         _ => return Err("reduce expects a list as third argument".into()),
     };
     let mut acc = initial;
     for val in list {
-        if let Value::NativeFunc(f) = &func.borrow().value {
+        if let Value::NativeFunc(f) = &func.read().value {
             acc = f(vec![acc, val])?;
         } else {
             return Err("reduce only works on native functions for now".into());
@@ -162,23 +168,22 @@ pub fn native_list(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 }
 
 pub fn native_vector(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
     Ok(vector_val_at(args, pos))
 }
-
 
 pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     if args.len() % 2 != 0 {
         return Err("map expects an even number of arguments".into());
     }
 
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
 
     let mut map = HashMap::new();
     let mut it = args.into_iter();
 
     while let (Some(k), Some(v)) = (it.next(), it.next()) {
-        let key_str = match &k.borrow().value {
+        let key_str = match &k.read().value {
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
             Value::Keyword(k) => format!(":{}", k),
@@ -192,13 +197,11 @@ pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String>
 
 pub fn native_print(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     for val in args {
-        print!("{} ", format!("{:?}", val.borrow()));
+        print!("{} ", format!("{:?}", val.read()));
     }
     println!();
     Ok(nil())
 }
-
-
 
 pub fn native_type_of(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     if args.len() != 1 {
@@ -206,8 +209,8 @@ pub fn native_type_of(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     }
 
     let arg = &args[0];
-    let type_name = arg.borrow().value.type_tag();
-    let pos = arg.borrow().pos.clone();
+    let type_name = arg.read().value.type_tag();
+    let pos = arg.read().pos.clone();
 
     Ok(str_val_at(type_name, pos))
 }
@@ -217,7 +220,7 @@ pub fn native_cons(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         return Err("cons expects 2 arguments".into());
     }
     let mut new_list = vec![args[0].clone()];
-    match &args[1].borrow().value {
+    match &args[1].read().value {
         Value::List(rest) => new_list.extend(rest.clone()),
         _ => return Err("second argument to cons must be a list".into()),
     }
@@ -229,7 +232,7 @@ pub fn native_car(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         return Err("car expects 1 argument".into());
     }
 
-    let arg_ref = args[0].borrow();
+    let arg_ref = args[0].read();
     match &arg_ref.value {
         Value::List(xs) => xs.get(0).cloned().ok_or_else(|| "car on empty list".into()),
         _ => Err("car expects a list".into()),
@@ -241,7 +244,7 @@ pub fn native_cdr(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         return Err("cdr expects 1 argument".into());
     }
 
-    let arg_ref = args[0].borrow();
+    let arg_ref = args[0].read();
     match &arg_ref.value {
         Value::List(xs) => Ok(list_val(xs.iter().skip(1).cloned().collect())),
         _ => Err("cdr expects a list".into()),
@@ -253,19 +256,16 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         return Err("get expects 2 or 3 arguments".into());
     }
 
-
     let target_val = &args[0];
     let key_val = &args[1];
     let fallback_val = args.get(2).cloned();
 
-
-    let key_pos = key_val.borrow().pos.clone(); // for potential error reporting
-    let target_ref = target_val.borrow();
+    let key_pos = key_val.read().pos.clone(); // for potential error reporting
+    let target_ref = target_val.read();
     let target = &target_ref.value;
 
-    let key_ref = key_val.borrow();
+    let key_ref = key_val.read();
     let key = &key_ref.value;
-
 
     match target {
         Value::Vector(vec) => {
@@ -279,9 +279,7 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
                     Err(format!(
                         "Index {} out of bounds{}",
                         idx,
-                        key_pos
-                            .map(|p| format!(" at {}", p))
-                            .unwrap_or_default()
+                        key_pos.map(|p| format!(" at {}", p)).unwrap_or_default()
                     ))
                 }
             } else {
@@ -305,9 +303,7 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
                 Err(format!(
                     "Key '{}' not found in map{}",
                     kstr,
-                    key_pos
-                        .map(|p| format!(" at {}", p))
-                        .unwrap_or_default()
+                    key_pos.map(|p| format!(" at {}", p)).unwrap_or_default()
                 ))
             }
         }
@@ -316,18 +312,16 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     }
 }
 
-
-
 use crate::value::LispNode;
 
-pub fn register_builtins(env: &Rc<RefCell<Env>>) {
-    let mut e = env.borrow_mut();
+pub fn register_builtins(env: &Arc<RwLock<Env>>) {
+    let mut e = env.write();
 
     macro_rules! reg {
         ($name:expr, $func:expr) => {
             e.set(
                 $name,
-                BlinkValue(Rc::new(RefCell::new(LispNode {
+                BlinkValue(Arc::new(RwLock::new(LispNode {
                     value: Value::NativeFunc($func),
                     pos: None,
                 }))),
@@ -355,4 +349,3 @@ pub fn register_builtins(env: &Rc<RefCell<Env>>) {
     reg!("rest", native_cdr);
     reg!("get", native_get);
 }
-

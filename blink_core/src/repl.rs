@@ -3,10 +3,10 @@ use crate::error::LispError;
 
 use crate::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
 use crate::value::BlinkValue;
+use parking_lot::RwLock;
 use rustyline::history::FileHistory;
 use rustyline::{CompletionType, Config, EditMode, Editor};
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::eval::{eval, EvalContext};
 
@@ -22,22 +22,26 @@ pub fn start_repl() {
     let mut rl = Editor::<(), FileHistory>::with_config(config).expect("failed to start editor");
     rl.load_history("history.txt").ok();
 
-    let global_env = Rc::new(RefCell::new(Env::new()));
-    crate::native_functions::register_builtins(&global_env);
-    let mut ctx = EvalContext::new(&mut global_env.borrow_mut());
+    let global_env = Arc::new(RwLock::new(Env::new()));
+
+    {
+        crate::native_functions::register_builtins(&global_env);
+    }
+
+    let mut ctx = EvalContext::new(global_env.clone());
     preload_builtin_reader_macros(&mut ctx);
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
     loop {
         // 🌟 Clone the reader macros once for this REPL iteration
-        let reader_macros = ctx.reader_macros.borrow().reader_macros.clone();
+        let reader_macros = ctx.reader_macros.read().reader_macros.clone();
         let mut temp_reader_ctx = crate::parser::ReaderContext { reader_macros };
 
         match read_multiline(&mut rl, &mut temp_reader_ctx) {
             Ok(line) if line.trim() == "exit" => break,
             Ok(code) => match run_line(&code, &mut ctx, &mut temp_reader_ctx) {
-                Ok(val) => println!("=> {}", val.borrow().value),
+                Ok(val) => println!("=> {}", val.read().value),
                 Err(e) => {
                     println!("⚠️  Error: {e}");
                     if DEBUG_POS {

@@ -9,7 +9,7 @@ use blink_core::eval::{eval, EvalContext};
 use blink_core::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
 use blink_core::telemetry::BlinkMessage;
 
-use anyhow::Result;
+use anyhow::Result;-
 use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use tokio::task::LocalSet;
@@ -97,7 +97,10 @@ pub async fn start_socket_server() -> Result<()> {
                             };
 
                             let mut buf = Vec::new();
-                            if response.serialize(&mut Serializer::new(&mut buf)).is_ok() {
+                            if response
+                                .serialize(&mut Serializer::new(&mut buf).with_struct_map())
+                                .is_ok()
+                            {
                                 let len = (buf.len() as u32).to_be_bytes();
                                 if socket.write_all(&len).await.is_err() {
                                     break;

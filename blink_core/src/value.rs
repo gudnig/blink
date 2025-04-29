@@ -1,9 +1,8 @@
-use std::ops::Deref;
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use crate::env::Env;
-
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct LispNode {
@@ -24,10 +23,10 @@ impl fmt::Display for LispNode {
 }
 
 #[derive(Clone, Debug)]
-pub struct BlinkValue(pub Rc<RefCell<LispNode>>);
+pub struct BlinkValue(pub Arc<RwLock<LispNode>>);
 
 impl Deref for BlinkValue {
-    type Target = Rc<RefCell<LispNode>>;
+    type Target = Arc<RwLock<LispNode>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -37,15 +36,15 @@ impl Deref for BlinkValue {
 #[allow(dead_code)]
 impl BlinkValue {
     pub fn is_nil(&self) -> bool {
-        matches!(self.borrow().value, Value::Nil)
+        matches!(self.read().value, Value::Nil)
     }
 
     pub fn type_tag(&self) -> &'static str {
-        self.borrow().value.type_tag()
+        self.read().value.type_tag()
     }
 
     pub fn as_str(&self) -> Option<String> {
-        if let Value::Str(s) = &self.borrow().value {
+        if let Value::Str(s) = &self.read().value {
             Some(s.clone())
         } else {
             None
@@ -53,10 +52,9 @@ impl BlinkValue {
     }
 
     pub fn to_string_repr(&self) -> String {
-        format!("{:?}", self.borrow().value)
+        format!("{:?}", self.read().value)
     }
 }
-
 
 #[derive(Clone)]
 pub enum Value {
@@ -72,7 +70,7 @@ pub enum Value {
     FuncUserDefined {
         params: Vec<String>,
         body: Vec<BlinkValue>,
-        env: Rc<RefCell<Env>>,  // closure capture
+        env: Arc<RwLock<Env>>, // closure capture
     },
 
     Nil,
@@ -95,8 +93,8 @@ impl Value {
     }
 }
 
-use std::fmt;
 use crate::error::SourcePos;
+use std::fmt;
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -130,7 +128,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, " ")?;
                     }
-                    write!(f, "{}", val.borrow())?;
+                    write!(f, "{}", val.read())?;
                 }
                 write!(f, ")")
             }
@@ -140,7 +138,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, " ")?;
                     }
-                    write!(f, "{}", val.borrow())?;
+                    write!(f, "{}", val.read())?;
                 }
                 write!(f, "]")
             }
@@ -150,7 +148,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, " ")?;
                     }
-                    write!(f, "{} {}", k, v.borrow())?;
+                    write!(f, "{} {}", k, v.read())?;
                 }
                 write!(f, "}}")
             }
@@ -163,69 +161,69 @@ impl fmt::Display for Value {
 
 impl fmt::Display for BlinkValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.borrow().value)
+        write!(f, "{}", self.read().value)
     }
 }
 
 // --- Value with position ---
 pub fn num_at(n: f64, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Number(n),
         pos,
     })))
 }
 
 pub fn bool_val_at(b: bool, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Bool(b),
         pos,
     })))
 }
 
 pub fn str_val_at(s: &str, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Str(s.to_string()),
         pos,
     })))
 }
 
 pub fn sym_at(s: &str, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Symbol(s.to_string()),
         pos,
     })))
 }
 
 pub fn keyword_at(k: &str, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Keyword(k.to_string()),
         pos,
     })))
 }
 
 pub fn list_val_at(xs: Vec<BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::List(xs),
         pos,
     })))
 }
 
 pub fn vector_val_at(xs: Vec<BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Vector(xs),
         pos,
     })))
 }
 
 pub fn map_val_at(m: HashMap<String, BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Map(m),
         pos,
     })))
 }
 
 pub fn nil_at(pos: Option<SourcePos>) -> BlinkValue {
-    BlinkValue(Rc::new(RefCell::new(LispNode {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Nil,
         pos,
     })))
@@ -288,7 +286,7 @@ impl From<bool> for BlinkValue {
 
 impl From<Value> for BlinkValue {
     fn from(val: Value) -> Self {
-        BlinkValue(Rc::new(RefCell::new(LispNode {
+        BlinkValue(Arc::new(RwLock::new(LispNode {
             value: val,
             pos: None,
         })))

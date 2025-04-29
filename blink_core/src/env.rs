@@ -1,15 +1,13 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use crate::value::BlinkValue;
-
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Env {
     vars: HashMap<String, BlinkValue>,
-    parent: Option<Rc<RefCell<Env>>>,
+    parent: Option<Arc<RwLock<Env>>>,
 }
-
 
 impl Env {
     pub fn new() -> Self {
@@ -19,7 +17,7 @@ impl Env {
         }
     }
 
-    pub fn with_parent(parent: Rc<RefCell<Env>>) -> Self {
+    pub fn with_parent(parent: Arc<RwLock<Env>>) -> Self {
         Env {
             vars: HashMap::new(),
             parent: Some(parent),
@@ -33,8 +31,7 @@ impl Env {
     pub fn get(&self, key: &str) -> Option<BlinkValue> {
         match self.vars.get(key) {
             Some(val) => Some(val.clone()),
-            None => self.parent.as_ref()?.borrow().get(key),
+            None => self.parent.as_ref()?.read().get(key),
         }
     }
 }
-

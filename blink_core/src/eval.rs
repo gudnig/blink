@@ -1,53 +1,50 @@
-use libloading::Library;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::time::Instant;
-
 use crate::env::Env;
 use crate::error::{LispError, SourcePos};
 use crate::parser::ReaderContext;
 use crate::telemetry::TelemetryEvent;
 use crate::value::{bool_val, nil, BlinkValue, LispNode, Value};
+use libloading::Library;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub struct EvalContext {
-    pub env: Rc<RefCell<Env>>,
+    pub env: Arc<RwLock<Env>>,
     pub current_module: Option<String>,
-    pub plugins: HashMap<String, Rc<Library>>,
-    pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent)>>,
+    pub plugins: HashMap<String, Arc<Library>>,
+    pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub tracing_enabled: bool,
-    pub reader_macros: Rc<RefCell<ReaderContext>>,
+    pub reader_macros: Arc<RwLock<ReaderContext>>,
 }
 
 impl EvalContext {
-    pub fn new(p0: &mut Env) -> Self {
+    pub fn new(parent: Arc<RwLock<Env>>) -> Self {
         EvalContext {
-            env: Rc::new(RefCell::new(Env::with_parent(Rc::new(RefCell::new(
-                p0.clone(),
-            ))))),
+            env: Arc::new(RwLock::new(Env::with_parent(parent))),
             current_module: None,
             plugins: HashMap::new(),
             telemetry_sink: None,
-            tracing_enabled: true,
-            reader_macros: Rc::new(RefCell::new(ReaderContext::new())),
+            tracing_enabled: false,
+            reader_macros: Arc::new(RwLock::new(ReaderContext::new())),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<BlinkValue> {
-        self.env.borrow().get(key)
+        self.env.read().get(key)
     }
 
     pub fn set(&self, key: &str, val: BlinkValue) {
-        self.env.borrow_mut().set(key, val)
+        self.env.write().set(key, val)
     }
 }
 
 fn get_pos(expr: &BlinkValue) -> Option<SourcePos> {
-    expr.borrow().pos.clone()
+    expr.read().pos.clone()
 }
 
 pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
-    match &expr.borrow().value {
+    match &expr.read().value {
         Value::Number(_) | Value::Bool(_) | Value::Str(_) | Value::Keyword(_) | Value::Nil => {
             Ok(expr.clone())
         }
@@ -58,7 +55,7 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispE
         Value::List(list) if list.is_empty() => Ok(nil()),
         Value::List(list) => {
             let head = &list[0];
-            let head_val = &head.borrow().value;
+            let head_val = &head.read().value;
             match head_val {
                 Value::Symbol(s) => match s.as_str() {
                     "quote" => eval_quote(list),
@@ -110,11 +107,11 @@ pub fn trace_eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue,
         if let Ok(val) = &res {
             if let Some(sink) = &ctx.telemetry_sink {
                 sink(TelemetryEvent {
-                    form: format!("{:?}", expr.borrow().value),
+                    form: format!("{:?}", expr.read().value),
                     duration_us: start.elapsed().as_micros(),
-                    result_type: val.borrow().value.type_tag().to_string(),
+                    result_type: val.read().value.type_tag().to_string(),
                     result_size: None,
-                    source: expr.borrow().pos.clone(),
+                    source: expr.read().pos.clone(),
                 });
             }
         }
@@ -146,7 +143,7 @@ pub fn eval_func(
     args: Vec<BlinkValue>,
     ctx: &mut EvalContext,
 ) -> Result<BlinkValue, LispError> {
-    match &func.borrow().value {
+    match &func.read().value {
         Value::NativeFunc(f) => f(args).map_err(|e| LispError::EvalError {
             message: e,
             pos: None,
@@ -160,9 +157,10 @@ pub fn eval_func(
                     pos: None,
                 });
             }
-            let local_env = Rc::new(RefCell::new(Env::with_parent(env.clone())));
+            let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
+            let mut env = local_env.write();
             for (param, val) in params.iter().zip(args) {
-                local_env.borrow_mut().set(param, val);
+                env.set(param, val);
             }
             let mut result = nil();
             for form in body {
@@ -185,7 +183,7 @@ fn eval_if(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Lis
         });
     }
     let condition = trace_eval(args[0].clone(), ctx)?;
-    let is_truthy = !matches!(condition.borrow().value, Value::Bool(false) | Value::Nil);
+    let is_truthy = !matches!(condition.read().value, Value::Bool(false) | Value::Nil);
     if is_truthy {
         trace_eval(args[1].clone(), ctx)
     } else if args.len() > 2 {
@@ -202,7 +200,7 @@ fn eval_def(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             pos: None,
         });
     }
-    let name = match &args[0].borrow().value {
+    let name = match &args[0].read().value {
         Value::Symbol(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -223,11 +221,11 @@ fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Lis
             pos: None,
         });
     }
-    let params = match &args[0].borrow().value {
+    let params = match &args[0].read().value {
         Value::Vector(vs) => vs
             .iter()
             .filter_map(|v| {
-                if let Value::Symbol(s) = &v.borrow().value {
+                if let Value::Symbol(s) = &v.read().value {
                     Some(s.clone())
                 } else {
                     None
@@ -235,12 +233,12 @@ fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Lis
             })
             .collect(),
         Value::List(xs) if !xs.is_empty() => {
-            if let Value::Symbol(head) = &xs[0].borrow().value {
+            if let Value::Symbol(head) = &xs[0].read().value {
                 if head == "vector" {
                     xs.iter()
                         .skip(1)
                         .filter_map(|v| {
-                            if let Value::Symbol(s) = &v.borrow().value {
+                            if let Value::Symbol(s) = &v.read().value {
                                 Some(s.clone())
                             } else {
                                 None
@@ -268,11 +266,11 @@ fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Lis
         }
     };
 
-    Ok(BlinkValue(Rc::new(RefCell::new(LispNode {
+    Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::FuncUserDefined {
             params,
             body: args[1..].to_vec(),
-            env: Rc::clone(&ctx.env),
+            env: Arc::clone(&ctx.env),
         },
         pos: None,
     }))))
@@ -292,7 +290,7 @@ fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             pos: None,
         });
     }
-    let bindings_borrow = &args[0].borrow().value;
+    let bindings_borrow = &args[0].read().value;
     let bindings = match bindings_borrow {
         Value::Vector(vs) => vs,
         _ => {
@@ -308,9 +306,9 @@ fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             pos: None,
         });
     }
-    let local_env = Rc::new(RefCell::new(Env::with_parent(ctx.env.clone())));
+    let local_env = Arc::new(RwLock::new(Env::with_parent(ctx.env.clone())));
     for pair in bindings.chunks(2) {
-        let key = match &pair[0].borrow().value {
+        let key = match &pair[0].read().value {
             Value::Symbol(s) => s.clone(),
             _ => {
                 return Err(LispError::EvalError {
@@ -320,7 +318,7 @@ fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             }
         };
         let val = trace_eval(pair[1].clone(), ctx)?;
-        local_env.borrow_mut().set(&key, val);
+        local_env.write().set(&key, val);
     }
     let mut result = nil();
     for form in &args[1..] {
@@ -333,7 +331,7 @@ fn eval_and(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
     let mut last = bool_val(true);
     for arg in args {
         last = trace_eval(arg.clone(), ctx)?;
-        if matches!(last.borrow().value, Value::Bool(false) | Value::Nil) {
+        if matches!(last.read().value, Value::Bool(false) | Value::Nil) {
             break;
         }
     }
@@ -343,7 +341,7 @@ fn eval_and(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
 fn eval_or(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
     for arg in args {
         let val = trace_eval(arg.clone(), ctx)?;
-        if !matches!(val.borrow().value, Value::Bool(false) | Value::Nil) {
+        if !matches!(val.read().value, Value::Bool(false) | Value::Nil) {
             return Ok(val);
         }
     }
@@ -370,7 +368,7 @@ fn eval_apply(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, 
     }
     let func = trace_eval(args[0].clone(), ctx)?;
     let evaluated_list = trace_eval(args[1].clone(), ctx)?;
-    let list_items = match &evaluated_list.borrow().value {
+    let list_items = match &evaluated_list.read().value {
         Value::List(xs) => xs.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -394,7 +392,7 @@ fn eval_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue,
         });
     }
 
-    let path = match &args[0].borrow().value {
+    let path = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -432,7 +430,7 @@ fn eval_native_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Blin
         });
     }
 
-    let libname = match &args[0].borrow().value {
+    let libname = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -457,8 +455,8 @@ fn eval_native_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Blin
             })?
     };
 
-    unsafe { register(&mut *ctx.env.borrow_mut()) };
-    ctx.plugins.insert(libname, Rc::new(lib));
+    unsafe { register(&mut *ctx.env.write()) };
+    ctx.plugins.insert(libname, Arc::new(lib));
 
     Ok(nil())
 }
@@ -471,7 +469,7 @@ fn eval_compile_plugin(
     use std::path::Path;
     use std::process::Command;
 
-    let pos = args.get(0).and_then(|v| v.borrow().pos.clone());
+    let pos = args.get(0).and_then(|v| v.read().pos.clone());
 
     if args.len() < 1 || args.len() > 2 {
         return Err(LispError::ArityMismatch {
@@ -482,7 +480,7 @@ fn eval_compile_plugin(
         });
     }
 
-    let plugin_name = match &args[0].borrow().value {
+    let plugin_name = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -497,15 +495,15 @@ fn eval_compile_plugin(
 
     if args.len() == 2 {
         let options_val = trace_eval(args[1].clone(), ctx)?;
-        let options_borrowed = options_val.borrow();
+        let options_borrowed = options_val.read();
         if let Value::Map(opt_map) = &options_borrowed.value {
             if let Some(path_val) = opt_map.get(":path").or_else(|| opt_map.get("path")) {
-                if let Value::Str(path) = &path_val.borrow().value {
+                if let Value::Str(path) = &path_val.read().value {
                     plugin_path = path.clone();
                 }
             }
             if let Some(import_val) = opt_map.get(":import").or_else(|| opt_map.get("import")) {
-                if matches!(&import_val.borrow().value, Value::Bool(true)) {
+                if matches!(&import_val.read().value, Value::Bool(true)) {
                     _auto_import = true;
                 }
             }
@@ -571,9 +569,9 @@ fn eval_compile_plugin(
             })?
     };
 
-    unsafe { register(&mut *ctx.env.borrow_mut()) };
+    unsafe { register(&mut *ctx.env.write()) };
 
-    ctx.plugins.insert(plugin_name, Rc::new(lib));
+    ctx.plugins.insert(plugin_name, Arc::new(lib));
 
     Ok(nil())
 }
@@ -591,7 +589,7 @@ fn eval_def_reader_macro(
         });
     }
 
-    let char_val = match &args[0].borrow().value {
+    let char_val = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
@@ -606,7 +604,7 @@ fn eval_def_reader_macro(
     let func = crate::eval::trace_eval(args[1].clone(), ctx)?;
 
     ctx.reader_macros
-        .borrow_mut()
+        .write()
         .reader_macros
         .insert(ch, func.clone());
     Ok(func)

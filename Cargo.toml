@@ -1,4 +1,10 @@
 [workspace]
-members = ["blink_core", "blink_repl", "blink_runtime", "blink_sclient", "blink_socket"]
+members = [
+    "blink_core",
+    "blink_repl",
+    "blink_runtime",
+    "blink_sclient",
+    "blink_socket",
+]
 
 resolver = "2"
