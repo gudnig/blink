@@ -1,13 +1,16 @@
 mod lsp;
+mod lsp_messages;
 mod repl_message;
 mod session;
 mod session_manager;
 
 use clap::Parser;
+use lsp::LspHandler;
+
 
 use crate::session_manager::SessionManager;
-use std::{io, sync::Arc};
-use tokio::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use tokio::{ io::{BufReader, BufWriter}, net::TcpListener};
 
 /// Blink Daemon options
 #[derive(Parser)]
@@ -21,50 +24,56 @@ struct Opts {
 async fn main() -> std::io::Result<()> {
     let opts = Opts::parse();
 
-    let addr = format!("127.0.0.1:{}", opts.port);
-
     let manager = Arc::new(SessionManager::new());
-    let listener = TcpListener::bind("127.0.0.1:7010").await?;
 
-    println!("Blink Daemon listening on 127.0.0.1:7010");
+    let repl_port = opts.port;
+    let lsp_port = opts.port + 1;
 
+    let repl_listener = TcpListener::bind(("127.0.0.1", repl_port)).await?;
+    let lsp_listener = TcpListener::bind(("127.0.0.1", lsp_port)).await?;
+
+    println!("Blink REPL listening on 127.0.0.1:{}", repl_port);
+    println!("Blink LSP listening on 127.0.0.1:{}", lsp_port);
+
+    // Spawn REPL server
+    tokio::spawn(async move {
+        loop {
+            match repl_listener.accept().await {
+                Ok((socket, addr)) => {
+                    println!("REPL client {} connected.", addr);
+                    
+                    
+                    
+                    // tokio::spawn(async move {
+                    //     handle_repl_connection(socket, manager).await;
+                    // });
+                }
+                Err(e) => eprintln!("REPL accept error: {:?}", e),
+            }
+        }
+    });
+
+    // Spawn LSP server
     loop {
-        let (socket, addr) = listener.accept().await?;
-        let manager = manager.clone();
-
-        tokio::spawn(async move {
-            handle_connection(socket, manager).await;
-        });
-    }
-}
-
-async fn handle_connection(socket: TcpStream, manager: Arc<SessionManager>) {
-    let mut socket = socket;
-
-    match detect_protocol(&mut socket).await {
-        Ok(msg_type) => match msg_type {
-            MsgType::Lsp => {}
-            MsgType::Blink => {}
-        },
-        Err(e) => {
-            eprintln!("Protocol detection failed: {:?}", e);
+        match lsp_listener.accept().await {
+            Ok((socket, addr)) => {
+                println!("LSP client {} connected.", addr);
+                let (reader, writer) = socket.into_split();
+                let reader = BufReader::new(reader);
+                let writer = BufWriter::new(writer);
+                
+                let mut handler = LspHandler::new(reader, writer);
+                let result = handler.init(manager.clone()).await;
+                if result.is_err() {
+                    eprintln!("Failed to initialize LSP handler: {:?}", result.err().unwrap());
+                    continue;
+                }
+                tokio::spawn(async move {
+                    handler.process().await;
+                });
+            }
+            Err(e) => eprintln!("LSP accept error: {:?}", e),
         }
     }
 }
 
-pub enum MsgType {
-    Lsp,
-    Blink,
-}
-
-async fn detect_protocol(socket: &mut TcpStream) -> io::Result<MsgType> {
-    let mut buf = [0; 4];
-    socket.peek(&mut buf).await?;
-
-    if buf.starts_with(b"{") || buf.starts_with(b"C") {
-        // `{` = JSON; `C` = Content-Length header
-        Ok(MsgType::Lsp)
-    } else {
-        Ok(MsgType::Blink)
-    }
-}

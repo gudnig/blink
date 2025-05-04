@@ -1,14 +1,15 @@
-pub use blink_core::{Env, BlinkValue, Value}; 
+use std::sync::Arc;
+
+pub use blink_core::{BlinkValue, Env, Value};
+use parking_lot::RwLock;
 pub fn register_fn(
     env: &mut Env,
     name: &str,
-    f: fn(Vec<BlinkValue>) -> Result<BlinkValue, String>
+    f: fn(Vec<BlinkValue>) -> Result<BlinkValue, String>,
 ) {
-    use std::rc::Rc;
-    use std::cell::RefCell;
     let node = blink_core::LispNode {
         value: Value::NativeFunc(f),
         pos: None,
     };
-    env.set(name, BlinkValue(Rc::new(RefCell::new(node))));
+    env.set(name, BlinkValue(Arc::new(RwLock::new(node))));
 }

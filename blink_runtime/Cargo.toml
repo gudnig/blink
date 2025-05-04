@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 blink_core = { path = "../blink_core" }
+parking_lot = "0.12"

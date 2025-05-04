@@ -133,6 +133,7 @@ name = "blink_runtime"
 version = "0.1.0"
 dependencies = [
  "blink_core",
+ "parking_lot",
 ]
 
 [[package]]
@@ -154,6 +155,7 @@ dependencies = [
  "blink_core",
  "clap",
  "futures",
+ "parking_lot",
  "rmp-serde",
  "serde",
  "serde_json",

@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct SourcePos {
     pub line: usize,
     pub col: usize,
@@ -42,7 +42,6 @@ pub enum LispError {
     },
 }
 
-
 impl fmt::Display for LispError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use LispError::*;
@@ -53,9 +52,22 @@ impl fmt::Display for LispError {
                 Some(p) => write!(f, "Eval error at {}: {}", p, message),
                 None => write!(f, "Eval error: {}", message),
             },
-            ArityMismatch { expected, got, form, pos } => match pos {
-                Some(p) => write!(f, "Arity mismatch in '{}' at {}: expected {}, got {}", form, p, expected, got),
-                None => write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got),
+            ArityMismatch {
+                expected,
+                got,
+                form,
+                pos,
+            } => match pos {
+                Some(p) => write!(
+                    f,
+                    "Arity mismatch in '{}' at {}: expected {}, got {}",
+                    form, p, expected, got
+                ),
+                None => write!(
+                    f,
+                    "Arity mismatch in '{}': expected {}, got {}",
+                    form, expected, got
+                ),
             },
             UndefinedSymbol { name, pos } => match pos {
                 Some(p) => write!(f, "Undefined symbol '{}' at {}", name, p),

@@ -8,6 +8,8 @@ pub enum ReplRequest {
     Eval { id: String, code: String },
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum ReplResponse {
     EvalResult {
         id: String,

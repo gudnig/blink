@@ -1,7 +1,7 @@
 use crate::error::SourcePos;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TelemetryEvent {
     pub form: String,
     pub duration_us: u128,

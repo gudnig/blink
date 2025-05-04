@@ -10,12 +10,6 @@ pub struct LispNode {
     pub pos: Option<SourcePos>,
 }
 
-impl LispNode {
-    pub fn new(value: Value, pos: Option<SourcePos>) -> Self {
-        Self { value, pos }
-    }
-}
-
 impl fmt::Display for LispNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.value)
@@ -62,7 +56,7 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Symbol(String),
-    Keyword(String),
+    Keyword(String),    
     List(Vec<BlinkValue>),
     Vector(Vec<BlinkValue>),
     Map(HashMap<String, BlinkValue>),
