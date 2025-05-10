@@ -22,7 +22,7 @@ pub fn native_add(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         .into_iter()
         .sum();
 
-    Ok(num_at(sum, pos))
+    Ok(num_at(sum, pos.map(|pos| pos.start)))
 }
 
 pub fn native_sub(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -45,7 +45,7 @@ pub fn native_sub(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         nums.into_iter().fold(first, |a, b| a - b)
     };
 
-    Ok(num_at(result, pos))
+    Ok(num_at(result, pos.map(|pos| pos.start)))
 }
 
 pub fn native_mul(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -58,7 +58,7 @@ pub fn native_mul(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
             _ => return Err("* expects numbers".into()),
         }
     }
-    Ok(num_at(product, pos))
+    Ok(num_at(product, pos.map(|pos| pos.start)))
 }
 
 pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -80,7 +80,7 @@ pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     } else {
         nums.into_iter().fold(first, |a, b| a / b)
     };
-    Ok(num_at(result, pos))
+    Ok(num_at(result, pos.map(|pos| pos.start)))
 }
 
 pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -105,7 +105,7 @@ pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         }
     }
 
-    Ok(bool_val_at(true, pos))
+    Ok(bool_val_at(true, pos.map(|pos| pos.start)))
 }
 
 pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -118,7 +118,7 @@ pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         Value::Nil => true,
         _ => false,
     };
-    Ok(bool_val_at(result, pos))
+    Ok(bool_val_at(result, pos.map(|pos| pos.start)))
 }
 
 pub fn native_map(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -139,7 +139,7 @@ pub fn native_map(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
             return Err("map only works on native functions for now".into());
         }
     }
-    Ok(list_val_at(results, pos))
+    Ok(list_val_at(results, pos.map(|pos| pos.start)))
 }
 
 pub fn native_reduce(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -169,7 +169,7 @@ pub fn native_list(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 
 pub fn native_vector(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     let pos = args.get(0).and_then(|v| v.read().pos.clone());
-    Ok(vector_val_at(args, pos))
+    Ok(vector_val_at(args, pos.map(|pos| pos.start)))
 }
 
 pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -192,7 +192,7 @@ pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String>
         map.insert(key_str, v);
     }
 
-    Ok(map_val_at(map, pos))
+    Ok(map_val_at(map, pos.map(|pos| pos.start)))
 }
 
 pub fn native_print(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -212,7 +212,7 @@ pub fn native_type_of(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     let type_name = arg.read().value.type_tag();
     let pos = arg.read().pos.clone();
 
-    Ok(str_val_at(type_name, pos))
+    Ok(str_val_at(type_name, pos.map(|pos| pos.start)))
 }
 
 pub fn native_cons(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
@@ -324,6 +324,7 @@ pub fn register_builtins(env: &Arc<RwLock<Env>>) {
                 BlinkValue(Arc::new(RwLock::new(LispNode {
                     value: Value::NativeFunc($func),
                     pos: None,
+                    
                 }))),
             );
         };

@@ -1,16 +1,23 @@
-use blink_core::telemetry::TelemetryEvent;
+use blink_core::{telemetry::TelemetryEvent, value::{SourcePos, SourceRange}};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReplRequest {
-    Init { session_id: Option<String> },
-    Eval { id: String, code: String },
+    Init { 
+        id: String,
+        session_id: Option<String> 
+    },
+    Close,
+    Eval { id: String, code: String, pos: Option<SourcePos> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "PascalCase")]
 pub enum ReplResponse {
+    Initialized {
+        id: String,
+    },
     EvalResult {
         id: String,
         value: String,

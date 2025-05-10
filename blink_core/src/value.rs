@@ -1,13 +1,39 @@
 use crate::env::Env;
 use parking_lot::RwLock;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
+pub struct SourcePos {
+    pub line: usize,
+    pub col: usize,
+}
+
+impl std::fmt::Display for SourcePos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "line {}, column {}", self.line, self.col)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
+pub struct SourceRange {
+    pub start: SourcePos,
+    pub end: SourcePos,
+}
+
+impl std::fmt::Display for SourceRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}..{}", self.start, self.end)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LispNode {
     pub value: Value,
-    pub pos: Option<SourcePos>,
+    pub pos: Option<SourceRange>,
 }
 
 impl fmt::Display for LispNode {
@@ -87,7 +113,6 @@ impl Value {
     }
 }
 
-use crate::error::SourcePos;
 use std::fmt;
 
 impl fmt::Debug for Value {
@@ -160,63 +185,160 @@ impl fmt::Display for BlinkValue {
 }
 
 // --- Value with position ---
-pub fn num_at(n: f64, pos: Option<SourcePos>) -> BlinkValue {
+pub fn num_from_token(token: &str, start: SourcePos) -> BlinkValue {
+    let end = SourcePos {
+        line: start.line,
+        col: start.col + token.len(),
+    };
+    let value = token.parse::<f64>().unwrap(); // you should have validated before
+
     BlinkValue(Arc::new(RwLock::new(LispNode {
-        value: Value::Number(n),
-        pos,
+        value: Value::Number(value),
+        pos: Some(SourceRange { start, end }),
     })))
 }
 
-pub fn bool_val_at(b: bool, pos: Option<SourcePos>) -> BlinkValue {
+
+pub fn bool_val_at(b: bool, start: Option<SourcePos>) -> BlinkValue {
+    let pos = start.map(|start| {
+        let len = if b { 4 } else { 5 }; // "true" or "false"
+        let end = SourcePos {
+            line: start.line,
+            col: start.col + len,
+        };
+        SourceRange { start, end }
+    });
+
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Bool(b),
         pos,
     })))
 }
 
-pub fn str_val_at(s: &str, pos: Option<SourcePos>) -> BlinkValue {
+pub fn str_val_at(s: &str, start: Option<SourcePos>) -> BlinkValue {
+    let pos = start.map(|start| {
+        let end = SourcePos {
+            line: start.line,
+            col: start.col + s.len(),
+        };
+        SourceRange { start, end }
+    });
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Str(s.to_string()),
         pos,
     })))
 }
 
-pub fn sym_at(s: &str, pos: Option<SourcePos>) -> BlinkValue {
+pub fn sym_at(name: &str, start: Option<SourcePos>) -> BlinkValue {
+    let pos = start.map(|start| {
+        let end = SourcePos {
+            line: start.line,
+            col: start.col + name.len(), // or whatever length you need
+        };
+        SourceRange {
+            start,
+            end,
+        }
+    });
+
     BlinkValue(Arc::new(RwLock::new(LispNode {
-        value: Value::Symbol(s.to_string()),
+        value: Value::Symbol(name.to_string()),
         pos,
     })))
 }
 
-pub fn keyword_at(k: &str, pos: Option<SourcePos>) -> BlinkValue {
+
+pub fn keyword_at(k: &str, start: Option<SourcePos>) -> BlinkValue {
+    let pos = start.map(|start| {
+        let end = SourcePos {
+            line: start.line,
+            col: start.col + k.len() + 1,
+        };
+        SourceRange { start, end }
+    });
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Keyword(k.to_string()),
         pos,
     })))
 }
 
-pub fn list_val_at(xs: Vec<BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
+pub fn list_val_at(xs: Vec<BlinkValue>, start: Option<SourcePos>) -> BlinkValue {
+    let end = xs
+        .last()
+        .and_then(|v| v.read().pos.as_ref().map(|r| r.end.clone()))
+        .map(|mut pos| {
+            pos.col += 1; // include closing paren
+            pos
+        });
+
+    let range = match (start, end) {
+        (Some(start), Some(end)) => Some(SourceRange { start, end }),
+        _ => None,
+    };
+
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::List(xs),
-        pos,
+        pos: range,
     })))
 }
 
+
+
+
 pub fn vector_val_at(xs: Vec<BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
+    let pos = pos.map(|pos| {
+        let end = SourcePos {
+            line: pos.line,
+            col: pos.col + xs.len(),
+        };
+        SourceRange { start: pos, end }
+    });
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Vector(xs),
         pos,
     })))
 }
+pub fn num_at(n: f64, start: Option<SourcePos>) -> BlinkValue {
+    let end = start.as_ref().map(|s| SourcePos {
+        line: s.line,
+        col: s.col + n.to_string().len(), // crude width estimation
+    });
+
+    let range = match (start, end) {
+        (Some(start), Some(end)) => Some(SourceRange { start, end }),
+        _ => None,
+    };
+
+    BlinkValue(Arc::new(RwLock::new(LispNode {
+        value: Value::Number(n),
+        pos: range,
+    })))
+}
+
+
 
 pub fn map_val_at(m: HashMap<String, BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
+    let pos = pos.map(|pos| {
+        let end = SourcePos {
+            line: pos.line,
+            col: pos.col + m.len(),
+        };
+        SourceRange { start: pos, end }
+    });
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Map(m),
         pos,
     })))
 }
 
-pub fn nil_at(pos: Option<SourcePos>) -> BlinkValue {
+pub fn nil_at(start: Option<SourcePos>) -> BlinkValue {
+    let pos = start.map(|start| {
+        let end = SourcePos {
+            line: start.line,
+            col: start.col + 3,
+        };
+        SourceRange { start, end }
+    });
     BlinkValue(Arc::new(RwLock::new(LispNode {
         value: Value::Nil,
         pos,

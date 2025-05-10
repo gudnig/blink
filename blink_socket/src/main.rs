@@ -1,11 +1,13 @@
 mod lsp;
 mod lsp_messages;
 mod repl_message;
+mod repl;   
 mod session;
 mod session_manager;
 
 use clap::Parser;
 use lsp::LspHandler;
+use repl::ReplHandler;
 
 
 use crate::session_manager::SessionManager;
@@ -25,6 +27,7 @@ async fn main() -> std::io::Result<()> {
     let opts = Opts::parse();
 
     let manager = Arc::new(SessionManager::new());
+    let repl_manager = manager.clone();
 
     let repl_port = opts.port;
     let lsp_port = opts.port + 1;
@@ -41,12 +44,23 @@ async fn main() -> std::io::Result<()> {
             match repl_listener.accept().await {
                 Ok((socket, addr)) => {
                     println!("REPL client {} connected.", addr);
+                    let (reader, writer) = socket.into_split();
+                    let reader = BufReader::new(reader);
+                    let writer = BufWriter::new(writer);
                     
+                    let mut handler = ReplHandler::new(reader, writer);
+                    let result = handler.init(repl_manager.clone()).await;
+                    if result.is_err() {
+                        eprintln!("Failed to initialize REPL handler: {:?}", result.err().unwrap());
+                        continue;
+                    }
                     
-                    
-                    // tokio::spawn(async move {
-                    //     handle_repl_connection(socket, manager).await;
-                    // });
+                    tokio::spawn(async move {
+                        let result =    handler.process().await;
+                        if result.is_err() {
+                            eprintln!("REPL handler process error: {:?}", result.err().unwrap());
+                        }
+                    });
                 }
                 Err(e) => eprintln!("REPL accept error: {:?}", e),
             }
@@ -69,7 +83,10 @@ async fn main() -> std::io::Result<()> {
                     continue;
                 }
                 tokio::spawn(async move {
-                    handler.process().await;
+                    let result = handler.process().await;
+                    if result.is_err() {
+                        eprintln!("LSP handler process error: {:?}", result.err().unwrap());
+                    }
                 });
             }
             Err(e) => eprintln!("LSP accept error: {:?}", e),

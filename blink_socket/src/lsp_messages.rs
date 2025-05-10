@@ -1,3 +1,4 @@
+use blink_core::value::{SourcePos, SourceRange};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -121,7 +122,7 @@ pub fn create_server_capabilities() -> ServerCapabilities {
 }
 
 // LSP structures needed for message handling
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone,Debug, serde::Serialize, serde::Deserialize)]
 pub struct TextDocumentIdentifier {
     pub uri: String,
 }
@@ -182,7 +183,36 @@ pub struct Position {
     pub character: u32,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+impl From<SourcePos> for Position {
+    fn from(pos: SourcePos) -> Self {
+        Position {
+            line: (pos.line - 1) as u32,
+            character: (pos.col - 1) as u32,
+        }
+    }
+}
+
+
+impl From<SourceRange> for Range {
+    fn  from(range: SourceRange) -> Self {
+        Range { start: range.start.into(), end: range.end.into() }
+    }
+}
+
+impl From<Position> for SourcePos {
+    fn from(pos: Position) -> Self {
+        SourcePos { line: pos.line as usize, col: pos.character as usize }
+    }
+}
+
+impl From<Range> for SourceRange {
+    fn from(range: Range) -> Self {
+        SourceRange { start: range.start.into(), end: range.end.into() }
+    }
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionParams {
     pub text_document: TextDocumentIdentifier,
@@ -212,6 +242,22 @@ pub struct CompletionItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insert_text: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GotoDefinitionParams {
+    #[serde(flatten)]
+    pub text_document_position_params: TextDocumentPositionParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentPositionParams {
+    pub text_document: TextDocumentIdentifier,
+    pub position: Position,
+}
+
+
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

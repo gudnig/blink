@@ -1,46 +1,38 @@
 use std::fmt;
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct SourcePos {
-    pub line: usize,
-    pub col: usize,
-}
+use crate::value::{SourcePos, SourceRange};
 
-impl std::fmt::Display for SourcePos {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "line {}, column {}", self.line, self.col)
+
+
+    #[derive(Debug)]
+    pub enum LispError {
+        TokenizerError {
+            message: String,
+            pos: SourcePos,
+        },
+        ParseError {
+            message: String,
+            pos: SourceRange,
+        },
+        EvalError {
+            message: String,
+            pos: Option<SourceRange>, // optional if eval doesn’t know pos
+        },
+        ArityMismatch {
+            expected: usize,
+            got: usize,
+            form: String,
+            pos: Option<SourceRange>,
+        },
+        UndefinedSymbol {
+            name: String,
+            pos: Option<SourceRange>,
+        },
+        UnexpectedToken {
+            token: String,
+            pos: SourcePos,
+        },
     }
-}
-
-#[derive(Debug)]
-pub enum LispError {
-    TokenizerError {
-        message: String,
-        pos: SourcePos,
-    },
-    ParseError {
-        message: String,
-        pos: SourcePos,
-    },
-    EvalError {
-        message: String,
-        pos: Option<SourcePos>, // optional if eval doesn’t know pos
-    },
-    ArityMismatch {
-        expected: usize,
-        got: usize,
-        form: String,
-        pos: Option<SourcePos>,
-    },
-    UndefinedSymbol {
-        name: String,
-        pos: Option<SourcePos>,
-    },
-    UnexpectedToken {
-        token: String,
-        pos: SourcePos,
-    },
-}
 
 impl fmt::Display for LispError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

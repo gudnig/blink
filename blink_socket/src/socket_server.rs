@@ -9,7 +9,7 @@ use blink_core::eval::{eval, EvalContext};
 use blink_core::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
 use blink_core::telemetry::BlinkMessage;
 
-use anyhow::Result;-
+use anyhow::Result;
 use rmp_serde::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
 use tokio::task::LocalSet;

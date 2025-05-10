@@ -8,7 +8,8 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<Session>>>,
-    saved_repl_sessions: RwLock<HashMap<String, Arc<EvalContext>>>,
+    saved_repl_sessions: RwLock<HashMap<String, Arc<RwLock<Option<Box<EvalContext>>>>>>
+
 }
 
 impl SessionManager {
@@ -44,16 +45,18 @@ impl SessionManager {
     }
     pub async fn persist(&self, id: &str) -> Result<(), String> {
         let session = self.get(id).await.ok_or("Session not found.")?;
-        let ctx_opt = session.eval_ctx.read();
+        
 
-        let ctx = ctx_opt.as_ref().ok_or("Eval context not found.")?;
+        let ctx = session.eval_ctx.clone();
         let mut saved = self.saved_repl_sessions.write();
 
-        saved.insert(id.into(), ctx.clone());
+        
+        saved.insert(id.into(), ctx);
+
         Ok(())
     }
 
-    pub async fn get_persisted(&self, id: &str) -> Option<Arc<EvalContext>> {
+    pub async fn get_persisted(&self, id: &str) -> Option<Arc<RwLock<Option<Box<EvalContext>>>>> {
         let saved = self.saved_repl_sessions.read();
         saved.get(id).cloned()
     }

@@ -1,9 +1,9 @@
 use parking_lot::RwLock;
 
 use crate::env::Env;
-use crate::error::{LispError, SourcePos};
+use crate::error::LispError;
 use crate::eval::EvalContext;
-use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, BlinkValue};
+use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, BlinkValue, SourcePos, SourceRange};
 use crate::value::{LispNode, Value};
 
 use std::collections::HashMap;
@@ -112,6 +112,7 @@ pub fn tokenize_at(
         match c {
             '(' | ')' | '[' | ']' | '{' | '}' => {
                 if !current.is_empty() {
+                    
                     tokens.push((current.clone(), SourcePos { line, col }));
                     current.clear();
                 }
@@ -150,7 +151,7 @@ pub fn tokenize_at(
 }
 
 pub fn atom(token: &str, pos: Option<SourcePos>) -> BlinkValue {
-    println!("Parsing atom: {}", token);
+    
 
     if token.starts_with('"') && token.ends_with('"') {
         str_val(&token[1..token.len() - 1])
@@ -178,37 +179,58 @@ pub fn parse(
         });
     }
 
-    let (token, pos) = tokens.remove(0);
+    let (token, start) = tokens.remove(0);
 
     match token.as_str() {
         "(" => {
             let mut list = Vec::new();
-            while let Some((tok, _)) = tokens.first() {
+            
+            let mut end = start.clone();
+
+            while let Some((tok, next_pos)) = tokens.first() {
                 if tok == ")" {
+                    end = next_pos.clone(); // position of ')'
                     tokens.remove(0); // consume ')'
-                    return Ok(list_val(list));
+                    break;
                 }
-                list.push(parse(tokens, rcx)?); // <-- FIX
+                let item = parse(tokens, rcx)?;
+                if let Some(item_end) = item.read().pos.as_ref().map(|r| r.end.clone()) {
+                    end = item_end;
+                }
+                list.push(item);
             }
-            Err(LispError::ParseError {
-                message: "Unclosed list, missing ')'".into(),
-                pos,
-            })
+
+            let range = SourceRange { start, end };
+            Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
+                value: Value::List(list),
+                pos: Some(range),
+            }))))
         }
+
 
         "[" => {
             let mut elements = Vec::new();
-            while let Some((t, _)) = tokens.first() {
+            
+            let mut end = start.clone();
+            while let Some((t, next_pos)) = tokens.first() {
                 if t == "]" {
+                    end = next_pos.clone(); // position of ']'
                     tokens.remove(0); // consume ]
+
                     return Ok(list_val(
                         std::iter::once(sym("vector"))
                             .chain(elements.into_iter())
                             .collect(),
                     ));
                 }
-                elements.push(parse(tokens, rcx)?); // <-- FIX
+                let item = parse(tokens, rcx)?;
+                if let Some(item_end) = item.read().pos.as_ref().map(|r| r.end.clone()) {
+                    end = item_end;
+                }
+                elements.push(item); 
             }
+            let pos = SourceRange { start: start.clone(), end };
+
             Err(LispError::ParseError {
                 message: "Unclosed vector literal".into(),
                 pos,
@@ -217,8 +239,10 @@ pub fn parse(
 
         "{" => {
             let mut entries = Vec::new();
-            while let Some((t, _)) = tokens.first() {
+            let mut end = start.clone();
+            while let Some((t, next_pos)) = tokens.first() {
                 if t == "}" {
+                    end = next_pos.clone(); // position of '}'
                     tokens.remove(0); // consume }
                     return Ok(list_val(
                         std::iter::once(sym("hash-map"))
@@ -229,18 +253,20 @@ pub fn parse(
                 entries.push(parse(tokens, rcx)?); // <-- FIX
                 entries.push(parse(tokens, rcx)?); // <-- FIX
             }
+            let pos = SourceRange { start: start.clone(), end };
             Err(LispError::ParseError {
                 message: "Unclosed map literal".into(),
                 pos,
             })
         }
 
-        ")" | "]" | "}" => Err(LispError::UnexpectedToken { token, pos }),
+        
+
+        ")" | "]" | "}" => Err(LispError::UnexpectedToken { token, pos: start }),
 
         _ => {
-            // Check for reader macros by full prefix matching
             let mut matched_macro: Option<(String, BlinkValue)> = None;
-
+        
             for (prefix, macro_fn) in rcx.reader_macros.iter() {
                 if token.starts_with(prefix) {
                     if let Some((best_prefix, _)) = &matched_macro {
@@ -252,30 +278,41 @@ pub fn parse(
                     }
                 }
             }
-
+        
             if let Some((prefix, macro_fn)) = matched_macro {
                 let rest = &token[prefix.len()..];
-
-                // Special case: if rest is empty, must parse next token
+            
                 let target_form = if rest.is_empty() {
                     if tokens.is_empty() {
                         return Err(LispError::ParseError {
                             message: "Unexpected EOF after reader macro".into(),
-                            pos,
+                            pos: SourceRange {
+                                start: start.clone(),
+                                end: start.clone(),
+                            },
                         });
                     }
                     parse(tokens, rcx)?
                 } else {
-                    let mut rest_tokens = tokenize(&rest)?;
-                    println!("Rest tokens: {:?}", rest_tokens);
-
+                    let mut rest_tokens = tokenize(rest)?;
                     parse(&mut rest_tokens, rcx)?
                 };
-
-                return apply_reader_macro(macro_fn, target_form);
+            
+                let node = apply_reader_macro(macro_fn, target_form.clone())?;
+            
+                let target_range = target_form.read().pos.clone();
+                let end = target_range.map(|r| r.end).unwrap_or_else(|| start.clone());
+            
+                node.write().pos = Some(SourceRange {
+                    start: start.clone(),
+                    end,
+                });
+            
+                return Ok(node);
             }
-
-            Ok(atom(&token, Some(pos)))
+            
+        
+            Ok(atom(&token, Some(start)))
         }
     }
 }

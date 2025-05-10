@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    lsp_messages::{create_server_capabilities, CompletionItem, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, HoverParams, LspError, LspMessage, Position, Range},
-    session::{Session, SymbolInfo, SymbolKind, SymbolSource},
+    lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range},
+    session::{Document, Session, SymbolInfo, SymbolKind, SymbolSource},
     session_manager::SessionManager,
 };
 use anyhow::{anyhow, Context, Result};
-use blink_core::{parser::parse_all, BlinkValue};
+use blink_core::{error::LispError, parser::parse_all, value::SourcePos, BlinkValue};
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -198,7 +198,6 @@ where
                 _ => {
                     let messages = process_handler_result(result, message_id).await;
                     for message in messages {
-                        eprintln!("Sending LSP message: {:?}", &message);
                         self.write_message(&message).await?;
                     }
                 }
@@ -242,6 +241,15 @@ where
                         None => LspHandlerResult::Error("Missing params for documentSymbol request".into()),
                     }
                 },
+                "textDocument/definition" => {
+                    match message.params {
+                        Some(params) => match self.handle_definition(id, params).await {
+                            Ok(msg) => LspHandlerResult::Response(msg),
+                            Err(e) => LspHandlerResult::Error(e),
+                        },
+                        None => LspHandlerResult::Error("Missing params for definition request".into()),
+                    }
+                },
                 _ if method.starts_with("$/") => LspHandlerResult::NoResponse,
                 _ => LspHandlerResult::Error(format!("Request method not found: {}", method)),
             }
@@ -274,7 +282,9 @@ where
                         },
                         None => LspHandlerResult::Error("Missing params for didClose notification".into()),
                     }
-                }
+                },
+                
+
                 "initialized" => LspHandlerResult::NoResponse,
                 "exit" => LspHandlerResult::Exit,
                 _ if method.starts_with("$/") => LspHandlerResult::NoResponse,
@@ -282,6 +292,60 @@ where
             }
         }
     }
+
+    async fn handle_definition(&self, id: Value, params: Value) -> Result<LspMessage, String> {
+        let session = self.session.as_ref().ok_or("Session not initialized")?;
+        let parsed = serde_json::from_value::<GotoDefinitionParams>(params)
+            .map_err(|e| format!("Failed to parse params: {}", e))?;
+    
+        let uri = parsed.text_document_position_params.text_document.uri;
+        let position = parsed.text_document_position_params.position;
+    
+        let doc = session.documents.read();
+        let text = doc
+            .get(&uri)
+            .map(|doc| &doc.text)
+            .ok_or("Document not found")?;
+    
+        let Some(symbol_name) = find_symbol_at_position(text, &position) else {
+            return Ok(LspMessage {
+                jsonrpc: "2.0".to_string(),
+                id: Some(id),
+                method: None,
+                params: None,
+                result: Some(json!(null)),
+                error: None,
+            });
+        };
+    
+        let symbols = session.symbols.read();
+        if let Some(info) = symbols.get(&symbol_name) {
+            if let Some(range) = &info.position {
+                let lsp_range = Range::from(range.clone());
+                return Ok(LspMessage {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(id),
+                    method: None,
+                    params: None,
+                    result: Some(json!([{
+                        "uri": uri,
+                        "range": lsp_range
+                    }])),
+                    error: None,
+                });
+            }
+        }
+    
+        Ok(LspMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(id),
+            method: None,
+            params: None,
+            result: Some(json!(null)),
+            error: None,
+        })
+    }
+    
     
 
     async fn handle_initialize(&mut self, id: Value) -> LspMessage {
@@ -319,37 +383,44 @@ where
         &mut self,
         params: Value,
     ) -> Result<DiagnosticsParams, String> {
-        let Some(session) = &self.session else {
-            return Err("Session not initialized".to_string());
-        };
+        
+    
         let open_params = serde_json::from_value::<DidOpenTextDocumentParams>(params)
             .map_err(|e| format!("Failed to parse didOpen params: {}", e))?;
-
+    
         let uri = open_params.text_document.uri;
         let text = open_params.text_document.text;
-        let source = SymbolSource::File(uri.clone());
-        // Store document in session
-        {
-            let mut documents = session.documents.write();
-            documents.insert(uri.clone(), text.clone());
-        }
-
-        // Parse and analyze the document
+    
+        // Clone early so we can reuse `uri` later
+        let uri_clone = uri.clone();
+        let source = SymbolSource::File(uri_clone.clone());
+    
         match parse_all(&text) {
             Ok(forms) => {
-                // Collect symbols and clear any previous diagnostics
-                self.collect_symbols_from_forms(&forms, source);
+                
+                let new_doc = Document {
+                    uri: uri_clone.clone(),
+                    text,
+                    forms,
+                };
 
-                // No diagnostics to publish if parsing was successful
+                // Update symbols from parsed forms
+                self.collect_symbols_from_forms(&new_doc.forms, source);
+                if let Some(session) = &self.session {
+                    let mut documents = session.documents.write();
+                    documents.insert(uri_clone.clone(), new_doc);
+                } else {
+                    return Err("Session not initialized".to_string());
+                };
+    
                 Ok(DiagnosticsParams {
-                    uri,
+                    uri: uri_clone,
                     diagnostics: Vec::new(),
                 })
             }
             Err(err) => {
-                // Create diagnostics for the error
                 let diagnostic = error_to_diagnostic(&err, &uri);
-
+    
                 Ok(DiagnosticsParams {
                     uri,
                     diagnostics: vec![diagnostic],
@@ -357,12 +428,13 @@ where
             }
         }
     }
+    
 
     async fn handle_text_document_did_change(
         &mut self,
         params: Value,
     ) -> Result<DiagnosticsParams, String> {
-        let Some(session) = &self.session else {
+        let Some(session) = self.session.clone() else {
             return Err("Session not initialized".to_string());
         };
         let change_params = serde_json::from_value::<DidChangeTextDocumentParams>(params)
@@ -371,13 +443,14 @@ where
         let uri = change_params.text_document.uri;
 
         // Get the current document
-        let mut current_text = {
+        let current_doc = {
             let documents = session.documents.read();
-            match documents.get(&uri) {
-                Some(text) => text.clone(),
-                None => return Err(format!("Document not found: {}", uri)),
-            }
+                documents
+                    .get(&uri)
+                    .cloned() // <----- THIS ensures we don't hold the borrow
+                    .ok_or_else(|| format!("Document not found: {}", uri))?
         };
+        let mut current_text = current_doc.text.clone();
 
         // Apply changes
         for change in change_params.content_changes {
@@ -400,35 +473,42 @@ where
                 current_text = change.text;
             }
         }
-
-        // Update document in session
-        {
-            let mut documents = session.documents.write();
-            documents.insert(uri.clone(), current_text.clone());
-        }
         let source = SymbolSource::File(uri.clone());
+        let forms = parse_all(&current_text);
+        match forms {
+            Ok(forms) =>  // Update document in session
+                    {
+                        
+                        let new_doc = Document {
+                    
+                            text: current_text.clone(),
+                            forms,
+                            uri,
+                        };
+                        let mut documents = session.documents.write();
+                        let diag = DiagnosticsParams {
+                            uri: new_doc.uri.clone(),
+                            diagnostics: Vec::new(),
+                        };
+                        // Update symbols
+                        self.collect_symbols_from_forms(&new_doc.forms, source);
+                        documents.insert(new_doc.uri.clone(), new_doc);
+                        
+                        
 
-        // Reanalyze document
-        match parse_all(&current_text) {
-            Ok(forms) => {
-                // Update symbols
-                self.collect_symbols_from_forms(&forms, source);
-
-                // No diagnostics to publish
-                Ok(DiagnosticsParams {
-                    uri,
-                    diagnostics: Vec::new(),
-                })
-            }
-            Err(err) => {
+                        // No diagnostics to publish
+                        Ok(diag)
+                    },
+            Err(e) => {
                 // Create diagnostics for error
-                let diagnostic = error_to_diagnostic(&err, &uri);
+                let diagnostic = error_to_diagnostic(&e, &uri);
 
                 Ok(DiagnosticsParams {
                     uri,
                     diagnostics: vec![diagnostic],
                 })
             }
+            
         }
     }
 
@@ -523,11 +603,16 @@ where
                             if sym == "hash-map" {
                                 let mut out = String::new();
                                 out.push_str(&format!("{} => {{", name));
-                                for korv in v[1..].iter() {
+                                let mut is_key = true;
+                                for korv in v[1..].iter() { 
                                     let korv_read = korv.read();
-                                    let k = &korv_read.value;
                                     let v = &korv_read.value;
-                                    out.push_str(&format!("{} => {}", k, v));
+                                    if is_key {
+                                    out.push_str(&format!("{} =>", v));
+                                    } else {
+                                        out.push_str(&format!(" {}\n", v));
+                                    }
+                                    is_key = !is_key;
                                 }
                                 out.push('}');
                                 return out;
@@ -571,7 +656,6 @@ where
         for form in forms {
             
             let form_read = form.read();
-            let pos = form_read.pos.clone();
 
 
             if let blink_core::value::Value::List(elements) = &form_read.value {if elements.len() >= 3 {
@@ -579,6 +663,7 @@ where
 
                     if let blink_core::value::Value::Symbol(sym) = first_elem {
                         if sym == "def" {
+                            let symbol_pos = elements[1].read().pos.clone();
                             if let blink_core::value::Value::Symbol(name) =
                                 &elements[1].read().value
                             {
@@ -587,7 +672,7 @@ where
                                 let symbol_info = SymbolInfo { 
                                     kind: type_info,
                                     defined_in: defined_in.clone(),
-                                    position: pos,
+                                    position: symbol_pos,
                                     representation: Some(representation),
                                 };
                                 
@@ -603,8 +688,64 @@ where
         }
     }
 
-    async fn handle_completion(&self, id: Value, _params: Value) -> LspMessage {
+    fn empty_completion_response(&self, id: Value) -> LspMessage {
+        LspMessage {
+            jsonrpc: "2.0".to_string(),
+            id: Some(id),
+            method: None,
+            params: None,
+            result: Some(json!(null)),
+            error: None,
+        }
+    }
+
+    fn get_prefix_at_position(&self, text: &str, position: &Position) -> Option<String> {
+        let lines: Vec<&str> = text.lines().collect();
+        let line = lines.get(position.line as usize)?;
+        let char_index = position.character as usize;
+    
+        // Collect chars up to the cursor into a Vec so we can reverse safely
+        let chars_before_cursor: Vec<char> = line.chars().take(char_index).collect();
+    
+        let is_symbol_char = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '?' || c == '!';
+    
+        let prefix: String = chars_before_cursor
+            .iter()
+            .rev()
+            .take_while(|&&c| is_symbol_char(c))
+            .copied()
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+    
+        if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        }
+    }
+    
+    
+
+    async fn handle_completion(&self, id: Value, params: Value) -> LspMessage {
+        let params = serde_json::from_value::<CompletionParams>(params).unwrap();
+
+        let uri = params.text_document.uri;
+        let position = params.position;
+        
+
+        let session = self.session.as_ref().unwrap();
+        let document= {
+            let docs = session.documents.read();
+            match docs.get(&uri) {
+                Some(text) => text.clone(),
+                None => return self.empty_completion_response(id),
+            }
+        };
+
         let mut completion_items = Vec::new();
+        let prefix_str = self.get_prefix_at_position(&document.text, &position);
     
         // Add built-in special forms
         for &special_form in &[
@@ -624,6 +765,11 @@ where
         let symbols = session.symbols.read();
         
         for (sym, ty) in symbols.iter() {
+            if let Some(prefix) = &prefix_str {
+                if !sym.starts_with(prefix) {
+                    continue;
+                }
+            }
             
             completion_items.push(CompletionItem {
                 label: sym.clone(),
@@ -636,6 +782,11 @@ where
     
         // Add native functions
         for (func, doc) in get_native_function_docs() {
+            if let Some(prefix) = &prefix_str {
+                if !func.starts_with(prefix) {
+                    continue;
+                }
+            }
             completion_items.push(CompletionItem {
                 label: func.to_string(),
                 kind: Some(3), // Function
@@ -670,7 +821,7 @@ where
             let position = hover_params.position;
 
             // Get document text
-            let document_text = {
+            let document = {
                 let documents = session.documents.read();
                 match documents.get(&uri) {
                     Some(text) => text.clone(),
@@ -679,7 +830,7 @@ where
             };
 
             // Find the symbol at this position
-            if let Some(symbol) = find_symbol_at_position(&document_text, &position) {
+            if let Some(symbol) = find_symbol_at_position(&document.text, &position) {
                 // Check for special forms
                 if let Some(doc) = get_special_form_doc(&symbol) {
                     create_hover_response(id, &doc)
@@ -721,24 +872,13 @@ where
             let symbols = session.symbols.read();
             let result = symbols.iter()
                 .filter_map(|(name, info)| {
+                    let range: Range = info.position.as_ref().map(|pos| pos.clone().into()).unwrap_or(create_default_range());
                     info.position.as_ref().map(|pos| {
                         json!({
                             "name": name,
                             "kind": info.kind.to_lsp_symbol_kind(),
-                            "range": {
-                                "start": {
-                                    "line": pos.line,
-                                    "character": pos.col
-                                },
-                                "end": {
-                                    "line": pos.line,
-                                    "character": pos.col + name.len()
-                                }
-                            },
-                            "selectionRange": {
-                                "line": pos.line,
-                    "character": pos.col
-                }
+                            "range": range,
+                            "selectionRange": range
             })
         })
     })
@@ -989,12 +1129,12 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
             (message.clone(), create_range_from_position(pos, 1))
         }
         LispError::ParseError { message, pos } => {
-            (message.clone(), create_range_from_position(pos, 1))
+            (message.clone(), pos.clone().into())
         }
         LispError::EvalError { message, pos } => {
             let range = pos
                 .as_ref()
-                .map(|p| create_range_from_position(p, 1))
+                .map(|p| p.clone().into())
                 .unwrap_or_else(create_default_range);
             (message.clone(), range)
         }
@@ -1010,7 +1150,7 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
             );
             let range = pos
                 .as_ref()
-                .map(|p| create_range_from_position(p, 1))
+                .map(|p|p.clone().into())
                 .unwrap_or_else(create_default_range);
             (message, range)
         }
@@ -1018,7 +1158,7 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
             let message = format!("Undefined symbol: {}", name);
             let range = pos
                 .as_ref()
-                .map(|p| create_range_from_position(p, name.len()))
+                .map(|p| p.clone().into())
                 .unwrap_or_else(create_default_range);
             (message, range)
         }
@@ -1038,7 +1178,7 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
 }
 
 /// Create a Range from a SourcePos
-fn create_range_from_position(pos: &blink_core::error::SourcePos, length: usize) -> Range {
+fn create_range_from_position(pos: &SourcePos, length: usize) -> Range {
     Range {
         start: Position {
             line: (pos.line - 1) as u32,     // LSP uses 0-based lines

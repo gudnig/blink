@@ -43,12 +43,15 @@ pub fn start_repl() {
             Ok(code) => match run_line(&code, &mut ctx, &mut temp_reader_ctx) {
                 Ok(val) => println!("=> {}", val.read().value),
                 Err(e) => {
-                    println!("⚠️  Error: {e}");
+                    println!("Error: {e}");
                     if DEBUG_POS {
                         match &e {
                             LispError::TokenizerError { pos, .. }
-                            | LispError::ParseError { pos, .. }
+                            
                             | LispError::UnexpectedToken { pos, .. } => {
+                                println!("   [at {}]", pos);
+                            },
+                            | LispError::ParseError { pos, .. } => {
                                 println!("   [at {}]", pos);
                             }
                             LispError::EvalError { pos, .. }

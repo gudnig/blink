@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Instant};
 
-use blink_core::{error::SourcePos, eval::EvalContext};
+use blink_core::{ eval::EvalContext, value::{SourcePos, SourceRange}, BlinkValue};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ pub struct ClientConnection {
 pub struct SymbolInfo {
     pub kind: SymbolKind,            // e.g., Function, Macro, Var
     pub defined_in: SymbolSource,    // Repl, File(uri), Import
-    pub position: Option<SourcePos>, // For LSP range
+    pub position: Option<SourceRange>, // For LSP range
     pub representation: Option<String>,
 }
 
@@ -87,13 +87,20 @@ pub enum SymbolSource {
     Imported(String), // module name
 }
 
+#[derive(Clone)]
+
+pub struct Document {
+    pub uri: String,
+    pub text: String,
+    pub forms: Vec<BlinkValue>,
+}
 
 pub struct Session {
     pub id: String,
     pub features: RwLock<SessionFeatures>,
-    pub documents: RwLock<HashMap<String, String>>,
+    pub documents: RwLock<HashMap<String, Document>>,
     // Only filled after REPL attached
-    pub eval_ctx: RwLock<Option<Arc<EvalContext>>>,
+    pub eval_ctx: Arc<RwLock<Option<Box<EvalContext>>>>,
     pub connected_at: RwLock<Instant>,
     pub last_activity: RwLock<Instant>,
     pub symbols: RwLock<HashMap<String, SymbolInfo>>
@@ -105,7 +112,7 @@ impl Session {
             id: id,
             features: RwLock::new(SessionFeatures::default()),
             documents: RwLock::new(HashMap::new()),
-            eval_ctx: RwLock::new(None),
+            eval_ctx: Arc::new(RwLock::new(None)),
             symbols: RwLock::new(HashMap::new()),   
             connected_at: RwLock::new(Instant::now()),
             last_activity: RwLock::new(Instant::now()),

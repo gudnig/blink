@@ -1,8 +1,8 @@
 use crate::env::Env;
-use crate::error::{LispError, SourcePos};
+use crate::error::LispError;
 use crate::parser::ReaderContext;
 use crate::telemetry::TelemetryEvent;
-use crate::value::{bool_val, nil, BlinkValue, LispNode, Value};
+use crate::value::{bool_val, nil, BlinkValue, LispNode, SourceRange, Value};
 use libloading::Library;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ impl EvalContext {
     }
 }
 
-fn get_pos(expr: &BlinkValue) -> Option<SourcePos> {
+fn get_pos(expr: &BlinkValue) -> Option<SourceRange> {
     expr.read().pos.clone()
 }
 

@@ -1,5 +1,5 @@
-use crate::error::SourcePos;
-use serde::{Deserialize, Serialize};
+use crate::value::SourceRange;
+use serde::{ Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TelemetryEvent {
@@ -7,5 +7,5 @@ pub struct TelemetryEvent {
     pub duration_us: u128,
     pub result_type: String,
     pub result_size: Option<usize>,
-    pub source: Option<SourcePos>,
+    pub source: Option<SourceRange>,
 }
