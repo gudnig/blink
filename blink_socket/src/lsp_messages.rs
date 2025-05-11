@@ -185,9 +185,11 @@ pub struct Position {
 
 impl From<SourcePos> for Position {
     fn from(pos: SourcePos) -> Self {
+        let line = if pos.line == 0 { 0 } else { pos.line - 1 } as u32;
+        let character = if pos.col == 0 { 0 } else { pos.col - 1 } as u32;
         Position {
-            line: (pos.line - 1) as u32,
-            character: (pos.col - 1) as u32,
+            line,
+            character
         }
     }
 }

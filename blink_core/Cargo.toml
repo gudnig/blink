@@ -1,7 +1,14 @@
 [package]
 name = "blink_core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core interpreter for the Blink Lisp dialect"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 
 [lib]
 name = "blink_core"
@@ -12,3 +19,5 @@ parking_lot = "0.12"
 rustyline = "15.0.0"
 libloading = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+
+

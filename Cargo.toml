@@ -8,3 +8,14 @@ members = [
 ]
 
 resolver = "2"
+
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Guðni Garðarsson"]
+edition = "2021"
+description = "Blink is a lightweight Lisp dialect written in Rust"
+repository = "https://github.com/gudnig/blink"
+license = "MIT"
+keywords = ["lisp", "language", "interpreter", "scripting"]
+categories = ["development-tools", "programming-languages"]

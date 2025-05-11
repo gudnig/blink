@@ -171,26 +171,24 @@ where
                         let mut tokens = tokenize_at(&code, Some(source_pos))?;
                         parse(&mut tokens, &mut rctx).context("Failed to parse code")?
                     }; // `rctx` dropped here
-                    println!("Ast {:?}", ast);
+                    
+                    // Store the AST for symbol collection
+                    let ast_clone = ast.clone();
 
                     let result = eval::eval(ast, ctx);
 
                     let response = match result {
                         Ok(value) => {
-                            // Should I push symbols to the session here
-                            let ses = self.session.as_ref().unwrap();
                             
-                            let resp = ReplResponse::EvalResult {
-                                id,
-                                value: format!("{}", value.clone()),
-                            };
+                            let ses = self.session.as_ref().unwrap();
                             {
                                 let mut symbols = ses.symbols.write();
-                                collect_symbols_from_forms(&mut symbols, &vec![value], SymbolSource::Repl);
+                                collect_symbols_from_forms(&mut symbols, &vec![ast_clone], SymbolSource::Repl);
                             }
-                            resp
-                            
-                            
+                            ReplResponse::EvalResult {
+                                id,
+                                value: format!("{}", value.clone()),
+                            }
                         }
                         Err(e) => {
                             ReplResponse::Error {

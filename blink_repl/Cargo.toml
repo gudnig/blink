@@ -1,7 +1,14 @@
 [package]
 name = "blink_repl"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Basic commandline repl for the Blink Lisp dialect"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 
 [dependencies]
 blink_core = { path = "../blink_core" }

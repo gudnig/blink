@@ -1,7 +1,14 @@
 [package]
 name = "blink_sclient"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Socket client for connecting to the socket repl for the Blink Lisp dialect"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
 
 [dependencies]
 tokio = { version = "1.32", features = ["full"] }
