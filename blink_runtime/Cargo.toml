@@ -11,5 +11,5 @@ categories.workspace = true
 
 
 [dependencies]
-blink_core = { path = "../blink_core" }
+blink_core = { version = "0.1.0", path = "../blink_core" }
 parking_lot = "0.12"
