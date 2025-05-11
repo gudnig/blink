@@ -18,4 +18,4 @@ description = "Blink is a lightweight Lisp dialect written in Rust"
 repository = "https://github.com/gudnig/blink"
 license = "MIT"
 keywords = ["lisp", "language", "interpreter", "scripting"]
-categories = ["development-tools", "programming-languages"]
+categories = ["development-tools", "compilers"]
