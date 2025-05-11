@@ -4,7 +4,7 @@ mod repl_message;
 mod repl;   
 mod session;
 mod session_manager;
-
+mod helpers;
 use clap::Parser;
 use lsp::LspHandler;
 use repl::ReplHandler;

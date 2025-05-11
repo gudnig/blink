@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range},
-    session::{Document, Session, SymbolInfo, SymbolKind, SymbolSource},
-    session_manager::SessionManager,
+    helpers::collect_symbols_from_forms, lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range}, session::{Document, Session, SymbolInfo, SymbolKind, SymbolSource}, session_manager::SessionManager
 };
 use anyhow::{anyhow, Context, Result};
 use blink_core::{error::LispError, parser::parse_all, value::SourcePos, BlinkValue};
@@ -89,10 +87,17 @@ where
         };
 
         let response = self.handle_initialize(id).await;
+        
         self.write_message(&response).await?;
+        
         println!("Initialized with session: {:?}", session.id);
         self.session = Some(session);
-
+        let session_message = self.after_initialize().await;
+        
+        if let Some(message) = session_message {
+            println!("Sending session message: {:?}", message);
+            self.write_message(&message).await?;
+        }
         Ok(())
     }
 
@@ -362,10 +367,26 @@ where
                 "serverInfo": {
                     "name": "Blink LSP Server",
                     "version": "0.1.0"
-                }
+                },
+                
             })),
             error: None,
         }
+    }
+
+    async fn after_initialize(&mut self) -> Option<LspMessage> {
+        self.session.as_ref().map(|s| {
+            LspMessage {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                method: Some("$/blinkSessionInfo".to_string()),
+                params: Some(json!({
+                    "sessionId": s.id.clone()
+                })),
+                result: None,
+                error: None,
+            }
+        }) 
     }
 
     async fn handle_shutdown(&self, id: Value) -> LspMessage {
@@ -404,11 +425,16 @@ where
                     forms,
                 };
 
-                // Update symbols from parsed forms
-                self.collect_symbols_from_forms(&new_doc.forms, source);
+                
                 if let Some(session) = &self.session {
-                    let mut documents = session.documents.write();
-                    documents.insert(uri_clone.clone(), new_doc);
+                    {
+                        let mut symbols = session.symbols.write();
+                        collect_symbols_from_forms(&mut symbols, &new_doc.forms, source);
+                    }
+                    {
+                        let mut documents = session.documents.write();
+                        documents.insert(uri_clone.clone(), new_doc);
+                    }
                 } else {
                     return Err("Session not initialized".to_string());
                 };
@@ -491,7 +517,8 @@ where
                             diagnostics: Vec::new(),
                         };
                         // Update symbols
-                        self.collect_symbols_from_forms(&new_doc.forms, source);
+                        let mut symbols = session.symbols.write();
+                        collect_symbols_from_forms(&mut symbols, &new_doc.forms, source);
                         documents.insert(new_doc.uri.clone(), new_doc);
                         
                         
@@ -532,161 +559,12 @@ where
     }
     
     
-    fn get_symbol_kind(&self, value: &BlinkValue) -> SymbolKind {
-        let value = &value.read().value;
-        match value {
-            blink_core::value::Value::Bool(_) => SymbolKind::Bool,
-            blink_core::value::Value::Number(_) => SymbolKind::Number,
-            blink_core::value::Value::Str(_) => SymbolKind::String,
-            blink_core::value::Value::Symbol(_) => SymbolKind::SymbolRef,
-            blink_core::value::Value::Keyword(_) => SymbolKind::Keyword,
-            blink_core::value::Value::Vector(_) => SymbolKind::Vector,
-            blink_core::value::Value::Map(_) => SymbolKind::Map,
-            blink_core::value::Value::List(_) => {
-                if let blink_core::value::Value::List(vec) = value {
-                    let first_elem = vec.get(0);
-                    if let Some(elem) =first_elem {
-                        let elem_read = elem.read();
-                        if let blink_core::value::Value::Symbol(sym) =  &elem_read.value {
-                            if sym == "hash-map" {
-                                return SymbolKind::Map
-                            }                    
-                        }
-                    }
-                }
-                SymbolKind::List
-            },
-            blink_core::value::Value::NativeFunc(_) => SymbolKind::Function,
-            blink_core::value::Value::FuncUserDefined { .. } => SymbolKind::Function,
-            _ => SymbolKind::Unknown,
-        }
-    }
+    
     
 
-    fn get_var_representation(&self, value: &BlinkValue, kind: &SymbolKind, name: &str, depth: usize) -> String {
-        if depth > 10 {
-            return "...".to_string();
-        }
-        let v = value.read();
-        match kind {
-            
-            SymbolKind::Variable => {
-                
-                if let blink_core::value::Value::List(elements) = &v.value {
-                    if elements.len() >= 3 {
-                        let head = &elements[0].read().value;
-                        if let blink_core::value::Value::Symbol(sym) = head {
-                            if sym == "def" {
+    
 
-                                let value_expr = &elements[2];
-                                let inner_name = &elements[1].read().value;
-                                if let blink_core::value::Value::Symbol(inner_name) = inner_name {
-                                    let inner_kind = self.get_symbol_kind(value_expr);
-                                    let inner = self.get_var_representation(value_expr, &inner_kind, inner_name, depth + 1);
-                                    return format!("{} => {}", name, inner);
-                                }
-                            }
-                        }
-                    }
-                }
-                format!("{} => {}", name, "Unknown")
-            },
-            SymbolKind::List => {
-                
-                format!("{} => {}", name, "Unknown")
-                
-            },
-            SymbolKind::Map => {
-                if let blink_core::value::Value::List(v) = &v.value {
-                    if v.len() >= 2 {
-                        if let blink_core::value::Value::Symbol(sym) = &v[0].read().value {
-                            if sym == "hash-map" {
-                                let mut out = String::new();
-                                out.push_str(&format!("{} => {{", name));
-                                let mut is_key = true;
-                                for korv in v[1..].iter() { 
-                                    let korv_read = korv.read();
-                                    let v = &korv_read.value;
-                                    if is_key {
-                                    out.push_str(&format!("{} =>", v));
-                                    } else {
-                                        out.push_str(&format!(" {}\n", v));
-                                    }
-                                    is_key = !is_key;
-                                }
-                                out.push('}');
-                                return out;
-                                
-                            }
-                        }
-                    }
-                }
-                format!("{} => {}", name, "Map")
-            }
-            _ => format!("{}", kind)
-            //     let v = value.read();
-            //     if let blink_core::value::Value::Map(map) = &v.value {
-            //         let mut out = String::new();
-            //         out.push_str(&format!("{} => {{\n", name));
-            
-            //         for (k, v) in map {
-            //             let k_str = match &k.read().value {
-            //                 blink_core::value::Value::Keyword(s) => format!(":{}", s),
-            //                 blink_core::value::Value::Str(s) => format!(r#""{}""#, s),
-            //                 _ => format!("{}", k.read().value), // fallback for any other type
-            //             };
-            
-            //             let val_str = self.get_var_representation(v, "", depth + 1);
-            //             out.push_str(&format!("  {} {}\n", k_str, val_str.trim()));
-            //         }
-            
-            //         out.push('}');
-            //         return out;
-            //     }
-            
-            //     format!("{} => {{}}", name) // fallback if not actually a map
-                // "{}".to_string()
-            // }
-        }
-    }
-
-    fn collect_symbols_from_forms(&mut self, forms: &[BlinkValue], defined_in: SymbolSource) {
-        
-        // Extract defined symbols and their types from the parsed forms
-        for form in forms {
-            
-            let form_read = form.read();
-
-
-            if let blink_core::value::Value::List(elements) = &form_read.value {if elements.len() >= 3 {
-                    let first_elem = &elements[0].read().value;
-
-                    if let blink_core::value::Value::Symbol(sym) = first_elem {
-                        if sym == "def" {
-                            let symbol_pos = elements[1].read().pos.clone();
-                            if let blink_core::value::Value::Symbol(name) =
-                                &elements[1].read().value
-                            {
-                                let type_info = self.get_symbol_kind(&elements[2]);
-                                let representation = self.get_var_representation(&elements[2], &type_info, name, 0);
-                                let symbol_info = SymbolInfo { 
-                                    kind: type_info,
-                                    defined_in: defined_in.clone(),
-                                    position: symbol_pos,
-                                    representation: Some(representation),
-                                };
-                                
-                                let mut symbols = self.session.as_ref().unwrap().symbols.write();
-
-                                symbols.insert(name.clone(), symbol_info);
-                            }
-                        }
-                    }
-                }
-                
-            }
-        }
-    }
+    
 
     fn empty_completion_response(&self, id: Value) -> LspMessage {
         LspMessage {
@@ -957,23 +835,6 @@ fn get_special_form_doc(symbol: &str) -> Option<String> {
         "nimp" => Some("**nimp** - Native import\n\n```blink\n(nimp \"library-name\")\n```\n\nImports a native Rust library (.so/.dll) and registers its functions.".to_string()),
         _ => None,
     }
-}
-
-fn get_special_form_docs() -> Vec<(&'static str, String)> {
-    vec![
-        ("def", get_special_form_doc("def").unwrap()),
-        ("fn", get_special_form_doc("fn").unwrap()),
-        ("if", get_special_form_doc("if").unwrap()),
-        ("do", get_special_form_doc("do").unwrap()),
-        ("let", get_special_form_doc("let").unwrap()),
-        ("quote", get_special_form_doc("quote").unwrap()),
-        ("and", get_special_form_doc("and").unwrap()),
-        ("or", get_special_form_doc("or").unwrap()),
-        ("try", get_special_form_doc("try").unwrap()),
-        ("apply", get_special_form_doc("apply").unwrap()),
-        ("imp", get_special_form_doc("imp").unwrap()),
-        ("nimp", get_special_form_doc("nimp").unwrap()),
-    ]
 }
 
 fn get_native_function_doc(symbol: &str) -> Option<String> {

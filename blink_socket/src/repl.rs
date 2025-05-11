@@ -1,16 +1,14 @@
 use std::{io::BufRead, sync::Arc};
 
 use anyhow::Context;
-use blink_core::{eval::{self, EvalContext}, native_functions::register_builtins, parser::{parse, preload_builtin_reader_macros, tokenize_at}, value::SourcePos, Env};
+use blink_core::{eval::{self, EvalContext}, native_functions::register_builtins, parser::{parse, preload_builtin_reader_macros, tokenize_at}, value::SourcePos, BlinkValue, Env};
 use parking_lot::RwLock;
 use rmp_serde::{from_slice, to_vec, Deserializer, Serializer};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::{
-    repl_message::{ReplRequest, ReplResponse},
-    session::Session,
-    session_manager::SessionManager,
+    helpers::collect_symbols_from_forms, repl_message::{ReplRequest, ReplResponse}, session::{Session, SymbolSource}, session_manager::SessionManager
 };
 
 
@@ -97,18 +95,9 @@ where
                     let new_id = uuid::Uuid::new_v4().to_string();
                     let arc_session = Arc::new(Session::new(new_id.clone()));
 
-                    let global_env = Arc::new(RwLock::new(Env::new()));
-                    register_builtins(&global_env);
+                    
 
-                    let mut ctx = EvalContext::new(global_env.clone());
-                    preload_builtin_reader_macros(&mut ctx);
-
-                    // Write context into the session
-                    {
-                        let mut session_guard = arc_session.eval_ctx.write();
-                        *session_guard = Some(Box::new(ctx));
-                    }
-
+                    
                     // Register the session
                     session_manager.register(arc_session.clone()).await;
                     println!("Session pointer at init: {:?}", Arc::as_ptr(&arc_session));
@@ -118,6 +107,19 @@ where
 
                     
                 };
+                {
+                    let mut ctx = session.eval_ctx.write();
+                    // Check if the context is null
+                    if ctx.is_none() {
+                        
+                        let global_env = Arc::new(RwLock::new(Env::new()));
+
+                        register_builtins(&global_env);
+                        let mut eval_ctx = EvalContext::new(global_env.clone());
+                        preload_builtin_reader_macros(&mut eval_ctx);
+                        *ctx = Some(Box::new(eval_ctx));
+                    }
+                }
                 session.features.write().repl = true;
                 self.session = Some(session);
                 ReplResponse::Initialized {
@@ -139,8 +141,7 @@ where
             match message {
                 ReplRequest::Eval { id, code, pos } => {
                     let response = self.handle_eval(id, code, pos)?;
-                    println!("--------------------------------");
-                    println!("Sending REPL response: {:?}", &response);
+                    
                     self.write_message(&response).await?;
                 }
                 ReplRequest::Close => {
@@ -151,6 +152,9 @@ where
         }
         Ok(())
     }
+
+    
+    
 
     pub fn handle_eval(&mut self, id: String, code: String, pos: Option<SourcePos>) -> anyhow::Result<ReplResponse> {
         println!("Received code literal: {:?}", &code);
@@ -173,10 +177,19 @@ where
 
                     let response = match result {
                         Ok(value) => {
-                            ReplResponse::EvalResult {
+                            // Should I push symbols to the session here
+                            let ses = self.session.as_ref().unwrap();
+                            
+                            let resp = ReplResponse::EvalResult {
                                 id,
                                 value: format!("{}", value.clone()),
+                            };
+                            {
+                                let mut symbols = ses.symbols.write();
+                                collect_symbols_from_forms(&mut symbols, &vec![value], SymbolSource::Repl);
                             }
+                            resp
+                            
                             
                         }
                         Err(e) => {
