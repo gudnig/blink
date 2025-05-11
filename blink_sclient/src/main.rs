@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let mut de = Deserializer::new(&resp_buf[..]);
     let response: BlinkMessage = BlinkMessage::deserialize(&mut de)?;
 
-    println!("🔮 Response: {:?}", response);
+    println!("Response: {:?}", response);
 
     Ok(())
 }
