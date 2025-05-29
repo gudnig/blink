@@ -1,43 +1,68 @@
 use crate::env::Env;
 use crate::error::LispError;
-use crate::parser::ReaderContext;
+use crate::module::{ImportType, Module, ModuleRegistry, ModuleSource};
+use crate::parser::{ ReaderContext};
 use crate::telemetry::TelemetryEvent;
 use crate::value::{bool_val, nil, BlinkValue, LispNode, SourceRange, Value};
-use libloading::Library;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 pub struct EvalContext {
+    pub global_env: Arc<RwLock<Env>>,
     pub env: Arc<RwLock<Env>>,
-    pub current_module: Option<String>,
-    pub plugins: HashMap<String, Arc<Library>>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub tracing_enabled: bool,
+    pub current_module: Option<String>,
+    pub module_registry: ModuleRegistry,
+    pub file_to_modules: HashMap<PathBuf, Vec<String>>,
+    pub current_file: Option<String>, // Is this needed?
     pub reader_macros: Arc<RwLock<ReaderContext>>,
 }
 
 impl EvalContext {
     pub fn new(parent: Arc<RwLock<Env>>) -> Self {
         EvalContext {
-            env: Arc::new(RwLock::new(Env::with_parent(parent))),
+            global_env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
+            env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
             current_module: None,
-            plugins: HashMap::new(),
             telemetry_sink: None,
+            module_registry: ModuleRegistry::new(),
+            current_file: None,
             tracing_enabled: false,
             reader_macros: Arc::new(RwLock::new(ReaderContext::new())),
+            file_to_modules: HashMap::new(),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<BlinkValue> {
-        self.env.read().get(key)
+        self.env.read().get_with_registry(key, &self.module_registry)
     }
 
     pub fn set(&self, key: &str, val: BlinkValue) {
         self.env.write().set(key, val)
     }
+
+    pub fn current_env(&self) -> Arc<RwLock<Env>> {
+        self.env.clone()
+    }
+
+    pub fn register_module(&mut self, module: Module) {
+        self.module_registry.register_module(module);
+    }
+    
+    pub fn get_module(&self, name: &str) -> Option<Arc<RwLock<Module>>> {
+        self.module_registry.get_module(name)
+    }
+
+    pub fn find_module_file(&self, module_name: &str) -> Option<PathBuf> {
+        self.module_registry.find_module_file(module_name)
+    }
 }
+
 
 fn get_pos(expr: &BlinkValue) -> Option<SourceRange> {
     expr.read().pos.clone()
@@ -59,7 +84,6 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispE
             match head_val {
                 Value::Symbol(s) => match s.as_str() {
                     "quote" => eval_quote(list),
-                    "quo" => eval_quote(list),
                     "apply" => eval_apply(&list[1..], ctx),
                     "if" => eval_if(&list[1..], ctx),
                     "def" => eval_def(&list[1..], ctx),
@@ -69,9 +93,9 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispE
                     "and" => eval_and(&list[1..], ctx),
                     "or" => eval_or(&list[1..], ctx),
                     "try" => eval_try(&list[1..], ctx),
-                    "imp" => eval_import(&list[1..], ctx),
-                    "nimp" => eval_native_import(&list[1..], ctx),
-                    "ncom" => eval_compile_plugin(&list[1..], ctx),
+                    "imp" => eval_imp(&list[1..], ctx),
+                    "mod" => eval_mod(&list[1..], ctx),
+                    "load" => eval_load(&list[1..], ctx),
                     "rmac" => eval_def_reader_macro(&list[1..], ctx),
 
                     _ => {
@@ -143,6 +167,7 @@ pub fn eval_func(
     args: Vec<BlinkValue>,
     ctx: &mut EvalContext,
 ) -> Result<BlinkValue, LispError> {
+    
     match &func.read().value {
         Value::NativeFunc(f) => f(args).map_err(|e| LispError::EvalError {
             message: e,
@@ -158,14 +183,25 @@ pub fn eval_func(
                 });
             }
             let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-            let mut env = local_env.write();
-            for (param, val) in params.iter().zip(args) {
-                env.set(param, val);
+            {
+                let mut env = local_env.write();
+            
+            
+
+                for (param, val) in params.iter().zip(args) {
+                    env.set(param, val);
+                }
             }
+
+            let old_env = ctx.env.clone();
+            ctx.env = local_env;
+
             let mut result = nil();
             for form in body {
                 result = trace_eval(form.clone(), ctx)?;
             }
+            // TODO: Drop guard for env?
+            ctx.env = old_env;
             Ok(result)
         }
         _ => Err(LispError::EvalError {
@@ -380,52 +416,17 @@ fn eval_apply(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, 
     eval_func(func, list_items, ctx)
 }
 
-fn eval_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
-    use std::fs;
+
+fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use libloading::Library;
 
     if args.len() != 1 {
         return Err(LispError::ArityMismatch {
             expected: 1,
             got: args.len(),
-            form: "import".into(),
-            pos: None,
-        });
-    }
-
-    let path = match &args[0].read().value {
-        Value::Str(s) => s.clone(),
-        _ => {
-            return Err(LispError::EvalError {
-                message: "import expects a string as module path".into(),
-                pos: None,
-            })
-        }
-    };
-
-    let code =
-        fs::read_to_string(format!("lib/{}.blink", path)).map_err(|_| LispError::EvalError {
-            message: format!("Failed to read module: {}", path),
-            pos: None,
-        })?;
-
-    let forms = crate::parser::parse_all(&code)?;
-    let old_module = ctx.current_module.clone();
-    ctx.current_module = Some(path);
-
-    for form in forms {
-        trace_eval(form, ctx)?;
-    }
-
-    ctx.current_module = old_module;
-    Ok(nil())
-}
-
-fn eval_native_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
-    if args.len() != 1 {
-        return Err(LispError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            form: "native-import".into(),
+            form: "load-native".into(),
             pos: None,
         });
     }
@@ -434,43 +435,109 @@ fn eval_native_import(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Blin
         Value::Str(s) => s.clone(),
         _ => {
             return Err(LispError::EvalError {
-                message: "native-import expects a string".into(),
+                message: "load-native expects a string".into(),
                 pos: None,
             })
         }
     };
 
-    let filename = format!("native/lib{}.so", libname);
+    // Determine the correct file extension
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else if cfg!(target_os = "windows") {
+        "dll"
+    } else {
+        "so"
+    };
 
+    let filename = format!("native/lib{}.{}", libname, ext);
+    let lib_path = PathBuf::from(&filename);
+
+    // Remove existing module if it exists (force reload)
+    if ctx.module_registry.get_module(&libname).is_some() {
+        println!("Reloading native library '{}'", libname);
+        ctx.module_registry.remove_module(&libname);
+        ctx.module_registry.remove_native_library(&lib_path);
+    }
+
+    // Load the library
     let lib = unsafe { Library::new(&filename) }.map_err(|e| LispError::EvalError {
-        message: format!("Failed to load native lib: {}", e),
+        message: format!("Failed to load native lib '{}': {}", filename, e),
         pos: None,
     })?;
 
-    let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
-        lib.get(b"blink_register")
-            .map_err(|e| LispError::EvalError {
-                message: format!("Failed to find blink_register: {}", e),
-                pos: None,
-            })?
+    // Try the new registration function first (with exports)
+    let exports = match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
+        Ok(register_with_exports) => {
+            // Create a new environment for the module
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            let exported_names = unsafe { register_with_exports(&mut *module_env.write()) };
+            
+            // Register the module with known exports
+            let exports_set: HashSet<String> = exported_names.into_iter().collect();
+            let module = Module {
+                name: libname.clone(),
+                source: ModuleSource::NativeDylib(lib_path.clone()),
+                exports: exports_set.clone(),
+                env: module_env,
+                ready: true,
+            };
+            let _arc_mod = ctx.module_registry.register_module(module);
+            
+            exports_set
+        },
+        Err(_) => {
+            // Fall back to old registration function (no export tracking)
+            let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
+                lib.get(b"blink_register")
+                    .map_err(|e| LispError::EvalError {
+                        message: format!("Failed to find blink_register or blink_register_with_exports in '{}': {}", filename, e),
+                        pos: None,
+                    })?
+            };
+            
+            // Create a new environment for the module
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            unsafe { register(&mut *module_env.write()) };
+            
+            // Extract exports from the environment (since old function doesn't return them)
+            let exports = extract_env_symbols(&module_env);
+            
+            // Register the module
+            let module = Module {
+                name: libname.clone(),
+                source: ModuleSource::NativeDylib(lib_path.clone()),
+                exports: exports.clone(),
+                env: module_env,
+                ready: true,
+            };
+            let _arc_mod = ctx.module_registry.register_module(module);
+            
+            exports
+        }
     };
 
-    unsafe { register(&mut *ctx.env.write()) };
-    ctx.plugins.insert(libname, Arc::new(lib));
+    // Store the library to prevent it from being unloaded
+    ctx.module_registry.store_native_library(lib_path, lib);
+
+    println!("Loaded native library '{}' with {} exports: {:?}", 
+             libname, exports.len(), exports);
 
     Ok(nil())
 }
 
-fn eval_compile_plugin(
+fn load_native_code(
     args: &[BlinkValue],
     ctx: &mut EvalContext,
 ) -> Result<BlinkValue, LispError> {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use libloading::Library;
+    use std::collections::HashSet;
 
     let pos = args.get(0).and_then(|v| v.read().pos.clone());
-
+    
     if args.len() < 1 || args.len() > 2 {
         return Err(LispError::ArityMismatch {
             expected: 1,
@@ -491,8 +558,9 @@ fn eval_compile_plugin(
     };
 
     let mut plugin_path = format!("plugins/{}", plugin_name);
-    let mut _auto_import = false;
+    let mut auto_import = false;
 
+    // Parse options if provided
     if args.len() == 2 {
         let options_val = trace_eval(args[1].clone(), ctx)?;
         let options_borrowed = options_val.read();
@@ -504,7 +572,7 @@ fn eval_compile_plugin(
             }
             if let Some(import_val) = opt_map.get(":import").or_else(|| opt_map.get("import")) {
                 if matches!(&import_val.read().value, Value::Bool(true)) {
-                    _auto_import = true;
+                    auto_import = true;
                 }
             }
         } else {
@@ -515,6 +583,7 @@ fn eval_compile_plugin(
         }
     }
 
+    // Check if plugin directory exists
     if !Path::new(&plugin_path).exists() {
         return Err(LispError::EvalError {
             message: format!("Plugin path '{}' does not exist", plugin_path),
@@ -522,6 +591,7 @@ fn eval_compile_plugin(
         });
     }
 
+    // Compile the plugin
     let status = Command::new("cargo")
         .args(["build", "--release"])
         .current_dir(&plugin_path)
@@ -538,6 +608,7 @@ fn eval_compile_plugin(
         });
     }
 
+    // Determine library extension
     let ext = if cfg!(target_os = "macos") {
         "dylib"
     } else if cfg!(target_os = "windows") {
@@ -547,33 +618,83 @@ fn eval_compile_plugin(
     };
 
     let source = format!("{}/target/release/lib{}.{}", plugin_path, plugin_name, ext);
-    let dest = format!("native/lib{}.so", plugin_name);
+    let dest = format!("native/lib{}.{}", plugin_name, ext);
 
+    // Create native directory and copy library
     fs::create_dir_all("native").ok();
     fs::copy(&source, &dest).map_err(|e| LispError::EvalError {
         message: format!("Failed to copy compiled plugin: {}", e),
         pos: None,
     })?;
 
-    // Load and register immediately
+    // Load the library
     let lib = unsafe { Library::new(&dest) }.map_err(|e| LispError::EvalError {
         message: format!("Failed to load compiled plugin: {}", e),
         pos: None,
     })?;
 
-    let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
-        lib.get(b"blink_register")
-            .map_err(|e| LispError::EvalError {
-                message: format!("Failed to find blink_register: {}", e),
-                pos: None,
-            })?
+    // Try the new registration function first (with exports)
+    let exports = match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
+        Ok(register_with_exports) => {
+            // Create a new environment for the module
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            let exported_names = unsafe { register_with_exports(&mut *module_env.write()) };
+            
+            // Register the module with known exports
+            let exports_set: HashSet<String> = exported_names.into_iter().collect();
+            let module = Module {
+                name: plugin_name.clone(),
+                source: ModuleSource::NativeDylib(PathBuf::from(&dest)),
+                exports: exports_set.clone(),
+                env: module_env,
+                ready: true,
+            };
+            let _arc_mod = ctx.module_registry.register_module(module);
+            
+            exports_set
+        },
+        Err(_) => {
+            // Fall back to old registration function (no export tracking)
+            let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
+                lib.get(b"blink_register")
+                    .map_err(|e| LispError::EvalError {
+                        message: format!("Failed to find blink_register or blink_register_with_exports: {}", e),
+                        pos: None,
+                    })?
+            };
+            
+            // Create a new environment for the module
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            unsafe { register(&mut *module_env.write()) };
+            
+            // We don't know the exports, so we'll have to extract them from the environment
+            let exports = extract_env_symbols(&module_env);
+            let module = Module {
+                name: plugin_name.clone(),
+                source: ModuleSource::NativeDylib(PathBuf::from(&dest)),
+                exports: exports.clone(),
+                env: module_env,
+                ready: true,
+            };
+            // Register the module
+            let _arc_mod = ctx.module_registry.register_module(module);
+            
+            exports
+        }
     };
 
-    unsafe { register(&mut *ctx.env.write()) };
+    // Store the library to prevent it from being unloaded
+    ctx.module_registry.store_native_library(PathBuf::from(&dest), lib);
 
-    ctx.plugins.insert(plugin_name, Arc::new(lib));
+    println!("Compiled and loaded plugin '{}' with {} exports: {:?}", 
+             plugin_name, exports.len(), exports);
 
     Ok(nil())
+}
+
+// Helper function to extract symbol names from an environment
+fn extract_env_symbols(env: &Arc<RwLock<Env>>) -> HashSet<String> {
+    env.read().vars.keys().cloned().collect()
 }
 
 fn eval_def_reader_macro(
@@ -608,4 +729,692 @@ fn eval_def_reader_macro(
         .reader_macros
         .insert(ch, func.clone());
     Ok(func)
+}
+
+/// Module declaration and context management
+fn eval_mod(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    if args.is_empty() {
+        return Err(LispError::ArityMismatch {
+            expected: 1,
+            got: 0,
+            form: "mod".into(),
+            pos: None,
+        });
+    }
+    
+    // Parse flags
+    let (flags, name_index) = parse_flags(args);
+    if flags.len() < 1 {
+        return Err(LispError::EvalError {
+            message: "At least one flag is required.".into(),
+            pos: None,
+        });
+    }
+    
+    // Extract module name
+    if name_index >= args.len() {
+        return Err(LispError::EvalError {
+            message: "Missing module name after flags".into(),
+            pos: None,
+        });
+    }
+    
+    let name = extract_name(&args[name_index])?;
+    
+    
+    let (options, body_start) = parse_mod_options(&args[name_index + 1..])?;
+    
+
+    let should_declare = flags.contains("declare") || flags.is_empty();
+    let should_enter = flags.contains("enter");
+    
+    let mut module = ctx.module_registry.get_module(&name);
+    
+
+    if should_declare && module.is_none() {
+        let current_file = ctx.current_file.clone().unwrap_or_else(|| "<repl>".to_string());
+        let source = if current_file == "<repl>" {
+            ModuleSource::Repl
+        } else {
+            ModuleSource::BlinkFile(PathBuf::from(current_file))
+        };
+        let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+        let new_module = Module {
+            name: name.clone(),
+            // using the global env as parent
+            env: module_env,
+            exports: HashSet::new(),
+            source: source,
+            ready: true,
+        };
+        let module_arc = ctx.module_registry.register_module(new_module);
+        module = Some(module_arc);        
+    }
+    if should_declare && options.contains_key("exports") {
+        let mut module_guard = module.as_ref().unwrap().write();
+        update_module_exports(&mut module_guard, &options["exports"])?;
+    }
+
+    if should_enter {
+        if let Some(module) = module {
+            ctx.current_module = Some(module.read().name.clone());
+            ctx.env = module.read().env.clone();
+        } else {
+            return Err(LispError::ModuleError {
+                message: "Module not found".into(),
+                pos: None,
+            });
+        }
+    }
+    Ok(nil())
+    
+}
+
+/// Helper to parse keyword flags at the beginning of args
+fn parse_flags(args: &[BlinkValue]) -> (HashSet<String>, usize) {
+    let mut flags = HashSet::new();
+    let mut name_index = 0;
+    
+    for (i, arg) in args.iter().enumerate() {
+        if let Value::Keyword(kw) = &arg.read().value {
+            flags.insert(kw.clone());
+            name_index = i + 1;
+        } else {
+            break;
+        }
+    }
+    
+    (flags, name_index)
+}
+
+/// Helper to check if an option is special (not for metadata)
+fn is_special_option(key: &str) -> bool {
+    matches!(key, "exports" | "parent")
+}
+
+/// Helper to update module exports
+fn update_module_exports(module: &mut Module, exports_val: &BlinkValue) -> Result<(), LispError> {
+    match &exports_val.read().value {
+        Value::Keyword(kw) if kw == "all" => {
+            let all_keys = module.env.read().vars.keys().cloned().collect();
+            module.exports = all_keys;
+            return Ok(());
+        },
+        Value::List(items) | Value::Vector(items) => {
+            for item in items {
+                if let Value::Symbol(name) = &item.read().value {
+                    module.exports.insert(name.clone());
+                } else {
+                    return Err(LispError::EvalError {
+                        message: "Exports must be a list of symbols".into(),
+                        pos: None,
+                    });
+                }
+            }
+        },
+        _ => return Err(LispError::EvalError {
+            message: "Exports must be a list or vector".into(),
+            pos: None,
+        }),
+    }
+    
+    Ok(())
+}
+
+fn eval_load(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    let (source_type, source_value, options, _) = parse_load_args(args)?;
+    
+    match source_type.as_str() {
+        "file" => {
+            let file_path = PathBuf::from(&source_value);
+            load_blink_file(file_path, ctx)?;
+            Ok(nil())
+        },
+        
+        "native" => {
+            let path = PathBuf::from(&source_value);
+            
+            // Check if it's a Cargo project (has Cargo.toml) or a single library file
+            if path.is_dir() {
+                let cargo_toml = path.join("Cargo.toml");
+                if cargo_toml.exists() {
+                    // It's a Cargo project - compile it
+                    load_native_code(&args, ctx)
+                } else {
+                    return Err(LispError::EvalError {
+                        message: format!("Directory '{}' is not a valid Cargo project (no Cargo.toml found)", source_value),
+                        pos: None,
+                    });
+                }
+            } else if path.extension().map_or(false, |ext| {
+                ext == "so" || ext == "dll" || ext == "dylib"
+            }) {
+                // It's a pre-built library file
+                load_native_library(&args, ctx)
+            } else {
+                return Err(LispError::EvalError {
+                    message: format!("'{}' is neither a Cargo project directory nor a native library file", source_value),
+                    pos: None,
+                });
+            }
+        },
+        
+        // "cargo" => {
+        //     // Direct cargo crate compilation
+        //     compile_cargo_crate(&source_value, ctx)
+        // },
+        
+        // "dylib" | "dll" | "so" => {
+        //     // Direct library loading
+        //     load_single_native_library(&source_value, ctx)
+        // },
+        
+        // "url" => {
+        //     load_url_module(source_value, ctx)
+        // },
+        
+        // "git" => {
+        //     load_git_module(source_value, options, ctx)
+        // },
+        
+        _ => Err(LispError::EvalError {
+            message: format!("Unknown load source type: :{}", source_type),
+            pos: None,
+        }),
+    }
+}
+
+/// Check if a source is an external module
+fn is_external_source(source: &Option<ModuleSource>) -> bool {
+    match source {
+        Some(ModuleSource::Repl) => false,
+        Some(ModuleSource::NativeDylib(_)) => true,
+        Some(ModuleSource::Wasm(_)) => true,
+        Some(ModuleSource::BlinkFile(_)) => false,
+        Some(ModuleSource::BlinkPackage(_)) => true,
+        Some(ModuleSource::Cargo(_)) => true,
+        Some(ModuleSource::Git { .. }) => true,
+        Some(ModuleSource::Url(_)) => true,
+        Some(ModuleSource::BlinkDll(_)) => true,
+        None => false,
+    }
+}
+
+/// Get a string option
+fn get_string_option(options: &HashMap<String, BlinkValue>, key: &str) -> Option<String> {
+    options.get(key).and_then(|val| {
+        match &val.read().value {
+            Value::Str(s) => Some(s.clone()),
+            Value::Symbol(s) => Some(s.clone()),
+            _ => None,
+        }
+    })
+}
+
+
+/// Extract a name from a BlinkValue
+fn extract_name(value: &BlinkValue) -> Result<String, LispError> {
+    match &value.read().value {
+        Value::Symbol(s) => Ok(s.clone()),
+        Value::Str(s) => Ok(s.clone()),
+        _ => Err(LispError::EvalError {
+            message: "Expected a symbol or string for name".into(),
+            pos: None,
+        }),
+    }
+}
+
+/// Load and evaluate a Blink source file
+fn load_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> Result<(), LispError> {
+    // Don't evaluate if already loaded
+    if ctx.module_registry.is_file_evaluated(&file_path) {
+        return Ok(());
+    }
+
+    let contents = fs::read_to_string(&file_path).map_err(|e| LispError::EvalError {
+        message: format!("Failed to read file: {}", e),
+        pos: None,
+    })?;
+    let mut reader_ctx = ctx.reader_macros.clone();
+    // Parse the file
+    let forms = crate::parser::parse_all(&contents, &mut reader_ctx)?;
+    
+    // Set current file context
+    let old_file = ctx.current_file.clone();
+    let file_name = file_path.file_name()
+        .ok_or(LispError::EvalError { message: "File name missing.".into(), pos: None })? 
+        .to_str().ok_or(LispError::EvalError { message: "File name missing.".into(), pos: None })?.to_string();
+    ctx.current_file = Some(file_name);
+    
+    // Evaluate all forms in the file
+    for form in forms {
+        eval(form, ctx)?;
+    }
+    
+    // Restore previous file context
+    ctx.current_file = old_file;
+    
+    // Mark file as evaluated
+    ctx.module_registry.mark_file_evaluated(file_path);
+    
+    Ok(())
+}
+
+fn parse_import_args(args: &[BlinkValue]) -> Result<(ImportType, Option<HashMap<String, BlinkValue>>), LispError> {
+    if args.is_empty() {
+        return Err(LispError::ArityMismatch {
+            expected: 1,
+            got: 0,
+            form: "imp".into(),
+            pos: None,
+        });
+    }
+
+    let first_arg = &args[0].read().value;
+    
+    match first_arg {
+        // File import: (imp "module-name")
+        Value::Str(module_name) => {
+            
+            Ok((ImportType::File(module_name.clone()), None))
+        },
+        
+        // Symbol import: (imp [sym1 sym2] :from module)
+        Value::List(list) if !list.is_empty() => {
+            // Check if it's a vector form (list starting with 'vector)
+            if let Value::Symbol(first) = &list[0].read().value {
+                if first == "vector" {
+                    let (import_type, options) = parse_symbol_import(&list[1..], &args[1..])?;
+                    return Ok((import_type, Some(options)))
+                }
+            }
+            // Otherwise, treat as regular list of symbols
+            let (import_type, options) = parse_symbol_import(list, &args[1..])?;
+            Ok((import_type, Some(options)))
+        },
+        
+        // Vector import: (imp [sym1 sym2] :from module)  
+        Value::Vector(symbols) => {
+            let (import_type, options) = parse_symbol_import(symbols, &args[1..])?;
+            Ok((import_type, Some(options)))
+        },
+        
+        _ => Err(LispError::EvalError {
+            message: "imp expects a string (file) or vector (symbols)".into(),
+            pos: args[0].read().pos.clone(),
+        }),
+    }
+}
+
+fn parse_symbol_import(
+    symbol_list: &[BlinkValue], 
+    remaining_args: &[BlinkValue]
+) -> Result<(ImportType, HashMap<String, BlinkValue>), LispError> {
+    
+    // Parse symbols and any aliases
+    let mut symbols = Vec::new();
+    let mut aliases = HashMap::new();
+    
+    let mut i = 0;
+    while i < symbol_list.len() {
+        match &symbol_list[i].read().value {
+            Value::Symbol(name) if name == "*" => {
+                symbols.push("*".to_string()); // Import all
+                i += 1;
+            },
+            Value::Symbol(name) => {
+                // Check for alias: [func1 :as f1]
+                if i + 2 < symbol_list.len() {
+                    if let Value::Keyword(kw) = &symbol_list[i + 1].read().value {
+                        if kw == "as" {
+                            if let Value::Symbol(alias) = &symbol_list[i + 2].read().value {
+                                symbols.push(name.clone());
+                                aliases.insert(name.clone(), alias.clone());
+                                i += 3;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                // Regular symbol
+                symbols.push(name.clone());
+                i += 1;
+            },
+            _ => return Err(LispError::EvalError {
+                message: "Symbol list must contain symbols".into(),
+                pos: symbol_list[i].read().pos.clone(),
+            }),
+        }
+    }
+    
+    // Look for :from module-name
+    let mut module_name = None;
+    let mut options = HashMap::new();
+    
+    let mut j = 0;
+    while j < remaining_args.len() {
+        if let Value::Keyword(kw) = &remaining_args[j].read().value {
+            match kw.as_str() {
+                "from" => {
+                    if j + 1 >= remaining_args.len() {
+                        return Err(LispError::EvalError {
+                            message: ":from requires a module name".into(),
+                            pos: remaining_args[j].read().pos.clone(),
+                        });
+                    }
+                    if let Value::Symbol(module) = &remaining_args[j + 1].read().value {
+                        module_name = Some(module.clone());
+                        j += 2;
+                    } else {
+                        return Err(LispError::EvalError {
+                            message: ":from expects a module name".into(),
+                            pos: remaining_args[j + 1].read().pos.clone(),
+                        });
+                    }
+                },
+                "reload" => {
+                    options.insert("reload".to_string(), bool_val(true));
+                    j += 1;
+                },
+                other => {
+                    return Err(LispError::EvalError {
+                        message: format!("Unknown import option: {}", other),
+                        pos: remaining_args[j].read().pos.clone(),
+                    });
+                }
+            }
+        } else {
+            return Err(LispError::EvalError {
+                message: "Expected keyword after symbol list".into(),
+                pos: remaining_args[j].read().pos.clone(),
+            });
+        }
+    }
+    
+    let module = module_name.ok_or_else(|| LispError::EvalError {
+        message: "Symbol import requires :from module-name".into(),
+        pos: None,
+    })?;
+    
+    Ok((ImportType::Symbols { symbols, module, aliases }, options))
+}
+
+fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), LispError> {
+    let mut options = HashMap::new();
+    let mut i = 0;
+    
+    while i < args.len() {
+        match &args[i].read().value {
+            Value::Keyword(key) => {
+                match key.as_str() {
+                    "exports" => {
+                        if i + 1 >= args.len() {
+                            return Err(LispError::EvalError {
+                                message: ":exports requires a list".into(),
+                                pos: args[i].read().pos.clone(),
+                            });
+                        }
+                        options.insert("exports".to_string(), args[i + 1].clone());
+                        i += 2;
+                    },
+                    other => {
+                        return Err(LispError::EvalError {
+                            message: format!("Unknown option: {}", other),
+                            pos: args[i].read().pos.clone(),
+                        });
+                    }
+                }
+            },
+            _ => {
+                // Not a keyword, so we've reached the body
+                break;
+            }
+        }
+    }
+    
+    Ok((options, i))
+}
+
+fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf, LispError> {
+    // 1. Check if module is already registered (we know which file it came from)
+    if let Some(module) = ctx.module_registry.get_module(module_name) {
+        let module_read = module.read();
+        if let ModuleSource::BlinkFile(ref path) = module_read.source {
+            return Ok(path.clone());
+        }
+    }
+    
+    // 2. Try direct file mapping first (most common case)
+    let direct_path = PathBuf::from(format!("lib/{}.blink", module_name));
+    if direct_path.exists() {
+        return Ok(direct_path);
+    }
+    
+    // 3. Try parent directory approach (for multi-module files)
+    let parts: Vec<&str> = module_name.split('/').collect();
+    for i in (1..parts.len()).rev() {
+        let parent_path = parts[..i].join("/");
+        let candidate = PathBuf::from(format!("lib/{}.blink", parent_path));
+        
+        if candidate.exists() {
+            // Check if this file actually contains our target module
+            if file_contains_module(&candidate, module_name)? {
+                return Ok(candidate);
+            }
+        }
+    }
+    
+    // 4. Search common patterns
+    let search_candidates = vec![
+        format!("lib/{}.bl", parts.join("-")),           // math/utils -> math-utils.blink
+        format!("lib/{}.bl", parts.last().unwrap()),     // math/utils -> utils.blink
+        format!("lib/{}/mod.bl", parts[0]),              // math/utils -> math/mod.blink
+    ];
+    
+    for candidate_str in search_candidates {
+        let candidate = PathBuf::from(candidate_str);
+        if candidate.exists() && file_contains_module(&candidate, module_name)? {
+            return Ok(candidate);
+        }
+    }
+    
+    Err(LispError::EvalError {
+        message: format!("Module '{}' not found. Tried:\n  lib/{}.bl\n  lib/{}.bl\n  And parent directories", 
+                        module_name, module_name, parts.join("-")),
+        pos: None,
+    })
+}
+
+// Helper function to check if a file contains a specific module declaration
+fn file_contains_module(file_path: &PathBuf, module_name: &str) -> Result<bool, LispError> {
+    let content = std::fs::read_to_string(file_path).map_err(|e| LispError::EvalError {
+        message: format!("Failed to read file {:?}: {}", file_path, e),
+        pos: None,
+    })?;
+    
+    // Quick scan for module declaration (this is a simple approach)
+    // More robust would be to actually parse, but this is faster for searching
+    let search_patterns = vec![
+        format!("(mod {}", module_name),
+        format!("(mod :declare {}", module_name),
+        format!("(mod :enter {}", module_name),
+    ];
+    
+    for pattern in search_patterns {
+        if content.contains(&pattern) {
+            return Ok(true);
+        }
+    }
+    
+    Ok(false)
+}
+
+fn import_symbols_into_env(
+    symbols: &[String], 
+    module_name: &str, 
+    aliases: &HashMap<String, String>,
+    ctx: &mut EvalContext
+) -> Result<(), LispError> {
+    let module = ctx.module_registry.get_module(module_name)
+        .ok_or_else(|| LispError::EvalError {
+            message: format!("Module '{}' not found", module_name),
+            pos: None,
+        })?;
+    
+    let module_read = module.read();
+    
+    // Handle import all (*)
+    if symbols.len() == 1 && symbols[0] == ":all" {
+        for export_name in &module_read.exports {
+            let local_name = aliases.get(export_name).unwrap_or(export_name);
+            
+            // Create a live reference instead of copying the value
+            let reference = create_module_reference(module_name, export_name);
+            ctx.env.write().vars.insert(local_name.clone(), reference);
+        }
+        return Ok(());
+    }
+    
+    // Import specific symbols
+    for symbol_name in symbols {
+        // Check if symbol is exported
+        if !module_read.exports.contains(symbol_name) {
+            return Err(LispError::EvalError {
+                message: format!("Symbol '{}' is not exported by module '{}'", symbol_name, module_name),
+                pos: None,
+            });
+        }
+        
+        let local_name = aliases.get(symbol_name).unwrap_or(symbol_name);
+        
+        // Create a live reference to the module symbol
+        let reference = create_module_reference(module_name, symbol_name);
+        ctx.env.write().vars.insert(local_name.clone(), reference);
+    }
+    
+    Ok(())
+}
+
+// Helper to create live references to module symbols
+fn create_module_reference(module_name: &str, symbol_name: &str) -> BlinkValue {
+    BlinkValue(Arc::new(RwLock::new(LispNode {
+        value: Value::ModuleReference {
+            module: module_name.to_string(),
+            symbol: symbol_name.to_string(),
+        },
+        pos: None,
+    })))
+}
+
+// Generic parse options function
+fn parse_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), LispError> {
+    let mut options = HashMap::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        match &args[i].read().value {
+            // make sure that the next argument is a value
+            Value::Keyword(key) => {
+                if i + 1 >= args.len() {
+                    return Err(LispError::EvalError {
+                        message: format!("Option {} requires a value", key),
+                        pos: args[i].read().pos.clone(),
+                    });
+                }
+                options.insert(key.clone(), args[i + 1].clone());
+                i += 2;
+            },
+            _ => {
+                break;
+            }
+        }
+    }
+
+    Ok((options, i))
+}
+
+fn parse_load_args(args: &[BlinkValue]) -> Result<(String, String, HashMap<String, BlinkValue>, usize), LispError> {
+    if args.is_empty() {
+        return Err(LispError::ArityMismatch {
+            expected: 2,
+            got: 0,
+            form: "load".into(),
+            pos: None,
+        });
+    }
+    
+    // First argument should be a keyword indicating source type
+    let source_type = match &args[0].read().value {
+        Value::Keyword(kw) => kw.clone(),
+        _ => return Err(LispError::EvalError {
+            message: "load expects a keyword as first argument (:file, :native, :cargo, :dylib, :url, :git)".into(),
+            pos: args[0].read().pos.clone(),
+        }),
+    };
+    
+    // Second argument should be the source value
+    if args.len() < 2 {
+        return Err(LispError::EvalError {
+            message: format!("load {} requires a source argument", source_type),
+            pos: None,
+        });
+    }
+    
+    let source_value = match &args[1].read().value {
+        Value::Str(s) => s.clone(),
+        _ => return Err(LispError::EvalError {
+            message: "load source must be a string".into(),
+            pos: args[1].read().pos.clone(),
+        }),
+    };
+    
+    // Parse any additional options
+    let (options, s) = parse_options(&args[2..])?;
+    
+    Ok((source_type, source_value, options, s))
+}
+
+fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    let (import_type, _options) = parse_import_args(args)?;
+    
+    match import_type {
+        ImportType::File(file_name) => {
+            println!("Importing file: {}", file_name);
+            // File import: (imp "module-name")
+            let file_path = PathBuf::from(format!("lib/{}.blink", file_name));
+            
+            // Load the file if needed
+            load_blink_file(file_path, ctx)?;
+            
+            // Make the file's modules available for qualified access
+            // (they're already registered by eval_mod during file evaluation)
+            Ok(nil())
+        },
+        
+        ImportType::Symbols { symbols, module, aliases } => {
+            // Check if module already exists
+            let module_exists = ctx.module_registry.get_module(&module).is_some();
+            
+            if !module_exists {
+                
+                // Find which file contains the module
+                let file_path = find_module_file(&module, ctx)?;
+                
+                // Load the file if needed (this registers all modules in the file)
+                load_blink_file(file_path, ctx)?;
+                
+                // Verify the module is now available
+                if ctx.module_registry.get_module(&module).is_none() {
+                    return Err(LispError::EvalError {
+                        message: format!("Module '{}' was not found in the loaded file", module),
+                        pos: None,
+                    });
+                }
+            }
+            
+            // Import the symbols into current environment
+            import_symbols_into_env(&symbols, &module, &aliases, ctx)?;
+            Ok(nil())
+        }
+    }
 }

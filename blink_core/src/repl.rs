@@ -37,6 +37,7 @@ pub fn start_repl() {
         // 🌟 Clone the reader macros once for this REPL iteration
         let reader_macros = ctx.reader_macros.read().reader_macros.clone();
         let mut temp_reader_ctx = crate::parser::ReaderContext { reader_macros };
+        let mut temp_reader_ctx = Arc::new(RwLock::new(temp_reader_ctx));
 
         match read_multiline(&mut rl, &mut temp_reader_ctx) {
             Ok(line) if line.trim() == "exit" => break,
@@ -48,15 +49,20 @@ pub fn start_repl() {
                         match &e {
                             LispError::TokenizerError { pos, .. }
                             
-                            | LispError::UnexpectedToken { pos, .. } => {
-                                println!("   [at {}]", pos);
-                            },
+                                                    | LispError::UnexpectedToken { pos, .. } => {
+                                                        println!("   [at {}]", pos);
+                                                    },
                             | LispError::ParseError { pos, .. } => {
-                                println!("   [at {}]", pos);
-                            }
+                                                        println!("   [at {}]", pos);
+                                                    }
                             LispError::EvalError { pos, .. }
-                            | LispError::ArityMismatch { pos, .. }
-                            | LispError::UndefinedSymbol { pos, .. } => {
+                                                    | LispError::ArityMismatch { pos, .. }
+                                                    | LispError::UndefinedSymbol { pos, .. } => {
+                                                        if let Some(pos) = pos {
+                                                            println!("   [at {}]", pos);
+                                                        }
+                                                    }
+                            LispError::ModuleError {  pos, .. } => {
                                 if let Some(pos) = pos {
                                     println!("   [at {}]", pos);
                                 }
@@ -74,7 +80,7 @@ pub fn start_repl() {
 
 pub fn read_multiline(
     rl: &mut Editor<(), FileHistory>,
-    rcx: &mut ReaderContext,
+    rcx: &mut Arc<RwLock<ReaderContext>>,
 ) -> Result<String, rustyline::error::ReadlineError> {
     let mut lines = Vec::new();
 
@@ -96,7 +102,7 @@ pub fn read_multiline(
 fn run_line(
     code: &str,
     ctx: &mut EvalContext,
-    reader_macros: &mut ReaderContext,
+    reader_macros: &mut Arc<RwLock<ReaderContext>>,
 ) -> Result<BlinkValue, LispError> {
     let mut tokens = tokenize(code)?;
     let ast = parse(&mut tokens, reader_macros)?;

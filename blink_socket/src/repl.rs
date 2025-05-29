@@ -167,7 +167,7 @@ where
                         .ok_or(anyhow::anyhow!("No eval context found."))?;
 
                     let ast = {
-                        let mut rctx = ctx.reader_macros.write(); // this lock is scoped
+                        let mut rctx = ctx.reader_macros.clone();
                         let mut tokens = tokenize_at(&code, Some(source_pos))?;
                         parse(&mut tokens, &mut rctx).context("Failed to parse code")?
                     }; // `rctx` dropped here

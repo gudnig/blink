@@ -25,8 +25,9 @@ impl ReaderContext {
 fn expand_macro_body(form: BlinkValue, env: Arc<RwLock<Env>>) -> Result<BlinkValue, LispError> {
     match &form.read().value {
         Value::Symbol(s) => {
+            let available_modules = env.read().available_modules.clone();
             // If symbol exists in the macro local env, replace it
-            if let Some(val) = env.read().get(s) {
+            if let Some(val) = env.read().get_local(s) {
                 Ok(val)
             } else {
                 Ok(form.clone()) // leave symbol unchanged
@@ -170,7 +171,7 @@ pub fn atom(token: &str, pos: Option<SourcePos>) -> BlinkValue {
 
 pub fn parse(
     tokens: &mut Vec<(String, SourcePos)>,
-    rcx: &mut ReaderContext,
+    rcx: &mut Arc<RwLock<ReaderContext>>,
 ) -> Result<BlinkValue, LispError> {
     if tokens.is_empty() {
         return Err(LispError::UnexpectedToken {
@@ -266,15 +267,17 @@ pub fn parse(
 
         _ => {
             let mut matched_macro: Option<(String, BlinkValue)> = None;
-        
-            for (prefix, macro_fn) in rcx.reader_macros.iter() {
-                if token.starts_with(prefix) {
-                    if let Some((best_prefix, _)) = &matched_macro {
-                        if prefix.len() > best_prefix.len() {
+            {
+                let rcx_read = rcx.read();
+                for (prefix, macro_fn) in rcx_read.reader_macros.iter() {
+                    if token.starts_with(prefix) {
+                        if let Some((best_prefix, _)) = &matched_macro {
+                            if prefix.len() > best_prefix.len() {
+                                matched_macro = Some((prefix.clone(), macro_fn.clone()));
+                            }
+                        } else {
                             matched_macro = Some((prefix.clone(), macro_fn.clone()));
                         }
-                    } else {
-                        matched_macro = Some((prefix.clone(), macro_fn.clone()));
                     }
                 }
             }
@@ -317,13 +320,12 @@ pub fn parse(
     }
 }
 
-pub fn parse_all(code: &str) -> Result<Vec<BlinkValue>, LispError> {
+pub fn parse_all(code: &str, ctx: &mut Arc<RwLock<ReaderContext>>) -> Result<Vec<BlinkValue>, LispError> {
     let mut tokens = tokenize(code)?;
     let mut forms = Vec::new();
-    let mut reader_ctx = ReaderContext::new();
 
     while !tokens.is_empty() {
-        let form = parse(&mut tokens, &mut reader_ctx)?;
+        let form = parse(&mut tokens, ctx)?;
         forms.push(form);
     }
 

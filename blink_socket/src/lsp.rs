@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    helpers::collect_symbols_from_forms, lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range}, session::{Document, Session, SymbolInfo, SymbolKind, SymbolSource}, session_manager::SessionManager
+    helpers::collect_symbols_from_forms, lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range}, session::{Document, Session, SymbolSource}, session_manager::SessionManager
 };
 use anyhow::{anyhow, Context, Result};
-use blink_core::{error::LispError, parser::parse_all, value::SourcePos, BlinkValue};
+use blink_core::{ parser::{parse_all, ReaderContext}, value::SourcePos};
+use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -400,6 +401,20 @@ where
         }
     }
 
+    fn get_reader_ctx(&self) -> Arc<RwLock<ReaderContext>> {
+        let mut reader_ctx = match &self.session {
+            Some(session) => {
+                let eval_ctx_guard = session.eval_ctx.read();
+                match eval_ctx_guard.as_ref() {
+                    Some(eval_ctx) => eval_ctx.reader_macros.clone(),
+                    None => Arc::new(RwLock::new(ReaderContext::new())),
+                }
+            },
+            None => Arc::new(RwLock::new(ReaderContext::new())),
+        }; 
+        reader_ctx
+    }
+
     async fn handle_text_document_did_open(
         &mut self,
         params: Value,
@@ -416,7 +431,9 @@ where
         let uri_clone = uri.clone();
         let source = SymbolSource::File(uri_clone.clone());
     
-        match parse_all(&text) {
+        let mut reader_ctx = self.get_reader_ctx();
+
+        match parse_all(&text, &mut reader_ctx) {
             Ok(forms) => {
                 
                 let new_doc = Document {
@@ -500,7 +517,8 @@ where
             }
         }
         let source = SymbolSource::File(uri.clone());
-        let forms = parse_all(&current_text);
+        let mut reader_ctx = self.get_reader_ctx();
+        let forms = parse_all(&current_text, &mut reader_ctx);
         match forms {
             Ok(forms) =>  // Update document in session
                     {
@@ -987,46 +1005,54 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
 
     let (message, range) = match err {
         LispError::TokenizerError { message, pos } => {
-            (message.clone(), create_range_from_position(pos, 1))
-        }
+                        (message.clone(), create_range_from_position(pos, 1))
+            }
         LispError::ParseError { message, pos } => {
-            (message.clone(), pos.clone().into())
-        }
+                (message.clone(), pos.clone().into())
+            }
         LispError::EvalError { message, pos } => {
-            let range = pos
-                .as_ref()
-                .map(|p| p.clone().into())
-                .unwrap_or_else(create_default_range);
-            (message.clone(), range)
-        }
+                let range = pos
+                    .as_ref()
+                    .map(|p| p.clone().into())
+                    .unwrap_or_else(create_default_range);
+                (message.clone(), range)
+            }
         LispError::ArityMismatch {
-            expected,
-            got,
-            form,
-            pos,
-        } => {
-            let message = format!(
-                "Wrong number of arguments to '{}': expected {}, got {}",
-                form, expected, got
-            );
-            let range = pos
-                .as_ref()
-                .map(|p|p.clone().into())
-                .unwrap_or_else(create_default_range);
-            (message, range)
-        }
+                expected,
+                got,
+                form,
+                pos,
+            } => {
+                let message = format!(
+                    "Wrong number of arguments to '{}': expected {}, got {}",
+                    form, expected, got
+                );
+                let range = pos
+                    .as_ref()
+                    .map(|p|p.clone().into())
+                    .unwrap_or_else(create_default_range);
+                (message, range)
+            }
         LispError::UndefinedSymbol { name, pos } => {
-            let message = format!("Undefined symbol: {}", name);
+                let message = format!("Undefined symbol: {}", name);
+                let range = pos
+                    .as_ref()
+                    .map(|p| p.clone().into())
+                    .unwrap_or_else(create_default_range);
+                (message, range)
+            }
+        LispError::UnexpectedToken { token, pos } => (
+                format!("Unexpected token: {}", token),
+                create_range_from_position(pos, token.len()),
+            ),
+        LispError::ModuleError { message, pos } => {
+            let message = format!("Module error: {}", message);
             let range = pos
                 .as_ref()
                 .map(|p| p.clone().into())
                 .unwrap_or_else(create_default_range);
             (message, range)
-        }
-        LispError::UnexpectedToken { token, pos } => (
-            format!("Unexpected token: {}", token),
-            create_range_from_position(pos, token.len()),
-        ),
+        },
     };
 
     Diagnostic {

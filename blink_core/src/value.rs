@@ -1,4 +1,6 @@
 use crate::env::Env;
+use crate::error::LispError;
+use crate::module::Module;
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -92,7 +94,11 @@ pub enum Value {
         body: Vec<BlinkValue>,
         env: Arc<RwLock<Env>>, // closure capture
     },
-
+    // New type for imported symbols
+    ModuleReference {
+        module: String,
+        symbol: String,
+    },
     Nil,
 }
 impl Value {
@@ -108,9 +114,11 @@ impl Value {
             Value::Map(_) => "map",
             Value::FuncUserDefined { .. } => "fn",
             Value::NativeFunc(_) => "native-fn",
+            Value::ModuleReference { .. } => "imported-symbol",
             Value::Nil => "nil",
         }
     }
+    
 }
 
 use std::fmt;
@@ -128,6 +136,7 @@ impl fmt::Debug for Value {
             Value::Map(m) => write!(f, "{{map with {} keys}}", m.len()),
             Value::FuncUserDefined { params, .. } => write!(f, "#<fn {:?}>", params),
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
+            Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -173,6 +182,7 @@ impl fmt::Display for Value {
             }
             Value::FuncUserDefined { .. } => write!(f, "#<fn>"),
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
+            Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Nil => write!(f, "nil"),
         }
     }
