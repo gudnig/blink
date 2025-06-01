@@ -22,9 +22,10 @@ This document tracks all current and planned features for the Blink Lisp interpr
 - ✅ Fully working REPL (readline, errors, history)
 - ✅ `import` for loading `.bl` source modules
 - ✅ `native-import` for loading native Rust plugins (`.so`/`.dll`)
-- ⬜ Support for macros (reader and compiler-level)
+- ✅ Support for macros (reader and compiler-level)
+- ⬜ Macro cache to avoid frequent expansion
 - ⬜ Built-in numeric, string, and collection functions (core lib)
-- ⬜ Module system with namespace isolation
+- ✅ Module system with namespace isolation
 - ⬜ Rich pattern matching or destructuring forms
 - ⬜ Optional type tags or value introspection utilities
 - ⬜ Inline documentation / docstrings for functions
@@ -103,7 +104,7 @@ This document tracks all current and planned features for the Blink Lisp interpr
 
 - ⬜ Blink-to-Rust transpiler (`blinkc`)
 - ⬜ Blink-to-JavaScript transpiler (for browser support)
-- ⬜ Blink runtime in WASM (optional)
+- ⬜ Blink runtime in WASM
 
 ## ⚠️ Error Reporting
 

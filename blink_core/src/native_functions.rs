@@ -197,7 +197,7 @@ pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String>
 
 pub fn native_print(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     for val in args {
-        print!("{} ", format!("{:?}", val.read()));
+        print!("{} ", val.read().value);
     }
     println!();
     Ok(nil())

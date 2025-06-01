@@ -99,6 +99,12 @@ pub enum Value {
         module: String,
         symbol: String,
     },
+    Macro {
+        params: Vec<String>,
+        body: Vec<BlinkValue>,
+        env: Arc<RwLock<Env>>,
+        is_variadic: bool,
+    },
     Nil,
 }
 impl Value {
@@ -116,6 +122,7 @@ impl Value {
             Value::NativeFunc(_) => "native-fn",
             Value::ModuleReference { .. } => "imported-symbol",
             Value::Nil => "nil",
+            Value::Macro { .. } => "macro",
         }
     }
     
@@ -137,6 +144,7 @@ impl fmt::Debug for Value {
             Value::FuncUserDefined { params, .. } => write!(f, "#<fn {:?}>", params),
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
+            Value::Macro { .. } => write!(f, "#<macro>"),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -183,6 +191,7 @@ impl fmt::Display for Value {
             Value::FuncUserDefined { .. } => write!(f, "#<fn>"),
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
+            Value::Macro { .. } => write!(f, "#<macro>"),
             Value::Nil => write!(f, "nil"),
         }
     }

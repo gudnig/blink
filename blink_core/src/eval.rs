@@ -3,7 +3,7 @@ use crate::error::LispError;
 use crate::module::{ImportType, Module, ModuleRegistry, ModuleSource};
 use crate::parser::{ ReaderContext};
 use crate::telemetry::TelemetryEvent;
-use crate::value::{bool_val, nil, BlinkValue, LispNode, SourceRange, Value};
+use crate::value::{bool_val, list_val, nil, BlinkValue, LispNode, SourceRange, Value};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -96,7 +96,17 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispE
                     "imp" => eval_imp(&list[1..], ctx),
                     "mod" => eval_mod(&list[1..], ctx),
                     "load" => eval_load(&list[1..], ctx),
+                    "macro" => eval_macro(&list[1..], ctx),
                     "rmac" => eval_def_reader_macro(&list[1..], ctx),
+                    "quasiquote" => eval_quasiquote(&list[1..], ctx),
+                    "unquote" => Err(LispError::EvalError {
+                        message: "unquote used outside quasiquote".into(),
+                        pos: None,
+                    }),
+                    "unquote-splicing" => Err(LispError::EvalError {
+                        message: "unquote-splicing used outside quasiquote".into(),
+                        pos: None,
+                    }),
 
                     _ => {
                         let func = trace_eval(list[0].clone(), ctx)?;
@@ -173,6 +183,69 @@ pub fn eval_func(
             message: e,
             pos: None,
         }),
+        Value::Macro { params, body, env, is_variadic } => {
+            // Check arity
+            if *is_variadic {
+                if args.len() < params.len() - 1 {
+                    return Err(LispError::ArityMismatch {
+                        expected: params.len() - 1,
+                        got: args.len(),
+                        form: "macro (at least)".into(),
+                        pos: None,
+                    });
+                }
+            } else if params.len() != args.len() {
+                return Err(LispError::ArityMismatch {
+                    expected: params.len(),
+                    got: args.len(),
+                    form: "macro".into(),
+                    pos: None,
+                });
+            }
+        
+            // Create macro expansion environment
+            let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
+            
+            // Bind macro parameters
+            {
+                let mut env_guard = macro_env.write();
+                
+                if *is_variadic {
+                    // Bind regular parameters
+                    for (i, param) in params.iter().take(params.len() - 1).enumerate() {
+                        env_guard.set(param, args[i].clone());
+                    }
+                    
+                    // Bind rest parameter to remaining arguments as a list
+                    let rest_param = &params[params.len() - 1];
+                    let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
+                    env_guard.set(rest_param, list_val(rest_args));
+                } else {
+                    // Bind all parameters normally
+                    for (param, arg) in params.iter().zip(args.iter()) {
+                        env_guard.set(param, arg.clone());
+                    }
+                }
+            }
+        
+            // Save current context environment
+            let old_env = ctx.env.clone();
+            
+            // Switch to macro environment for expansion
+            ctx.env = macro_env;
+        
+            // Evaluate macro body to produce the expansion
+            let mut expansion = nil();
+            for form in body.iter() {
+                expansion = trace_eval(form.clone(), ctx)?;
+            }
+        
+            // Restore original environment
+            ctx.env = old_env;
+        
+            // Evaluate the macro expansion in the original context
+            trace_eval(expansion, ctx)
+        }
         Value::FuncUserDefined { params, body, env } => {
             if params.len() != args.len() {
                 return Err(LispError::ArityMismatch {
@@ -1417,4 +1490,177 @@ fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             Ok(nil())
         }
     }
+}
+
+
+
+// Add these functions to eval.rs
+fn eval_quasiquote(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    require_arity(args, 1, "quasiquote")?;
+    expand_quasiquote(args[0].clone(), ctx)
+}
+
+fn expand_quasiquote(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    match &expr.read().value {
+        Value::List(items) if !items.is_empty() => {
+            let first = &items[0];
+            match &first.read().value {
+                Value::Symbol(s) if s == "unquote" => {
+                    if items.len() != 2 {
+                        return Err(LispError::EvalError {
+                            message: "unquote expects exactly one argument".into(),
+                            pos: None,
+                        });
+                    }
+                    trace_eval(items[1].clone(), ctx)
+                }
+                Value::Symbol(s) if s == "unquote-splicing" => {
+                    return Err(LispError::EvalError {
+                        message: "unquote-splicing not valid here".into(),
+                        pos: None,
+                    });
+                }
+                _ => {
+                    let mut expanded_items = Vec::new();
+                    for item in items {
+                        if let Value::List(inner_items) = &item.read().value {
+                            if !inner_items.is_empty() {
+                                if let Value::Symbol(s) = &inner_items[0].read().value {
+                                    if s == "unquote-splicing" {
+                                        if inner_items.len() != 2 {
+                                            return Err(LispError::EvalError {
+                                                message: "unquote-splicing expects exactly one argument".into(),
+                                                pos: None,
+                                            });
+                                        }
+                                        let spliced = trace_eval(inner_items[1].clone(), ctx)?;
+                                        if let Value::List(splice_items) = &spliced.read().value {
+                                            expanded_items.extend(splice_items.clone());
+                                        } else {
+                                            return Err(LispError::EvalError {
+                                                message: "unquote-splicing expects a list".into(),
+                                                pos: None,
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        expanded_items.push(expand_quasiquote(item.clone(), ctx)?);
+                    }
+                    Ok(list_val(expanded_items))
+                }
+            }
+        }
+        Value::Vector(items) => {
+            let mut expanded_items = Vec::new();
+            for item in items {
+                expanded_items.push(expand_quasiquote(item.clone(), ctx)?);
+            }
+            Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
+                value: Value::Vector(expanded_items),
+                pos: expr.read().pos.clone(),
+            }))))
+        }
+        _ => Ok(expr.clone()),
+    }
+}
+
+
+fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    if args.len() < 2 {
+        return Err(LispError::EvalError {
+            message: "macro expects at least 2 arguments: params and body".into(),
+            pos: None,
+        });
+    }
+
+    let (params, is_variadic) = match &args[0].read().value {
+        Value::Vector(vs) => {
+            let mut params = Vec::new();
+            let mut is_variadic = false;
+            let mut i = 0;
+            
+            while i < vs.len() {
+                if let Value::Symbol(s) = &vs[i].read().value {
+                    if s == "&" {
+                        // Next symbol is the rest parameter
+                        if i + 1 < vs.len() {
+                            if let Value::Symbol(rest_param) = &vs[i + 1].read().value {
+                                params.push(rest_param.clone());
+                                is_variadic = true;
+                                break;
+                            }
+                        }
+                        return Err(LispError::EvalError {
+                            message: "& must be followed by a parameter name".into(),
+                            pos: None,
+                        });
+                    } else {
+                        params.push(s.clone());
+                    }
+                }
+                i += 1;
+            }
+            (params, is_variadic)
+        },
+        Value::List(xs) if !xs.is_empty() => {
+            if let Value::Symbol(head) = &xs[0].read().value {
+                if head == "vector" {
+                    let mut params = Vec::new();
+                    let mut is_variadic = false;
+                    let mut i = 1; // skip "vector"
+                    
+                    while i < xs.len() {
+                        if let Value::Symbol(s) = &xs[i].read().value {
+                            if s == "&" {
+                                if i + 1 < xs.len() {
+                                    if let Value::Symbol(rest_param) = &xs[i + 1].read().value {
+                                        params.push(rest_param.clone());
+                                        is_variadic = true;
+                                        break;
+                                    }
+                                }
+                                return Err(LispError::EvalError {
+                                    message: "& must be followed by a parameter name".into(),
+                                    pos: None,
+                                });
+                            } else {
+                                params.push(s.clone());
+                            }
+                        }
+                        i += 1;
+                    }
+                    (params, is_variadic)
+                } else {
+                    return Err(LispError::EvalError {
+                        message: "macro expects a vector of symbols as parameters".into(),
+                        pos: None,
+                    });
+                }
+            } else {
+                return Err(LispError::EvalError {
+                    message: "macro expects a vector of symbols as parameters".into(),
+                    pos: None,
+                });
+            }
+        }
+        _ => {
+            return Err(LispError::EvalError {
+                message: "macro expects a vector of symbols as parameters".into(),
+                pos: None,
+            });
+        }
+    };
+
+    Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
+        value: Value::Macro {
+            params,
+            body: args[1..].to_vec(),
+            env: Arc::clone(&ctx.env),
+            is_variadic,
+        },
+        pos: None,
+    }))))
 }

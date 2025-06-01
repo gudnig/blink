@@ -357,5 +357,8 @@ pub fn preload_builtin_reader_macros(ctx: &mut EvalContext) {
     rm.reader_macros
         .insert("~".into(), build_simple_macro("unquote"));
 
-    // (optional later: I could add ~@ for unquote-splicing if tokenized specially)
+    rm.reader_macros
+    .insert("~@".into(), build_simple_macro("unquote-splicing"));
+
+    
 }
