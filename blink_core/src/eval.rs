@@ -1,5 +1,7 @@
+use crate::async_context::AsyncContext;
 use crate::env::Env;
 use crate::error::LispError;
+use crate::goroutine::{GoroutineId, TokioGoroutineScheduler};
 use crate::module::{ImportType, Module, ModuleRegistry, ModuleSource};
 use crate::parser::{ ReaderContext};
 use crate::telemetry::TelemetryEvent;
@@ -11,16 +13,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[derive(Clone)]
 pub struct EvalContext {
     pub global_env: Arc<RwLock<Env>>,
     pub env: Arc<RwLock<Env>>,
-    pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
-    pub tracing_enabled: bool,
-    pub current_module: Option<String>,
-    pub module_registry: ModuleRegistry,
-    pub file_to_modules: HashMap<PathBuf, Vec<String>>,
-    pub current_file: Option<String>, // Is this needed?
+    pub telemetry_sink: Arc<Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>>,
+    pub module_registry: Arc<RwLock<ModuleRegistry>>,
+    pub file_to_modules: Arc<HashMap<PathBuf, Vec<String>>>,
+    pub goroutine_scheduler: Arc<TokioGoroutineScheduler>,
     pub reader_macros: Arc<RwLock<ReaderContext>>,
+
+    pub current_file: Option<String>,
+    pub current_module: Option<String>,
+    pub async_ctx: AsyncContext,
+    pub tracing_enabled: bool,
 }
 
 impl EvalContext {
@@ -29,17 +35,20 @@ impl EvalContext {
             global_env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
             env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
             current_module: None,
-            telemetry_sink: None,
-            module_registry: ModuleRegistry::new(),
+            telemetry_sink: Arc::new(None),
+            module_registry: Arc::new(RwLock::new(ModuleRegistry::new())),
             current_file: None,
             tracing_enabled: false,
             reader_macros: Arc::new(RwLock::new(ReaderContext::new())),
-            file_to_modules: HashMap::new(),
+            file_to_modules: Arc::new(HashMap::new()),
+            async_ctx: AsyncContext::default(),
+            goroutine_scheduler: Arc::new(TokioGoroutineScheduler::new()),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<BlinkValue> {
-        self.env.read().get_with_registry(key, &self.module_registry)
+        let module_registry = self.module_registry.read();
+        self.env.read().get_with_registry(key, &module_registry)
     }
 
     pub fn set(&self, key: &str, val: BlinkValue) {
@@ -51,16 +60,29 @@ impl EvalContext {
     }
 
     pub fn register_module(&mut self, module: Module) {
-        self.module_registry.register_module(module);
+        self.module_registry.write().register_module(module);
     }
     
     pub fn get_module(&self, name: &str) -> Option<Arc<RwLock<Module>>> {
-        self.module_registry.get_module(name)
+        self.module_registry.read().get_module(name)
     }
 
     pub fn find_module_file(&self, module_name: &str) -> Option<PathBuf> {
-        self.module_registry.find_module_file(module_name)
+        self.module_registry.read().find_module_file(module_name)
     }
+        
+    
+    
+    pub fn set_async_context(&mut self, new_ctx: AsyncContext) {
+        self.async_ctx = new_ctx;
+    }
+    
+
+    
+    pub fn exit_goroutine(&mut self) {
+        self.async_ctx = AsyncContext::Blocking;
+    }
+    
 }
 
 
@@ -107,6 +129,8 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue, LispE
                         message: "unquote-splicing used outside quasiquote".into(),
                         pos: None,
                     }),
+                    "go" => eval_go(&list[1..], ctx),
+                    "deref" => eval_deref(&list[1..], ctx),
 
                     _ => {
                         let func = trace_eval(list[0].clone(), ctx)?;
@@ -139,7 +163,7 @@ pub fn trace_eval(expr: BlinkValue, ctx: &mut EvalContext) -> Result<BlinkValue,
         let start = Instant::now();
         let res = eval(expr.clone(), ctx);
         if let Ok(val) = &res {
-            if let Some(sink) = &ctx.telemetry_sink {
+            if let Some(sink) = &*ctx.telemetry_sink {
                 sink(TelemetryEvent {
                     form: format!("{:?}", expr.read().value),
                     duration_us: start.elapsed().as_micros(),
@@ -527,10 +551,10 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Bli
     let lib_path = PathBuf::from(&filename);
 
     // Remove existing module if it exists (force reload)
-    if ctx.module_registry.get_module(&libname).is_some() {
+    if ctx.module_registry.read().get_module(&libname).is_some() {
         println!("Reloading native library '{}'", libname);
-        ctx.module_registry.remove_module(&libname);
-        ctx.module_registry.remove_native_library(&lib_path);
+        ctx.module_registry.write().remove_module(&libname);
+        ctx.module_registry.write().remove_native_library(&lib_path);
     }
 
     // Load the library
@@ -555,7 +579,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Bli
                 env: module_env,
                 ready: true,
             };
-            let _arc_mod = ctx.module_registry.register_module(module);
+            let _arc_mod = ctx.module_registry.write().register_module(module);
             
             exports_set
         },
@@ -584,14 +608,14 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<Bli
                 env: module_env,
                 ready: true,
             };
-            let _arc_mod = ctx.module_registry.register_module(module);
+            let _arc_mod = ctx.module_registry.write().register_module(module);
             
             exports
         }
     };
 
     // Store the library to prevent it from being unloaded
-    ctx.module_registry.store_native_library(lib_path, lib);
+    ctx.module_registry.write().store_native_library(lib_path, lib);
 
     println!("Loaded native library '{}' with {} exports: {:?}", 
              libname, exports.len(), exports);
@@ -722,7 +746,7 @@ fn load_native_code(
                 env: module_env,
                 ready: true,
             };
-            let _arc_mod = ctx.module_registry.register_module(module);
+            let _arc_mod = ctx.module_registry.write().register_module(module);
             
             exports_set
         },
@@ -750,14 +774,14 @@ fn load_native_code(
                 ready: true,
             };
             // Register the module
-            let _arc_mod = ctx.module_registry.register_module(module);
+            let _arc_mod = ctx.module_registry.write().register_module(module);
             
             exports
         }
     };
 
     // Store the library to prevent it from being unloaded
-    ctx.module_registry.store_native_library(PathBuf::from(&dest), lib);
+    ctx.module_registry.write().store_native_library(PathBuf::from(&dest), lib);
 
     println!("Compiled and loaded plugin '{}' with {} exports: {:?}", 
              plugin_name, exports.len(), exports);
@@ -841,7 +865,7 @@ fn eval_mod(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
     let should_declare = flags.contains("declare") || flags.is_empty();
     let should_enter = flags.contains("enter");
     
-    let mut module = ctx.module_registry.get_module(&name);
+    let mut module = ctx.module_registry.read().get_module(&name);
     
 
     if should_declare && module.is_none() {
@@ -860,7 +884,7 @@ fn eval_mod(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
             source: source,
             ready: true,
         };
-        let module_arc = ctx.module_registry.register_module(new_module);
+        let module_arc = ctx.module_registry.write().register_module(new_module);
         module = Some(module_arc);        
     }
     if should_declare && options.contains_key("exports") {
@@ -1040,7 +1064,7 @@ fn extract_name(value: &BlinkValue) -> Result<String, LispError> {
 /// Load and evaluate a Blink source file
 fn load_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> Result<(), LispError> {
     // Don't evaluate if already loaded
-    if ctx.module_registry.is_file_evaluated(&file_path) {
+    if ctx.module_registry.read().is_file_evaluated(&file_path) {
         return Ok(());
     }
 
@@ -1068,7 +1092,7 @@ fn load_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> Result<(), Lisp
     ctx.current_file = old_file;
     
     // Mark file as evaluated
-    ctx.module_registry.mark_file_evaluated(file_path);
+    ctx.module_registry.write().mark_file_evaluated(file_path);
     
     Ok(())
 }
@@ -1250,7 +1274,7 @@ fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>
 
 fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf, LispError> {
     // 1. Check if module is already registered (we know which file it came from)
-    if let Some(module) = ctx.module_registry.get_module(module_name) {
+    if let Some(module) = ctx.module_registry.read().get_module(module_name) {
         let module_read = module.read();
         if let ModuleSource::BlinkFile(ref path) = module_read.source {
             return Ok(path.clone());
@@ -1328,7 +1352,7 @@ fn import_symbols_into_env(
     aliases: &HashMap<String, String>,
     ctx: &mut EvalContext
 ) -> Result<(), LispError> {
-    let module = ctx.module_registry.get_module(module_name)
+    let module = ctx.module_registry.read().get_module(module_name)
         .ok_or_else(|| LispError::EvalError {
             message: format!("Module '{}' not found", module_name),
             pos: None,
@@ -1466,7 +1490,7 @@ fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
         
         ImportType::Symbols { symbols, module, aliases } => {
             // Check if module already exists
-            let module_exists = ctx.module_registry.get_module(&module).is_some();
+            let module_exists = ctx.module_registry.read().get_module(&module).is_some();
             
             if !module_exists {
                 
@@ -1477,7 +1501,7 @@ fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, Li
                 load_blink_file(file_path, ctx)?;
                 
                 // Verify the module is now available
-                if ctx.module_registry.get_module(&module).is_none() {
+                if ctx.module_registry.read().get_module(&module).is_none() {
                     return Err(LispError::EvalError {
                         message: format!("Module '{}' was not found in the loaded file", module),
                         pos: None,
@@ -1663,4 +1687,76 @@ fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, 
         },
         pos: None,
     }))))
+}
+
+
+pub fn eval_deref(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    if args.len() != 1 {
+        return Err(LispError::ArityMismatch {
+            expected: 1,
+            got: args.len(),
+            form: "deref".into(),
+            pos: None,
+        });
+    }
+
+    let future_val = eval(args[0].clone(), ctx)?;
+    
+    let res = match &future_val.read().value {
+        Value::Future(future) => {
+            match &ctx.async_ctx {
+                AsyncContext::Blocking => {
+                    // Block on current thread
+                    tokio::runtime::Handle::current().block_on(async {
+                        future.clone().await.map_err(|e| LispError::EvalError {
+                            message: e,
+                            pos: None,
+                        })
+                    })
+                }
+                AsyncContext::Goroutine(_) => {
+                    // Block in async context using spawn_blocking
+                    let future_clone = future.clone();
+                    tokio::runtime::Handle::current().block_on(async {
+                        tokio::task::spawn_blocking(move || {
+                            // This blocks the background thread, not the async runtime
+                            tokio::runtime::Handle::current().block_on(async {
+                                future_clone.await
+                            })
+                        }).await.unwrap().map_err(|e| LispError::EvalError {
+                            message: e,
+                            pos: None,
+                        })
+                    })
+                }
+            }
+        }
+        _ => Err(LispError::EvalError {
+            message: "deref can only be used on futures".into(),
+            pos: get_pos(&future_val),
+        })
+    };
+    res
+}
+
+pub fn eval_go(args: &[BlinkValue], ctx: &mut EvalContext) -> Result<BlinkValue, LispError> {
+    if args.len() != 1 {
+        return Err(LispError::ArityMismatch {
+            expected: 1,
+            got: args.len(),
+            form: "go".into(),
+            pos: None,
+        });
+    }
+
+    let goroutine_ctx = ctx.clone();
+    
+    let goroutine_args = args[0].clone();
+    ctx.goroutine_scheduler.spawn_with_context(goroutine_ctx, 
+    move |ctx| {
+            let _ = eval(goroutine_args, ctx);
+        });
+    
+    
+    Ok(nil())
 }

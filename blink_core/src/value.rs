@@ -1,8 +1,6 @@
 use crate::env::Env;
-use crate::error::LispError;
-use crate::module::Module;
+use crate::future::BlinkFuture;
 use parking_lot::RwLock;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -105,6 +103,7 @@ pub enum Value {
         env: Arc<RwLock<Env>>,
         is_variadic: bool,
     },
+    Future(BlinkFuture),
     Nil,
 }
 impl Value {
@@ -123,6 +122,7 @@ impl Value {
             Value::ModuleReference { .. } => "imported-symbol",
             Value::Nil => "nil",
             Value::Macro { .. } => "macro",
+            Value::Future(_) => "future",
         }
     }
     
@@ -145,6 +145,7 @@ impl fmt::Debug for Value {
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Macro { .. } => write!(f, "#<macro>"),
+            Value::Future(_) => write!(f, "#<future>"),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -192,6 +193,7 @@ impl fmt::Display for Value {
             Value::NativeFunc(_) => write!(f, "#<native-fn>"),
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Macro { .. } => write!(f, "#<macro>"),
+            Value::Future(_) => write!(f, "#<future>"),
             Value::Nil => write!(f, "nil"),
         }
     }

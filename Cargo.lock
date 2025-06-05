@@ -119,6 +119,7 @@ dependencies = [
  "parking_lot",
  "rustyline",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -126,6 +127,7 @@ name = "blink_repl"
 version = "0.1.0"
 dependencies = [
  "blink_core",
+ "tokio",
 ]
 
 [[package]]

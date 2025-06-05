@@ -1,4 +1,6 @@
+use crate::async_context::AsyncContext;
 use crate::env::Env;
+use crate::future::BlinkFuture;
 use crate::value::{
     bool_val, bool_val_at, list_val, list_val_at, map_val_at, nil, num_at, str_val_at,
     vector_val_at, BlinkValue, Value,
@@ -312,6 +314,42 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     }
 }
 
+fn native_future(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 0 {
+        return Err("future expects 0 arguments".into());
+    }
+    Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
+        value: Value::Future(BlinkFuture::new()),
+        pos: None,
+    }))))
+}
+
+fn native_complete_future(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 2 {
+        return Err("complete expects 2 argument".into());
+    }
+    match &args[0].read().value {
+        Value::Future(future) => {
+            future.complete(args[1].clone())?;
+            Ok(nil())
+        }
+        _ => Err("complete expects a future".into()),
+    }
+}
+
+fn native_fail_future(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+    if args.len() != 2 {
+        return Err("fail expects 2 argument".into());
+    }
+    match (&args[0].read().value, &args[1].read().value)     {
+        (Value::Future(future), Value::Str(s)) => {
+            future.fail(s.clone())?;
+            Ok(nil())
+        }
+        _ => Err("fail expects a future".into()),
+    }
+}
+
 use crate::value::LispNode;
 
 pub fn register_builtins(env: &Arc<RwLock<Env>>) {
@@ -348,5 +386,10 @@ pub fn register_builtins(env: &Arc<RwLock<Env>>) {
     reg!("cdr", native_cdr);
     reg!("first", native_car);
     reg!("rest", native_cdr);
-    reg!("get", native_get);
+    reg!("get", native_get);    
+
+    // TODO: move to a separate module
+    reg!("future", native_future);
+    reg!("complete", native_complete_future);
+    reg!("fail", native_fail_future);
 }

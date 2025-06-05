@@ -1,6 +1,6 @@
 use crate::module::ModuleRegistry;
 use crate::value::BlinkValue;
-use crate::Value;
+use crate::value::Value;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;

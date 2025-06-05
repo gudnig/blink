@@ -12,3 +12,4 @@ categories.workspace = true
 
 [dependencies]
 blink_core = { path = "../blink_core" }
+tokio = { version = "1.0", features = ["full"] }

@@ -7,6 +7,11 @@ mod repl;
 mod telemetry;
 mod value;
 mod module;
-fn main() {
+mod future;
+mod async_context;
+mod goroutine;
+
+#[tokio::main]
+async fn main() {
     repl::start_repl();
 }

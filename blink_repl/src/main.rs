@@ -1,5 +1,6 @@
 use blink_core::repl::start_repl;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     start_repl();
 }
