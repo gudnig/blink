@@ -170,24 +170,12 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
                     "deref" => eval_deref(&list[1..], ctx),
 
                     _ => {
-                        let func: BlinkValue = try_eval!(trace_eval(list[0].clone(), ctx));
-                        let mut args = Vec::new();
-                        for arg in &list[1..] {
-                            let arg = try_eval!(trace_eval(arg.clone(), ctx));
-                            args.push(arg);
-                        }
-                        forward_eval!(eval_func(func, args, ctx))
+                        eval_function_call_inline(list.clone(), 0, Vec::new(), None, ctx)
                         
                     }
                 },
                 _ => {
-                    let func: BlinkValue = try_eval!(trace_eval(list[0].clone(), ctx));
-                    let mut args= Vec::new();
-                    for arg in &list[1..] {
-                        let arg = try_eval!(trace_eval(arg.clone(), ctx));
-                        args.push(arg);
-                    }
-                    forward_eval!(eval_func(func, args, ctx))
+                    eval_function_call_inline(list.clone(), 0, Vec::new(), None, ctx)
                 }
             }
         }
@@ -236,20 +224,83 @@ pub fn eval_quote(args: &Vec<BlinkValue>) -> EvalResult {
     EvalResult::Value(args[1].clone())
 }
 
+fn eval_function_call_inline(
+    list: Vec<BlinkValue>,
+    mut index: usize,
+    mut evaluated_args: Vec<BlinkValue>,
+    func: Option<BlinkValue>,
+    ctx: &mut EvalContext,
+) -> EvalResult {
+    // First evaluate the function if we haven't yet
+    if func.is_none() {
+        let result = trace_eval(list[0].clone(), ctx);
+        match result {
+            EvalResult::Value(f) => {
+                if f.is_error() {
+                    return EvalResult::Value(f);
+                }
+                return eval_function_call_inline(list, 1, evaluated_args, Some(f), ctx);
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        eval_function_call_inline(list, 1, evaluated_args, Some(v), ctx)
+                    }),
+                };
+            }
+        }
+    }
+
+    // Now evaluate arguments one by one
+    loop {
+        if index >= list.len() {
+            // All arguments evaluated, call the function
+            return eval_func(func.unwrap(), evaluated_args, ctx);
+        }
+
+        let result = trace_eval(list[index].clone(), ctx);
+        match result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                evaluated_args.push(val);
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        evaluated_args.push(v);
+                        eval_function_call_inline(list, index + 1, evaluated_args, func, ctx)
+                    }),
+                };
+            }
+        }
+    }
+}
+
 pub fn eval_func(
     func: BlinkValue,
     args: Vec<BlinkValue>,
     ctx: &mut EvalContext,
 ) -> EvalResult {
-    
     match &func.read().value {
         Value::NativeFunc(f) => f(args)
-        .map_or_else(
-            |e| EvalResult::Value(LispError::EvalError { message: e, pos: get_pos(&func) }.into_blink_value()),
-            |v| EvalResult::Value(v))
+            .map_or_else(
+                |e| EvalResult::Value(LispError::EvalError { message: e, pos: get_pos(&func) }.into_blink_value()),
+                |v| EvalResult::Value(v))
         ,
+        
         Value::Macro { params, body, env, is_variadic } => {
-            // Check arity
+            // Arity check...
             if *is_variadic {
                 if args.len() < params.len() - 1 {
                     return EvalResult::Value(LispError::ArityMismatch {
@@ -267,50 +318,32 @@ pub fn eval_func(
                     pos: None,
                 }.into_blink_value());
             }
-        
-            // Create macro expansion environment
+
+            // Create macro environment and bind parameters
             let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-            
-            // Bind macro parameters
             {
                 let mut env_guard = macro_env.write();
-                
                 if *is_variadic {
-                    // Bind regular parameters
                     for (i, param) in params.iter().take(params.len() - 1).enumerate() {
                         env_guard.set(param, args[i].clone());
                     }
-                    
-                    // Bind rest parameter to remaining arguments as a list
                     let rest_param = &params[params.len() - 1];
                     let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
                     env_guard.set(rest_param, list_val(rest_args));
                 } else {
-                    // Bind all parameters normally
                     for (param, arg) in params.iter().zip(args.iter()) {
                         env_guard.set(param, arg.clone());
                     }
                 }
             }
-        
-            // Save current context environment
+
             let old_env = ctx.env.clone();
+            let macro_ctx = ctx.with_env(macro_env);
             
-            // Switch to macro environment for expansion
-            ctx.env = macro_env;
-        
-            // Evaluate macro body to produce the expansion
-            let mut expansion = nil();
-            for form in body.iter() {
-                expansion = try_eval!(trace_eval(form.clone(), ctx));
-            }
-        
-            // Restore original environment
-            ctx.env = old_env;
-        
-            // Evaluate the macro expansion in the original context
-            trace_eval(expansion, ctx)
+            // Evaluate macro body with proper suspension handling
+            eval_macro_body_inline(body.clone(), 0, nil(), old_env, macro_ctx)
         }
+        
         Value::FuncUserDefined { params, body, env } => {
             if params.len() != args.len() {
                 return EvalResult::Value(LispError::ArityMismatch {
@@ -320,32 +353,101 @@ pub fn eval_func(
                     pos: None,
                 }.into_blink_value());
             }
+
             let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
             {
-                let mut env = local_env.write();
-            
-            
-
+                let mut env_guard = local_env.write();
                 for (param, val) in params.iter().zip(args) {
-                    env.set(param, val);
+                    env_guard.set(param, val);
                 }
             }
 
             let old_env = ctx.env.clone();
-            ctx.env = local_env;
-
-            let mut result = nil();
-            for form in body {
-                result = try_eval!(trace_eval(form.clone(), ctx));
-            }
-            // TODO: Drop guard for env?
-            ctx.env = old_env;
-            EvalResult::Value(result)
+            let local_ctx = ctx.with_env(local_env);
+            
+            eval_function_body_inline(body.clone(), 0, nil(), old_env, local_ctx)
         }
+        
         _ => EvalResult::Value(LispError::EvalError {
             message: "Not a function".into(),
             pos: get_pos(&func),
         }.into_blink_value()),
+    }
+}
+
+fn eval_macro_body_inline(
+    body: Vec<BlinkValue>, 
+    mut index: usize, 
+    mut expansion: BlinkValue,
+    original_env: Arc<RwLock<Env>>,
+    mut ctx: EvalContext
+) -> EvalResult {
+    loop {
+        if index >= body.len() {
+            // Switch back to original environment and evaluate the expansion
+            ctx.env = original_env;
+            return trace_eval(expansion, &mut ctx);
+        }
+
+        let result = trace_eval(body[index].clone(), &mut ctx);
+        match result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                expansion = val;
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        eval_macro_body_inline(body, index + 1, v, original_env, ctx.clone())
+                    }),
+                };
+            }
+        }
+    }
+}
+
+fn eval_function_body_inline(
+    body: Vec<BlinkValue>, 
+    mut index: usize, 
+    mut result: BlinkValue,
+    original_env: Arc<RwLock<Env>>,
+    mut ctx: EvalContext
+) -> EvalResult {
+    loop {
+        if index >= body.len() {
+            // Restore environment and return result
+            ctx.env = original_env;
+            return EvalResult::Value(result);
+        }
+
+        let eval_result = trace_eval(body[index].clone(), &mut ctx);
+        match eval_result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                result = val;
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        eval_function_body_inline(body, index + 1, v, original_env, ctx.clone())
+                    }),
+                };
+            }
+        }
     }
 }
 
@@ -450,11 +552,45 @@ fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     }))))
 }
 fn eval_do(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
-    let mut result = nil();
-    for form in args {
-        result = try_eval!(trace_eval(form.clone(), ctx));
+    if args.is_empty() {
+        return EvalResult::Value(nil());
     }
-    EvalResult::Value(result)
+    eval_do_inline(args.to_vec(), 0, nil(), ctx)
+}
+
+fn eval_do_inline(
+    forms: Vec<BlinkValue>, 
+    mut index: usize, 
+    mut result: BlinkValue, 
+    ctx: &mut EvalContext
+) -> EvalResult {
+    loop {
+        if index >= forms.len() {
+            return EvalResult::Value(result);
+        }
+
+        let eval_result = trace_eval(forms[index].clone(), ctx);
+        match eval_result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                result = val;
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        eval_do_inline(forms, index + 1, v, ctx)
+                    }),
+                };
+            }
+        }
+    }
 }
 
 fn eval_let_bindings_inline(
@@ -466,11 +602,7 @@ fn eval_let_bindings_inline(
 ) -> EvalResult {
     loop {
         if index >= bindings.len() {
-            let mut result = nil();
-            for form in body {
-                result = try_eval!(trace_eval(form.clone(), ctx));
-            }
-            return EvalResult::Value(result);
+            return eval_do_inline(body, 0, nil(), ctx);
         }
 
         let key_val = &bindings[index];
@@ -573,27 +705,112 @@ fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
 
 
 fn eval_and(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
-    let mut last = bool_val(true);
-    for arg in args {
-        last = try_eval!(trace_eval(arg.clone(), ctx));
-        if matches!(last.read().value, Value::Bool(false) | Value::Nil) {
-            break;
+    if args.is_empty() {
+        return EvalResult::Value(bool_val(true));
+    }
+    eval_and_inline(args.to_vec(), 0, bool_val(true), ctx)
+}
+
+fn eval_and_inline(
+    args: Vec<BlinkValue>, 
+    mut index: usize, 
+    mut last: BlinkValue, 
+    ctx: &mut EvalContext
+) -> EvalResult {
+    loop {
+        if index >= args.len() {
+            return EvalResult::Value(last);
+        }
+
+        let result = trace_eval(args[index].clone(), ctx);
+        match result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                last = val;
+                // Short-circuit on falsy values
+                if matches!(last.read().value, Value::Bool(false) | Value::Nil) {
+                    return EvalResult::Value(last);
+                }
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        // Short-circuit check in resume too
+                        if matches!(v.read().value, Value::Bool(false) | Value::Nil) {
+                            return EvalResult::Value(v);
+                        }
+                        eval_and_inline(args, index + 1, v, ctx)
+                    }),
+                };
+            }
         }
     }
-    EvalResult::Value(last)
 }
 
 fn eval_or(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
-    for arg in args {
-        let val = try_eval!(trace_eval(arg.clone(), ctx));
-        if !matches!(val.read().value, Value::Bool(false) | Value::Nil) {
-            return EvalResult::Value(val);
+    if args.is_empty() {
+        return EvalResult::Value(nil());
+    }
+    eval_or_inline(args.to_vec(), 0, ctx)
+}
+
+fn eval_or_inline(
+    args: Vec<BlinkValue>, 
+    mut index: usize, 
+    ctx: &mut EvalContext
+) -> EvalResult {
+    loop {
+        if index >= args.len() {
+            return EvalResult::Value(nil());
+        }
+
+        let result = trace_eval(args[index].clone(), ctx);
+        match result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                // Short-circuit on truthy values
+                if !matches!(val.read().value, Value::Bool(false) | Value::Nil) {
+                    return EvalResult::Value(val);
+                }
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        // Short-circuit check in resume too
+                        if !matches!(v.read().value, Value::Bool(false) | Value::Nil) {
+                            return EvalResult::Value(v);
+                        }
+                        eval_or_inline(args, index + 1, ctx)
+                    }),
+                };
+            }
         }
     }
-    EvalResult::Value(nil())
 }
 
 fn eval_try(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
+    if args.len() != 2 {
+        return EvalResult::Value(LispError::ArityMismatch {
+            expected: 2,
+            got: args.len(),
+            form: "try".into(),
+            pos: None,
+        }.into_blink_value());
+    }
     let res = try_eval!(trace_eval(args[0].clone(), ctx));
     if res.is_error() {
         forward_eval!(trace_eval(args[1].clone(), ctx))
@@ -1271,9 +1488,7 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     ctx.current_file = Some(file_name);
     
     // Evaluate all forms in the file
-    for form in forms {
-        try_eval!(trace_eval(form, ctx));
-    }
+    try_eval!(eval_file_forms_inline(forms, 0, ctx));
     
     // Restore previous file context
     ctx.current_file = old_file;
@@ -1282,6 +1497,39 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     ctx.module_registry.write().mark_file_evaluated(file_path);
     
     EvalResult::Value(nil())
+}
+
+fn eval_file_forms_inline(
+    forms: Vec<BlinkValue>,
+    mut index: usize,
+    ctx: &mut EvalContext,
+) -> EvalResult {
+    loop {
+        if index >= forms.len() {
+            return EvalResult::Value(nil());
+        }
+
+        let result = trace_eval(forms[index].clone(), ctx);
+        match result {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        eval_file_forms_inline(forms, index + 1, ctx)
+                    }),
+                };
+            }
+        }
+    }
 }
 
 fn parse_import_args(args: &[BlinkValue]) -> Result<(ImportType, Option<HashMap<String, BlinkValue>>), LispError> {
@@ -1729,7 +1977,6 @@ fn eval_quasiquote(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     }
     expand_quasiquote(args[0].clone(), ctx)
 }
-
 fn expand_quasiquote(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
     match &expr.read().value {
         Value::List(items) if !items.is_empty() => {
@@ -1754,61 +2001,123 @@ fn expand_quasiquote(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
                 }
 
                 _ => {
-                    let mut expanded_items = Vec::new();
-
-                    for item in items {
-                        if let Value::List(inner_items) = &item.read().value {
-                            if !inner_items.is_empty() {
-                                if let Value::Symbol(s) = &inner_items[0].read().value {
-                                    if s == "unquote-splicing" {
-                                        if inner_items.len() != 2 {
-                                            return EvalResult::Value(LispError::EvalError {
-                                                message: "unquote-splicing expects exactly one argument".into(),
-                                                pos: None,
-                                            }.into_blink_value());
-                                        }
-
-                                        let spliced = try_eval!(trace_eval(inner_items[1].clone(), ctx));
-                                        if let Value::List(splice_items) = &spliced.read().value {
-                                            expanded_items.extend(splice_items.clone());
-                                        } else {
-                                            return EvalResult::Value(LispError::EvalError {
-                                                message: "unquote-splicing expects a list".into(),
-                                                pos: None,
-                                            }.into_blink_value());
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-
-                        let expanded = try_eval!(expand_quasiquote(item.clone(), ctx));
-                        expanded_items.push(expanded);
-                    }
-
-                    EvalResult::Value(list_val(expanded_items))
+                    // Use list version for lists
+                    expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), false, expr.read().pos.clone(), ctx)
                 }
             }
         }
 
         Value::Vector(items) => {
-            let mut expanded_items = Vec::new();
-            for item in items {
-                let expanded = try_eval!(expand_quasiquote(item.clone(), ctx));
-                expanded_items.push(expanded);
-            }
-
-            EvalResult::Value(BlinkValue(Arc::new(RwLock::new(LispNode {
-                value: Value::Vector(expanded_items),
-                pos: expr.read().pos.clone(),
-            }))))
+            // Use vector version for vectors
+            expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), true, expr.read().pos.clone(), ctx)
         }
 
         _ => EvalResult::Value(expr.clone()),
     }
 }
 
+fn expand_quasiquote_items_inline(
+    items: Vec<BlinkValue>,  
+    mut index: usize,
+    mut expanded_items: Vec<BlinkValue>,
+    is_vector: bool,
+    original_pos: Option<SourceRange>,
+    ctx: &mut EvalContext,
+) -> EvalResult {
+    loop {
+        if index >= items.len() {
+            // Return the appropriate type
+            if is_vector {
+                return EvalResult::Value(BlinkValue(Arc::new(RwLock::new(LispNode {
+                    value: Value::Vector(expanded_items),
+                    pos: original_pos,
+                }))));
+            } else {
+                return EvalResult::Value(list_val(expanded_items));
+            }
+        }
+
+        let item = items[index].clone();
+
+        // Check for unquote-splicing
+        if let Value::List(inner_items) = &item.read().value {
+            if !inner_items.is_empty() {
+                if let Value::Symbol(s) = &inner_items[0].read().value {
+                    if s == "unquote-splicing" {
+                        if inner_items.len() != 2 {
+                            return EvalResult::Value(LispError::EvalError {
+                                message: "unquote-splicing expects exactly one argument".into(),
+                                pos: None,
+                            }.into_blink_value());
+                        }
+
+                        let result = trace_eval(inner_items[1].clone(), ctx);
+                        match result {
+                            EvalResult::Value(spliced) => {
+                                if spliced.is_error() {
+                                    return EvalResult::Value(spliced);
+                                }
+                                if let Value::List(splice_items) = &spliced.read().value {
+                                    expanded_items.extend(splice_items.clone());
+                                } else {
+                                    return EvalResult::Value(LispError::EvalError {
+                                        message: "unquote-splicing expects a list".into(),
+                                        pos: None,
+                                    }.into_blink_value());
+                                }
+                                index += 1;
+                                continue;
+                            }
+                            EvalResult::Suspended { future, resume: _ } => {
+                                return EvalResult::Suspended {
+                                    future,
+                                    resume: Box::new(move |v, ctx| {
+                                        if v.is_error() {
+                                            return EvalResult::Value(v);
+                                        }
+                                        if let Value::List(splice_items) = &v.read().value {
+                                            expanded_items.extend(splice_items.clone());
+                                            expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, original_pos, ctx)
+                                        } else {
+                                            EvalResult::Value(LispError::EvalError {
+                                                message: "unquote-splicing expects a list".into(),
+                                                pos: None,
+                                            }.into_blink_value())
+                                        }
+                                    }),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Regular item expansion
+        let result = expand_quasiquote(item, ctx);
+        match result {
+            EvalResult::Value(expanded) => {
+                if expanded.is_error() {
+                    return EvalResult::Value(expanded);
+                }
+                expanded_items.push(expanded);
+                index += 1;
+            }
+            EvalResult::Suspended { future, resume: _ } => {
+                return EvalResult::Suspended {
+                    future,
+                    resume: Box::new(move |v, ctx| {
+                        if v.is_error() {
+                            return EvalResult::Value(v);
+                        }
+                        expanded_items.push(v);
+                        expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, original_pos, ctx)
+                    }),
+                };
+            }
+        }
+    }
+}
 
 
 fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
