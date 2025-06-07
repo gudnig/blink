@@ -1,12 +1,13 @@
-use std::{io::BufRead, sync::Arc};
+use std::{future::Future, io::BufRead, pin::Pin, sync::Arc};
 
 use anyhow::Context;
-use blink_core::{eval::{self, EvalContext}, native_functions::register_builtins, parser::{parse, preload_builtin_reader_macros, tokenize_at}, value::SourcePos, BlinkValue, Env};
+use blink_core::{eval::{self, EvalContext, EvalResult}, native_functions::register_builtins, parser::{parse, preload_builtin_reader_macros, tokenize_at}, value::SourcePos, BlinkValue, Env};
 use parking_lot::RwLock;
 use rmp_serde::{from_slice, to_vec, Deserializer, Serializer};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
+use std::boxed::Box;
 use crate::{
     helpers::collect_symbols_from_forms, repl_message::{ReplRequest, ReplResponse}, session::{Session, SymbolSource}, session_manager::SessionManager
 };
@@ -140,7 +141,7 @@ where
             let message = self.read_message().await?.context("No message received")?;
             match message {
                 ReplRequest::Eval { id, code, pos } => {
-                    let response = self.handle_eval(id, code, pos)?;
+                    let response = self.handle_eval(id, code, pos).await?;
                     
                     self.write_message(&response).await?;
                 }
@@ -156,49 +157,73 @@ where
     
     
 
-    pub fn handle_eval(&mut self, id: String, code: String, pos: Option<SourcePos>) -> anyhow::Result<ReplResponse> {
+    pub async fn handle_eval(&mut self, id: String, code: String, pos: Option<SourcePos>) -> anyhow::Result<ReplResponse> {
         println!("Received code literal: {:?}", &code);
-            
-        let source_pos = pos.unwrap_or(SourcePos { line: 0, col: 0 });
-                    let session = self.session.as_ref().cloned().context("No session found")?;
-                    let mut ctx_guard = session.eval_ctx.write();
-                    let ctx = ctx_guard
-                        .as_deref_mut()
-                        .ok_or(anyhow::anyhow!("No eval context found."))?;
-
-                    let ast = {
-                        let mut rctx = ctx.reader_macros.clone();
-                        let mut tokens = tokenize_at(&code, Some(source_pos))?;
-                        parse(&mut tokens, &mut rctx).context("Failed to parse code")?
-                    }; // `rctx` dropped here
-                    
-                    // Store the AST for symbol collection
-                    let ast_clone = ast.clone();
-
-                    let result = eval::eval(ast, ctx);
-
-                    let response = match result {
-                        Ok(value) => {
-                            
-                            let ses = self.session.as_ref().unwrap();
-                            {
-                                let mut symbols = ses.symbols.write();
-                                collect_symbols_from_forms(&mut symbols, &vec![ast_clone], SymbolSource::Repl);
-                            }
-                            ReplResponse::EvalResult {
-                                id,
-                                value: format!("{}", value.clone()),
-                            }
-                        }
-                        Err(e) => {
-                            ReplResponse::Error {
-                                id,
-                                message: e.to_string(),
-                            }
-                        }
-                        _ => anyhow::bail!("Invalid request"),
-                    };
-            Ok(response)
         
+        let source_pos = pos.unwrap_or(SourcePos { line: 0, col: 0 });
+        let session = self.session.as_ref().cloned().context("No session found")?;
+        
+        // Parse (need context briefly)
+        let ast = {
+            let mut ctx_guard = session.eval_ctx.write();
+            let ctx = ctx_guard
+                .as_deref_mut()
+                .ok_or(anyhow::anyhow!("No eval context found."))?;
+    
+            let mut rctx = ctx.reader_macros.clone();
+            let mut tokens = tokenize_at(&code, Some(source_pos))?;
+            parse(&mut tokens, &mut rctx).context("Failed to parse code")?
+        }; // ctx_guard dropped here
+        
+        let ast_clone = ast.clone();
+        
+        // Start evaluation
+        let mut current_result = {
+            let mut ctx_guard = session.eval_ctx.write();
+            let ctx = ctx_guard.as_deref_mut().unwrap();
+            eval::eval(ast, ctx)
+        }; // ctx_guard dropped here
+    
+        // Handle suspension iteratively - no locks held during await
+        let final_value = loop {
+            match current_result {
+                EvalResult::Value(value) => break value,
+                
+                EvalResult::Suspended { future, resume } => {
+                    // Await the future (no locks held - this is Send safe!)
+                    let val = future.await;
+                    if val.is_error() {
+                        return Err(anyhow::anyhow!("Error: {}", val.to_string()));
+                    }
+                    // Re-acquire lock only for resume
+                    current_result = {
+                        let mut ctx_guard = session.eval_ctx.write();
+                        let ctx = ctx_guard.as_deref_mut().unwrap();
+                        resume(val, ctx)
+                    }; // ctx_guard dropped again
+                }
+            }
+        };
+        
+        // Update symbols after successful evaluation
+        {
+            let mut symbols = session.symbols.write();
+            collect_symbols_from_forms(&mut symbols, &vec![ast_clone], SymbolSource::Repl);
+        }
+    
+        // Create response
+        let response = if final_value.is_error() {
+            ReplResponse::Error {
+                id,
+                message: final_value.to_string(),
+            }
+        } else {
+            ReplResponse::EvalResult {
+                id,
+                value: format!("{}", final_value),
+            }
+        };
+    
+        Ok(response)
     }
 }

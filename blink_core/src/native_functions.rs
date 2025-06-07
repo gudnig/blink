@@ -87,29 +87,16 @@ pub fn native_div(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
 
 pub fn native_eq(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     let pos = args.get(0).and_then(|v| v.read().pos.clone());
+    
     if args.len() < 2 {
-        return Ok(bool_val(true));
+        return Ok(bool_val_at(true, pos.map(|pos| pos.start)));
     }
 
-    let first_ref = args[0].read();
-    let first_val = &first_ref.value;
-
-    for other in &args[1..] {
-        let other_ref = other.read();
-        let other_val = &other_ref.value;
-
-        if first_val.type_tag() != other_val.type_tag() {
-            return Ok(bool_val(false));
-        }
-
-        if format!("{:?}", first_val) != format!("{:?}", other_val) {
-            return Ok(bool_val(false));
-        }
-    }
-
-    Ok(bool_val_at(true, pos.map(|pos| pos.start)))
+    // Check if all args are equal to the first
+    let all_equal = args.windows(2).all(|pair| pair[0] == pair[1]);
+    
+    Ok(bool_val_at(all_equal, pos.map(|pos| pos.start)))
 }
-
 pub fn native_not(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     let pos = args.get(0).and_then(|v| v.read().pos.clone());
     if args.len() != 1 {
@@ -185,13 +172,7 @@ pub fn native_map_construct(args: Vec<BlinkValue>) -> Result<BlinkValue, String>
     let mut it = args.into_iter();
 
     while let (Some(k), Some(v)) = (it.next(), it.next()) {
-        let key_str = match &k.read().value {
-            Value::Str(s) => s.clone(),
-            Value::Symbol(s) => s.clone(),
-            Value::Keyword(k) => format!(":{}", k),
-            _ => return Err("map keys must be strings, symbols, or keywords".into()),
-        };
-        map.insert(key_str, v);
+        map.insert(k, v);
     }
 
     Ok(map_val_at(map, pos.map(|pos| pos.start)))
@@ -266,12 +247,9 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
     let target_ref = target_val.read();
     let target = &target_ref.value;
 
-    let key_ref = key_val.read();
-    let key = &key_ref.value;
-
     match target {
         Value::Vector(vec) => {
-            if let Value::Number(n) = key {
+            if let Value::Number(n) = key_val.read().value {
                 let idx = n.clone() as usize;
                 if let Some(val) = vec.get(idx).cloned() {
                     Ok(val)
@@ -290,21 +268,16 @@ pub fn native_get(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
         }
 
         Value::Map(map) => {
-            let kstr = match key {
-                Value::Str(s) => s.clone(),
-                Value::Symbol(s) => s.clone(),
-                Value::Keyword(k) => format!(":{}", k),
-                _ => return Err("get on map expects string, symbol, or keyword key".into()),
-            };
+            
 
-            if let Some(val) = map.get(&kstr) {
+            if let Some(val) = map.get(key_val) {
                 Ok(val.clone())
             } else if let Some(default) = fallback_val {
                 Ok(default)
             } else {
                 Err(format!(
                     "Key '{}' not found in map{}",
-                    kstr,
+                    key_val,
                     key_pos.map(|p| format!(" at {}", p)).unwrap_or_default()
                 ))
             }

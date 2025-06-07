@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll, Waker}};
 
-use crate::value::BlinkValue;
+use crate::{error::LispError, value::BlinkValue};
 
 #[derive(Clone)]
 pub struct BlinkFuture {
@@ -10,13 +10,18 @@ pub struct BlinkFuture {
 enum FutureState {
     Pending { waker: Option<Waker> },
     RustFuture {
-        future: Pin<Box<dyn Future<Output = Result<BlinkValue, String>> + Send>>,
+        future: Pin<Box<dyn Future<Output = BlinkValue> + Send>>,
     },
-    Ready(Result<BlinkValue, String>),
+    Ready(BlinkValue),
 }
 
+
+// Make sure FutureState is Send + Sync
+unsafe impl Send for FutureState {}
+unsafe impl Sync for FutureState {}
+
 impl Future for BlinkFuture {
-    type Output = Result<BlinkValue, String>;
+    type Output = BlinkValue;
     
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.inner.lock().unwrap();
@@ -27,8 +32,14 @@ impl Future for BlinkFuture {
             },
 
             FutureState::RustFuture { future } => {
-                future.as_mut().poll(cx)
-            },
+                match future.as_mut().poll(cx) {
+                    Poll::Ready(res) => {
+                        *state = FutureState::Ready(res.clone());
+                        Poll::Ready(res)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
             FutureState::Ready(blink_value) => {
                 Poll::Ready(blink_value.clone())
             },
@@ -46,7 +57,7 @@ impl BlinkFuture {
         match &mut *state {
             FutureState::Pending { waker } => {
                 let old_waker = waker.take();
-                *state = FutureState::Ready(Ok(value));
+                *state = FutureState::Ready(value);
                 
                 // Wake up any waiting tasks
                 if let Some(waker) = old_waker {
@@ -57,7 +68,7 @@ impl BlinkFuture {
             _ => Err("Future already completed".to_string()),
         }
     }
-    pub fn from_rust_future(future: Pin<Box<dyn Future<Output = Result<BlinkValue, String>> + Send>>) -> Self {
+    pub fn from_rust_future(future: Pin<Box<dyn Future<Output = BlinkValue> + Send>>) -> Self {
         let inner = Arc::new(Mutex::new(FutureState::RustFuture { future }));
         Self { inner }
     }
@@ -67,7 +78,10 @@ impl BlinkFuture {
         match &mut *state {
             FutureState::Pending { waker } => {
                 let old_waker = waker.take();
-                *state = FutureState::Ready(Err(error));
+                *state = FutureState::Ready(LispError::EvalError {
+                    message: error,
+                    pos: None,
+                }.into_blink_value());
                 
                 if let Some(waker) = old_waker {
                     waker.wake();

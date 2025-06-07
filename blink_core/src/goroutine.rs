@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
-use crate::{async_context::AsyncContext, eval::EvalContext};
+use crate::{async_context::AsyncContext, error::LispError, eval::{EvalContext, EvalResult}, value::Value};
 
 pub struct TokioGoroutineScheduler {
     // Track running goroutines
@@ -32,21 +32,40 @@ impl TokioGoroutineScheduler {
     
     pub fn spawn_with_context<F>(&self, mut ctx: EvalContext, task: F) -> GoroutineId 
     where 
-        F: FnOnce(&mut EvalContext) + Send + 'static 
+        F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static,
     {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        
+    
         let handle = tokio::spawn(async move {
-            // Set the goroutine ID in the context
             ctx.async_ctx = AsyncContext::Goroutine(id);
-            
-            // Run the task with the properly configured context
-            task(&mut ctx);
+    
+            let mut result = task(&mut ctx);
+    
+            loop {
+                match result {
+                    EvalResult::Value(val) => {
+                        // Task errored
+                        if let Value::Error(e) = &val.read().value {
+                            eprintln!("Goroutine {} failed: {}", id, e);
+                            break;
+                        }
+                        // Task completed successfully
+                        break;
+                    }
+                    EvalResult::Suspended { future, resume } => {
+                        let val = future.await;
+    
+                        result = resume(val, &mut ctx);
+                    }
+                }
+            }
         });
-        
+    
         self.goroutines.lock().unwrap().insert(id, handle);
         id
     }
+    
+    
     
     pub async fn join(&self, id: GoroutineId) -> Result<(), String> {
         let handle = {

@@ -1005,54 +1005,62 @@ fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnos
 
     let (message, range) = match err {
         LispError::TokenizerError { message, pos } => {
-                        (message.clone(), create_range_from_position(pos, 1))
-            }
+                            (message.clone(), create_range_from_position(pos, 1))
+                }
         LispError::ParseError { message, pos } => {
-                (message.clone(), pos.clone().into())
-            }
+                    (message.clone(), pos.clone().into())
+                }
         LispError::EvalError { message, pos } => {
-                let range = pos
-                    .as_ref()
-                    .map(|p| p.clone().into())
-                    .unwrap_or_else(create_default_range);
-                (message.clone(), range)
-            }
+                    let range = pos
+                        .as_ref()
+                        .map(|p| p.clone().into())
+                        .unwrap_or_else(create_default_range);
+                    (message.clone(), range)
+                }
         LispError::ArityMismatch {
-                expected,
-                got,
-                form,
-                pos,
-            } => {
-                let message = format!(
-                    "Wrong number of arguments to '{}': expected {}, got {}",
-                    form, expected, got
-                );
-                let range = pos
-                    .as_ref()
-                    .map(|p|p.clone().into())
-                    .unwrap_or_else(create_default_range);
-                (message, range)
-            }
+                    expected,
+                    got,
+                    form,
+                    pos,
+                } => {
+                    let message = format!(
+                        "Wrong number of arguments to '{}': expected {}, got {}",
+                        form, expected, got
+                    );
+                    let range = pos
+                        .as_ref()
+                        .map(|p|p.clone().into())
+                        .unwrap_or_else(create_default_range);
+                    (message, range)
+                }
         LispError::UndefinedSymbol { name, pos } => {
-                let message = format!("Undefined symbol: {}", name);
+                    let message = format!("Undefined symbol: {}", name);
+                    let range = pos
+                        .as_ref()
+                        .map(|p| p.clone().into())
+                        .unwrap_or_else(create_default_range);
+                    (message, range)
+                }
+        LispError::UnexpectedToken { token, pos } => (
+                    format!("Unexpected token: {}", token),
+                    create_range_from_position(pos, token.len()),
+                ),
+        LispError::ModuleError { message, pos } => {
+                let message = format!("Module error: {}", message);
                 let range = pos
                     .as_ref()
                     .map(|p| p.clone().into())
                     .unwrap_or_else(create_default_range);
                 (message, range)
-            }
-        LispError::UnexpectedToken { token, pos } => (
-                format!("Unexpected token: {}", token),
-                create_range_from_position(pos, token.len()),
-            ),
-        LispError::ModuleError { message, pos } => {
-            let message = format!("Module error: {}", message);
-            let range = pos
+            },
+        LispError::UserDefined { message, pos, data } => {
+            let message = format!("User defined error: {}", message);
+            let range =  pos
                 .as_ref()
                 .map(|p| p.clone().into())
                 .unwrap_or_else(create_default_range);
             (message, range)
-        },
+        }
     };
 
     Diagnostic {

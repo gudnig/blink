@@ -3,7 +3,7 @@ use parking_lot::RwLock;
 use crate::env::Env;
 use crate::error::LispError;
 use crate::eval::EvalContext;
-use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, BlinkValue, SourcePos, SourceRange};
+use crate::value::{bool_val_at, keyword_at, list_val, map_val_at, num_at, str_val, sym, sym_at, vector_val_at, BlinkValue, SourcePos, SourceRange};
 use crate::value::{LispNode, Value};
 
 use std::collections::HashMap;
@@ -218,11 +218,7 @@ pub fn parse(
                     end = next_pos.clone(); // position of ']'
                     tokens.remove(0); // consume ]
 
-                    return Ok(list_val(
-                        std::iter::once(sym("vector"))
-                            .chain(elements.into_iter())
-                            .collect(),
-                    ));
+                    return Ok(vector_val_at(elements, Some(start)));
                 }
                 let item = parse(tokens, rcx)?;
                 if let Some(item_end) = item.read().pos.as_ref().map(|r| r.end.clone()) {
@@ -239,21 +235,44 @@ pub fn parse(
         }
 
         "{" => {
-            let mut entries = Vec::new();
+            let mut entries: Vec<BlinkValue> = Vec::new();
             let mut end = start.clone();
+            
             while let Some((t, next_pos)) = tokens.first() {
                 if t == "}" {
                     end = next_pos.clone(); // position of '}'
                     tokens.remove(0); // consume }
-                    return Ok(list_val(
-                        std::iter::once(sym("hash-map"))
-                            .chain(entries.into_iter())
-                            .collect(),
-                    ));
+                    
+                    // Convert entries to HashMap
+                    if entries.len() % 2 != 0 {
+                        return Err(LispError::ParseError {
+                            message: "Map literal must have even number of elements (key-value pairs)".into(),
+                            pos: SourceRange { start: start.clone(), end },
+                        });
+                    }
+                    
+                    let mut map = HashMap::new();
+                    for pair in entries.chunks(2) {
+                        let key = pair[0].clone();
+                        let value = pair[1].clone();
+                        map.insert(key, value);
+                    }
+                    
+                    return Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
+                        value: Value::Map(map),
+                        pos: Some(SourceRange { start, end }),
+                    }))));
                 }
-                entries.push(parse(tokens, rcx)?); // <-- FIX
-                entries.push(parse(tokens, rcx)?); // <-- FIX
+                
+                // Parse one element (key or value)
+                let element = parse(tokens, rcx)?;
+                if let Some(element_end) = element.read().pos.as_ref().map(|r| r.end.clone()) {
+                    end = element_end;
+                }
+                entries.push(element);
             }
+            
+            // If we get here, we never found the closing }
             let pos = SourceRange { start: start.clone(), end };
             Err(LispError::ParseError {
                 message: "Unclosed map literal".into(),

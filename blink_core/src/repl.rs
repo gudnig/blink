@@ -2,17 +2,18 @@ use crate::env::Env;
 use crate::error::LispError;
 
 use crate::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
-use crate::value::BlinkValue;
+use crate::value::{ Value};
+
 use parking_lot::RwLock;
 use rustyline::history::FileHistory;
 use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::sync::Arc;
 
-use crate::eval::{eval, EvalContext};
+use crate::eval::{eval, EvalContext, EvalResult};
 
 const DEBUG_POS: bool = true;
 
-pub fn start_repl() {
+pub async fn start_repl() {
     let config = Config::builder()
         .completion_type(CompletionType::List)
         .edit_mode(EditMode::Emacs)
@@ -34,7 +35,7 @@ pub fn start_repl() {
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
     loop {
-        // 🌟 Clone the reader macros once for this REPL iteration
+        
         let reader_macros = ctx.reader_macros.read().reader_macros.clone();
         let mut temp_reader_ctx = crate::parser::ReaderContext { reader_macros };
         let mut temp_reader_ctx = Arc::new(RwLock::new(temp_reader_ctx));
@@ -42,36 +43,71 @@ pub fn start_repl() {
         match read_multiline(&mut rl, &mut temp_reader_ctx) {
             Ok(line) if line.trim() == "exit" => break,
             Ok(code) => match run_line(&code, &mut ctx, &mut temp_reader_ctx) {
-                Ok(val) => println!("=> {}", val.read().value),
-                Err(e) => {
-                    println!("Error: {e}");
-                    if DEBUG_POS {
-                        match &e {
-                            LispError::TokenizerError { pos, .. }
-                            
-                                                    | LispError::UnexpectedToken { pos, .. } => {
-                                                        println!("   [at {}]", pos);
-                                                    },
-                            | LispError::ParseError { pos, .. } => {
-                                                        println!("   [at {}]", pos);
-                                                    }
-                            LispError::EvalError { pos, .. }
-                                                    | LispError::ArityMismatch { pos, .. }
-                                                    | LispError::UndefinedSymbol { pos, .. } => {
-                                                        if let Some(pos) = pos {
-                                                            println!("   [at {}]", pos);
-                                                        }
-                                                    }
-                            LispError::ModuleError {  pos, .. } => {
-                                if let Some(pos) = pos {
-                                    println!("   [at {}]", pos);
+                        EvalResult::Value(val) => 
+                        {
+                            match &val.read().value {
+                                Value::Error(e) =>{
+                                    println!("Error: {e}");
+                                    if DEBUG_POS {
+                                        match &e {
+                                            LispError::TokenizerError { pos, .. }
+                                    
+                                                                                            | LispError::UnexpectedToken { pos, .. } => {
+                                                                                                println!("   [at {}]", pos);
+                                                                                            },
+                                            | LispError::ParseError { pos, .. } => {
+                                                                                                println!("   [at {}]", pos);
+                                                                                            }
+                                            LispError::EvalError { pos, .. }
+                                                                                            | LispError::ArityMismatch { pos, .. }
+                                                                                            | LispError::UndefinedSymbol { pos, .. } => {
+                                                                                                if let Some(pos) = pos {
+                                                                                                    println!("   [at {}]", pos);
+                                                                                                }
+                                                                                            }
+                                            LispError::ModuleError {  pos, .. } => {
+                                                                        if let Some(pos) = pos {
+                                                                            println!("   [at {}]", pos);
+                                                                        }
+                                                                    }
+                                            LispError::UserDefined { message, pos, data } => {
+                                                if let Some(pos) = pos {
+                                                    println!("   [at {}]", pos);
+                                                }
+                                                println!("   {}", message);
+                                                if let Some(data) = data {
+                                                    println!("   {}", data.read().value);
+                                                } else {
+                                                    println!("   No data");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    println!("=> {}", val.read().value);
+                                }
+                            }
+                        },
+            
+            
+                        EvalResult::Suspended { mut future, mut resume } => {
+                            loop {
+                                let val = future.await ;
+                                match resume(val, &mut ctx) {
+                                    EvalResult::Value(v) => {
+                                        println!("=> {}", v.read().value);
+                                        break;
+                                    }
+                                    EvalResult::Suspended { future: next_future, resume: next_resume } => {
+                                        future = next_future;
+                                        resume = next_resume;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            },
-            Err(_) => break,
+            Err(e) => println!("Error: {e}"),
         }
     }
 
@@ -103,8 +139,15 @@ fn run_line(
     code: &str,
     ctx: &mut EvalContext,
     reader_macros: &mut Arc<RwLock<ReaderContext>>,
-) -> Result<BlinkValue, LispError> {
-    let mut tokens = tokenize(code)?;
-    let ast = parse(&mut tokens, reader_macros)?;
+) -> EvalResult {
+    let mut tokens = match tokenize(code) {
+        Ok(tokens) => tokens,
+        Err(e) => return EvalResult::Value(e.into_blink_value()),
+    };
+    
+    let ast = match parse(&mut tokens, reader_macros) {
+        Ok(ast) => ast,
+        Err(e) => return EvalResult::Value(e.into_blink_value()),
+    };
     eval(ast, ctx)
 }

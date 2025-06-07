@@ -1,10 +1,11 @@
 use crate::env::Env;
+use crate::error::LispError;
 use crate::future::BlinkFuture;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-
+use std::hash::{Hash, Hasher};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {
@@ -53,6 +54,159 @@ impl Deref for BlinkValue {
     }
 }
 
+impl Hash for BlinkValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match &self.read().value {
+            Value::Number(n) => {
+                        // Handle float/int equality: 1.0 == 1
+                        if n.fract() == 0.0 && n.is_finite() {
+                            // Hash as integer if it's a whole number
+                            (*n as i64).hash(state);
+                        } else {
+                            n.to_bits().hash(state);
+                        }
+                    }
+            Value::Str(s) => s.hash(state),
+            Value::Symbol(s) => s.hash(state),
+            Value::Keyword(k) => {
+                        ":".hash(state);
+                        k.hash(state);
+                    }
+            Value::List(items) => {
+                        "list".hash(state);
+                        for item in items {
+                            item.hash(state);
+                        }
+                    }
+            Value::Bool(b) => b.hash(state),
+            Value::Vector(blink_values) => {
+                "vector".hash(state); // Type discriminator
+                blink_values.len().hash(state); // Length for efficiency
+                for item in blink_values {
+                    item.hash(state);
+                }
+            }
+            
+            Value::Map(hash_map) => {
+                "map".hash(state);
+                hash_map.len().hash(state);
+                // Maps are unordered, so we need order-independent hashing
+                let mut pairs: Vec<_> = hash_map.iter().collect();
+                pairs.sort_by(|a, b| {
+                    // Sort by hash of key for deterministic ordering
+                    let mut hasher_a = std::collections::hash_map::DefaultHasher::new();
+                    let mut hasher_b = std::collections::hash_map::DefaultHasher::new();
+                    a.0.hash(&mut hasher_a);
+                    b.0.hash(&mut hasher_b);
+                    hasher_a.finish().cmp(&hasher_b.finish())
+                });
+                for (k, v) in pairs {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            
+            Value::NativeFunc(f) => {
+                "native-func".hash(state);
+                // Function pointers can be hashed by address
+                (*f as *const fn(Vec<BlinkValue>) -> Result<BlinkValue, String>).hash(state);
+            }
+            
+            Value::FuncUserDefined { params, body, env } => {
+                "user-func".hash(state);
+                params.hash(state);
+                body.hash(state);
+                // For env, we could hash the env's ID or skip it
+                // Skipping env means functions with same params/body are equal
+                // even if captured in different environments
+            }
+            
+            Value::ModuleReference { module, symbol } => {
+                "module-ref".hash(state);
+                module.hash(state);
+                symbol.hash(state);
+            }
+            
+            Value::Macro { params, body, env, is_variadic } => {
+                "macro".hash(state);
+                params.hash(state);
+                body.hash(state);
+                is_variadic.hash(state);
+                // Same env consideration as functions
+            }
+            
+            Value::Future(blink_future) => {
+                "future".hash(state);
+                // figure out how to hash futures maybe an id?
+                todo!();
+            }
+            
+            Value::Error(lisp_error) => {
+                "error".hash(state);
+                // Hash the error message/type
+                format!("{:?}", lisp_error).hash(state);
+            }
+            
+            Value::Nil => {
+                "nil".hash(state);
+            }
+        }
+    }
+}
+
+impl PartialEq for BlinkValue {
+    fn eq(&self, other: &Self) -> bool {
+        use Value::*;
+        match (&self.read().value, &other.read().value) {
+            // Same types
+            (Number(a), Number(b)) => {
+                // Handle float/int equality: 1.0 == 1
+                if a.fract() == 0.0 && b.fract() == 0.0 {
+                    *a as i64 == *b as i64
+                } else {
+                    a == b
+                }
+            }
+            (Bool(a), Bool(b)) => a == b,
+            (Str(a), Str(b)) => a == b,
+            (Symbol(a), Symbol(b)) => a == b,
+            (Keyword(a), Keyword(b)) => a == b,
+            (Nil, Nil) => true,
+            
+            (List(a), List(b)) => a == b,  // Recursive
+            (Vector(a), Vector(b)) => a == b,
+            (Map(a), Map(b)) => a == b,
+            
+            (NativeFunc(a), NativeFunc(b)) => {
+                // Function pointer equality
+                std::ptr::eq(a as *const _, b as *const _)
+            }
+            
+            (FuncUserDefined { params: p1, body: b1, .. }, 
+             FuncUserDefined { params: p2, body: b2, .. }) => {
+                // Functions equal if same params and body
+                // (ignoring environment for now)
+                p1 == p2 && b1 == b2
+            }
+            
+            (ModuleReference { module: m1, symbol: s1 }, 
+             ModuleReference { module: m2, symbol: s2 }) => {
+                m1 == m2 && s1 == s2
+            }
+            
+            (Macro { params: p1, body: b1, is_variadic: v1, .. },
+             Macro { params: p2, body: b2, is_variadic: v2, .. }) => {
+                p1 == p2 && b1 == b2 && v1 == v2
+            }
+            
+            // Different types are never equal
+            _ => false
+        }
+    }
+}
+
+impl Eq for BlinkValue {}
+
 #[allow(dead_code)]
 impl BlinkValue {
     pub fn is_nil(&self) -> bool {
@@ -71,6 +225,14 @@ impl BlinkValue {
         }
     }
 
+    pub fn error(err: LispError) -> Self {
+        BlinkValue::from(Value::Error(err))
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(&self.read().value, Value::Error(_))
+    }
+
     pub fn to_string_repr(&self) -> String {
         format!("{:?}", self.read().value)
     }
@@ -85,7 +247,7 @@ pub enum Value {
     Keyword(String),    
     List(Vec<BlinkValue>),
     Vector(Vec<BlinkValue>),
-    Map(HashMap<String, BlinkValue>),
+    Map(HashMap<BlinkValue, BlinkValue>),
     NativeFunc(fn(Vec<BlinkValue>) -> Result<BlinkValue, String>), // Rust-native functions
     FuncUserDefined {
         params: Vec<String>,
@@ -104,6 +266,7 @@ pub enum Value {
         is_variadic: bool,
     },
     Future(BlinkFuture),
+    Error(LispError),
     Nil,
 }
 impl Value {
@@ -123,6 +286,7 @@ impl Value {
             Value::Nil => "nil",
             Value::Macro { .. } => "macro",
             Value::Future(_) => "future",
+            Value::Error(_) => "error",
         }
     }
     
@@ -146,6 +310,7 @@ impl fmt::Debug for Value {
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Macro { .. } => write!(f, "#<macro>"),
             Value::Future(_) => write!(f, "#<future>"),
+            Value::Error(_) => write!(f, "#<error>"),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -194,6 +359,7 @@ impl fmt::Display for Value {
             Value::ModuleReference { .. } => write!(f, "#<imported-symbol>"),
             Value::Macro { .. } => write!(f, "#<macro>"),
             Value::Future(_) => write!(f, "#<future>"),
+            Value::Error(_) => write!(f, "#<error>"),
             Value::Nil => write!(f, "nil"),
         }
     }
@@ -338,7 +504,7 @@ pub fn num_at(n: f64, start: Option<SourcePos>) -> BlinkValue {
 
 
 
-pub fn map_val_at(m: HashMap<String, BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
+pub fn map_val_at(m: HashMap<BlinkValue, BlinkValue>, pos: Option<SourcePos>) -> BlinkValue {
     let pos = pos.map(|pos| {
         let end = SourcePos {
             line: pos.line,
