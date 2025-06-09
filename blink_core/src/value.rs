@@ -1,5 +1,5 @@
 use crate::env::Env;
-use crate::error::LispError;
+use crate::error::{BlinkError, LispError};
 use crate::future::BlinkFuture;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -225,7 +225,7 @@ impl BlinkValue {
         }
     }
 
-    pub fn error(err: LispError) -> Self {
+    pub fn error(err: BlinkError) -> Self {
         BlinkValue::from(Value::Error(err))
     }
 
@@ -238,6 +238,8 @@ impl BlinkValue {
     }
 }
 
+
+
 #[derive(Clone)]
 pub enum Value {
     Number(f64),
@@ -248,7 +250,7 @@ pub enum Value {
     List(Vec<BlinkValue>),
     Vector(Vec<BlinkValue>),
     Map(HashMap<BlinkValue, BlinkValue>),
-    NativeFunc(fn(Vec<BlinkValue>) -> Result<BlinkValue, String>), // Rust-native functions
+    NativeFunc(fn(Vec<BlinkValue>) -> Result<BlinkValue, BlinkError>), // Rust-native functions
     FuncUserDefined {
         params: Vec<String>,
         body: Vec<BlinkValue>,
@@ -266,7 +268,7 @@ pub enum Value {
         is_variadic: bool,
     },
     Future(BlinkFuture),
-    Error(LispError),
+    Error(BlinkError),
     Nil,
 }
 impl Value {

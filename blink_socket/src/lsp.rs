@@ -4,7 +4,7 @@ use crate::{
     helpers::collect_symbols_from_forms, lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range}, session::{Document, Session, SymbolSource}, session_manager::SessionManager
 };
 use anyhow::{anyhow, Context, Result};
-use blink_core::{ parser::{parse_all, ReaderContext}, value::SourcePos};
+use blink_core::{ error::{BlinkError, BlinkErrorType, ParseErrorType}, parser::{parse_all, ReaderContext}, value::SourcePos};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -1000,71 +1000,43 @@ fn get_builtin_functions() -> Vec<(&'static str, String)> {
 }
 
 /// Convert a Blink error to an LSP diagnostic
-fn error_to_diagnostic(err: &blink_core::error::LispError, uri: &str) -> Diagnostic {
-    use blink_core::error::LispError;
+fn error_to_diagnostic(err: &blink_core::error::BlinkError, uri: &str) -> Diagnostic {
 
-    let (message, range) = match err {
-        LispError::TokenizerError { message, pos } => {
-                            (message.clone(), create_range_from_position(pos, 1))
+    let message = &err.message;
+    let range = &err.pos.as_ref().map(|p| p.clone().into()).unwrap_or_else(create_default_range);
+
+    let (message, range) = match &err.error_type {
+        BlinkErrorType::Tokenizer => {
+                        (message.clone(), range)
+            }
+        BlinkErrorType::Parse(parse_type) => {
+            match parse_type {
+                ParseErrorType::UnexpectedToken(token) => {
+                    (format!("Unexpected token: {}", token), range)
                 }
-        LispError::ParseError { message, pos } => {
-                    (message.clone(), pos.clone().into())
-                }
-        LispError::EvalError { message, pos } => {
-                    let range = pos
-                        .as_ref()
-                        .map(|p| p.clone().into())
-                        .unwrap_or_else(create_default_range);
-                    (message.clone(), range)
-                }
-        LispError::ArityMismatch {
-                    expected,
-                    got,
-                    form,
-                    pos,
-                } => {
-                    let message = format!(
-                        "Wrong number of arguments to '{}': expected {}, got {}",
-                        form, expected, got
-                    );
-                    let range = pos
-                        .as_ref()
-                        .map(|p|p.clone().into())
-                        .unwrap_or_else(create_default_range);
-                    (message, range)
-                }
-        LispError::UndefinedSymbol { name, pos } => {
-                    let message = format!("Undefined symbol: {}", name);
-                    let range = pos
-                        .as_ref()
-                        .map(|p| p.clone().into())
-                        .unwrap_or_else(create_default_range);
-                    (message, range)
-                }
-        LispError::UnexpectedToken { token, pos } => (
-                    format!("Unexpected token: {}", token),
-                    create_range_from_position(pos, token.len()),
-                ),
-        LispError::ModuleError { message, pos } => {
-                let message = format!("Module error: {}", message);
-                let range = pos
-                    .as_ref()
-                    .map(|p| p.clone().into())
-                    .unwrap_or_else(create_default_range);
-                (message, range)
-            },
-        LispError::UserDefined { message, pos, data } => {
-            let message = format!("User defined error: {}", message);
-            let range =  pos
-                .as_ref()
-                .map(|p| p.clone().into())
-                .unwrap_or_else(create_default_range);
-            (message, range)
+                _ => (message.clone(), range)
+            }
+                
+        },
+        BlinkErrorType::UndefinedSymbol { name } => {
+            (format!("Undefined symbol: {}", name), range)
+        },
+        BlinkErrorType::Eval => {
+            (message.clone(), range)
+        },
+        BlinkErrorType::ArityMismatch { expected, got, form } => {
+            (format!("Wrong number of arguments to '{}': expected {}, got {}", form, expected, got), range)
+        },
+        BlinkErrorType::UnexpectedToken { token } => {
+            (format!("Unexpected token: {}", token), range)
+        },
+        BlinkErrorType::UserDefined { data } => {
+            (message.clone(), range)    
         }
     };
 
     Diagnostic {
-        range,
+        range: range.clone(),
         severity: Some(1), // Error = 1, Warning = 2, Info = 3, Hint = 4
         code: None,
         source: Some("blink-lsp".to_string()),

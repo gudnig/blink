@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use blink_core::error::BlinkError;
 use parking_lot::RwLock;
 
 pub use blink_core::{BlinkValue, Env, Value, LispNode};
@@ -7,7 +8,7 @@ pub use blink_core::{BlinkValue, Env, Value, LispNode};
 pub fn register_fn(
     env: &mut Env,
     name: &str,
-    f: fn(Vec<BlinkValue>) -> Result<BlinkValue, String>,
+    f: fn(Vec<BlinkValue>) -> Result<BlinkValue, BlinkError>,
 ) -> String {
     let node = LispNode {
         value: Value::NativeFunc(f),
@@ -20,7 +21,7 @@ pub fn register_fn(
 /// Register multiple functions at once and return all their names
 pub fn register_functions(
     env: &mut Env,
-    functions: &[(&str, fn(Vec<BlinkValue>) -> Result<BlinkValue, String>)]
+    functions: &[(&str, fn(Vec<BlinkValue>) -> Result<BlinkValue, BlinkError>)]
 ) -> Vec<String> {
     functions.iter()
         .map(|(name, func)| {
@@ -56,8 +57,8 @@ pub fn register_values(
 macro_rules! register_module {
     ($env:expr, $($name:expr => $func:expr),+ $(,)?) => {
         {
-            let functions: &[(&str, fn(Vec<BlinkValue>) -> Result<BlinkValue, String>)] = &[
-                $(($name, $func as fn(Vec<BlinkValue>) -> Result<BlinkValue, String>)),+
+            let functions: &[(&str, fn(Vec<BlinkValue>) -> Result<BlinkValue, BlinkError>)] = &[
+                $(($name, $func)),+
             ];
             $crate::register_functions($env, functions)
         }
@@ -196,11 +197,11 @@ mod tests {
     fn test_register_functions() {
         let mut env = Env::new();
         
-        fn test_add(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+        fn test_add(args: Vec<BlinkValue>) -> Result<BlinkValue, BlinkError> {
             Ok(values::number(42.0))
         }
         
-        fn test_multiply(args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+        fn test_multiply(args: Vec<BlinkValue>) -> Result<BlinkValue, BlinkError> {
             Ok(values::number(100.0))
         }
         
@@ -219,7 +220,7 @@ mod tests {
     fn test_macro_registration() {
         let mut env = Env::new();
         
-        fn dummy_func(_args: Vec<BlinkValue>) -> Result<BlinkValue, String> {
+        fn dummy_func(_args: Vec<BlinkValue>) -> Result<BlinkValue, BlinkError> {
             Ok(values::nil())
         }
         

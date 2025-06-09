@@ -1,9 +1,9 @@
 use parking_lot::RwLock;
 
 use crate::env::Env;
-use crate::error::LispError;
+use crate::error::{BlinkError, LispError, ParseErrorType};
 use crate::eval::EvalContext;
-use crate::value::{bool_val_at, keyword_at, list_val, map_val_at, num_at, str_val, sym, sym_at, vector_val_at, BlinkValue, SourcePos, SourceRange};
+use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, vector_val_at, BlinkValue, SourcePos, SourceRange};
 use crate::value::{LispNode, Value};
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ impl ReaderContext {
 fn expand_macro_body(form: BlinkValue, env: Arc<RwLock<Env>>) -> Result<BlinkValue, LispError> {
     match &form.read().value {
         Value::Symbol(s) => {
-            let available_modules = env.read().available_modules.clone();
+            //let available_modules = env.read().available_modules.clone();
             // If symbol exists in the macro local env, replace it
             if let Some(val) = env.read().get_local(s) {
                 Ok(val)
@@ -48,14 +48,11 @@ fn expand_macro_body(form: BlinkValue, env: Arc<RwLock<Env>>) -> Result<BlinkVal
     }
 }
 
-fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkValue, LispError> {
+fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkValue, BlinkError> {
     match &macro_fn.read().value {
         Value::FuncUserDefined { params, body, env } => {
             if params.len() != 1 {
-                return Err(LispError::EvalError {
-                    message: "Reader macro must take exactly 1 argument".into(),
-                    pos: None,
-                });
+                return Err(BlinkError::eval("Reader macro must take exactly 1 argument"));
             }
 
             // Create fresh local env
@@ -64,33 +61,24 @@ fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkVal
             // Bind param "x" -> the parsed form (like "foo")
             local_env.write().set(&params[0], form);
 
-            let macro_body = body.get(0).ok_or_else(|| LispError::EvalError {
-                message: "Reader macro has no body".into(),
-                pos: None,
-            })?;
+            let macro_body = body.get(0).ok_or_else(|| BlinkError::eval("Reader macro has no body"))?;
 
             // Expand macro body inside this local env
-            expand_macro_body(macro_body.clone(), local_env)
+            expand_macro_body(macro_body.clone(), local_env).map_err(|e| BlinkError::eval(e.to_string()))
         }
-        Value::NativeFunc(f) => f(vec![form]).map_err(|e| LispError::EvalError {
-            message: e,
-            pos: None,
-        }),
-        _ => Err(LispError::EvalError {
-            message: "Reader macro must be a function".into(),
-            pos: None,
-        }),
+        Value::NativeFunc(f) => f(vec![form]).map_err(|e| BlinkError::eval(e.to_string())),
+        _ => Err(BlinkError::eval("Reader macro must be a function")),
     }
 }
 
-pub fn tokenize(code: &str) -> Result<Vec<(String, SourcePos)>, LispError> {
+pub fn tokenize(code: &str) -> Result<Vec<(String, SourcePos)>, BlinkError> {
     tokenize_at(code, None)
 }
 
 pub fn tokenize_at(
     code: &str,
     pos: Option<SourcePos>,
-) -> Result<Vec<(String, SourcePos)>, LispError> {
+) -> Result<Vec<(String, SourcePos)>, BlinkError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_str = false;
@@ -138,10 +126,7 @@ pub fn tokenize_at(
     }
 
     if in_str {
-        return Err(LispError::TokenizerError {
-            message: "Unterminated string literal".into(),
-            pos: SourcePos { line, col },
-        });
+        return Err(BlinkError::tokenizer("Unterminated string literal", SourcePos { line, col }));
     }
 
     if !current.is_empty() {
@@ -172,12 +157,9 @@ pub fn atom(token: &str, pos: Option<SourcePos>) -> BlinkValue {
 pub fn parse(
     tokens: &mut Vec<(String, SourcePos)>,
     rcx: &mut Arc<RwLock<ReaderContext>>,
-) -> Result<BlinkValue, LispError> {
+) -> Result<BlinkValue, BlinkError> {
     if tokens.is_empty() {
-        return Err(LispError::UnexpectedToken {
-            pos: SourcePos { line: 0, col: 0 },
-            token: "EOF".into(),
-        });
+        return Err(BlinkError::unexpected_token("EOF", SourcePos { line: 0, col: 0 }));
     }
 
     let (token, start) = tokens.remove(0);
@@ -228,10 +210,7 @@ pub fn parse(
             }
             let pos = SourceRange { start: start.clone(), end };
 
-            Err(LispError::ParseError {
-                message: "Unclosed vector literal".into(),
-                pos,
-            })
+            Err(BlinkError::parse_unclosed_delimiter("Unclosed vector literal", "[", pos))
         }
 
         "{" => {
@@ -245,10 +224,7 @@ pub fn parse(
                     
                     // Convert entries to HashMap
                     if entries.len() % 2 != 0 {
-                        return Err(LispError::ParseError {
-                            message: "Map literal must have even number of elements (key-value pairs)".into(),
-                            pos: SourceRange { start: start.clone(), end },
-                        });
+                        return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", SourceRange { start: start.clone(), end }));
                     }
                     
                     let mut map = HashMap::new();
@@ -274,15 +250,12 @@ pub fn parse(
             
             // If we get here, we never found the closing }
             let pos = SourceRange { start: start.clone(), end };
-            Err(LispError::ParseError {
-                message: "Unclosed map literal".into(),
-                pos,
-            })
+            Err(BlinkError::parse_unclosed_delimiter("Unclosed map literal", "}", pos))
         }
 
         
 
-        ")" | "]" | "}" => Err(LispError::UnexpectedToken { token, pos: start }),
+        ")" | "]" | "}" => Err(BlinkError::unexpected_token(&token, start)),
 
         _ => {
             let mut matched_macro: Option<(String, BlinkValue)> = None;
@@ -306,13 +279,7 @@ pub fn parse(
             
                 let target_form = if rest.is_empty() {
                     if tokens.is_empty() {
-                        return Err(LispError::ParseError {
-                            message: "Unexpected EOF after reader macro".into(),
-                            pos: SourceRange {
-                                start: start.clone(),
-                                end: start.clone(),
-                            },
-                        });
+                        return Err(BlinkError::parse_unexpected_eof(SourceRange { start: start.clone(), end: start.clone() }));
                     }
                     parse(tokens, rcx)?
                 } else {
@@ -339,7 +306,7 @@ pub fn parse(
     }
 }
 
-pub fn parse_all(code: &str, ctx: &mut Arc<RwLock<ReaderContext>>) -> Result<Vec<BlinkValue>, LispError> {
+pub fn parse_all(code: &str, ctx: &mut Arc<RwLock<ReaderContext>>) -> Result<Vec<BlinkValue>, BlinkError> {
     let mut tokens = tokenize(code)?;
     let mut forms = Vec::new();
 

@@ -171,8 +171,8 @@ where
                 .ok_or(anyhow::anyhow!("No eval context found."))?;
     
             let mut rctx = ctx.reader_macros.clone();
-            let mut tokens = tokenize_at(&code, Some(source_pos))?;
-            parse(&mut tokens, &mut rctx).context("Failed to parse code")?
+            let mut tokens = tokenize_at(&code, Some(source_pos)).map_err(|e| anyhow::anyhow!("Failed to tokenize code: {}", e))?;
+            parse(&mut tokens, &mut rctx).map_err(|e| anyhow::anyhow!("Failed to parse code: {}", e))?
         }; // ctx_guard dropped here
         
         let ast_clone = ast.clone();

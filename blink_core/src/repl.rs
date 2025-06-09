@@ -1,5 +1,5 @@
 use crate::env::Env;
-use crate::error::LispError;
+use crate::error::{BlinkError, BlinkErrorType, LispError, ParseErrorType};
 
 use crate::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
 use crate::value::{ Value};
@@ -47,40 +47,11 @@ pub async fn start_repl() {
                         {
                             match &val.read().value {
                                 Value::Error(e) =>{
+                                    
                                     println!("Error: {e}");
                                     if DEBUG_POS {
-                                        match &e {
-                                            LispError::TokenizerError { pos, .. }
-                                    
-                                                                                            | LispError::UnexpectedToken { pos, .. } => {
-                                                                                                println!("   [at {}]", pos);
-                                                                                            },
-                                            | LispError::ParseError { pos, .. } => {
-                                                                                                println!("   [at {}]", pos);
-                                                                                            }
-                                            LispError::EvalError { pos, .. }
-                                                                                            | LispError::ArityMismatch { pos, .. }
-                                                                                            | LispError::UndefinedSymbol { pos, .. } => {
-                                                                                                if let Some(pos) = pos {
-                                                                                                    println!("   [at {}]", pos);
-                                                                                                }
-                                                                                            }
-                                            LispError::ModuleError {  pos, .. } => {
-                                                                        if let Some(pos) = pos {
-                                                                            println!("   [at {}]", pos);
-                                                                        }
-                                                                    }
-                                            LispError::UserDefined { message, pos, data } => {
-                                                if let Some(pos) = pos {
-                                                    println!("   [at {}]", pos);
-                                                }
-                                                println!("   {}", message);
-                                                if let Some(data) = data {
-                                                    println!("   {}", data.read().value);
-                                                } else {
-                                                    println!("   No data");
-                                                }
-                                            }
+                                        if let Some(pos) = e.pos {
+                                            println!("   [at {}]", pos);
                                         }
                                     }
                                 }
@@ -129,7 +100,7 @@ pub fn read_multiline(
 
         match tokenize(&code).and_then(|mut toks| parse(&mut toks, rcx)) {
             Ok(_) => return Ok(code),
-            Err(LispError::ParseError { message, .. }) if message.contains("Unclosed") => continue,
+            Err(BlinkError { error_type: BlinkErrorType::Parse(ParseErrorType::UnclosedDelimiter(_message )), .. }) => continue,
             Err(_) => return Ok(code), // Let the main handler display the error
         }
     }

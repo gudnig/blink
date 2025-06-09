@@ -1,6 +1,6 @@
 use crate::async_context::AsyncContext;
 use crate::env::Env;
-use crate::error::LispError;
+use crate::error::{BlinkError, LispError};
 use crate::future::BlinkFuture;
 use crate::goroutine::{GoroutineId, TokioGoroutineScheduler};
 use crate::module::{ImportType, Module, ModuleRegistry, ModuleSource};
@@ -132,10 +132,7 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
         }
         Value::Symbol(sym) => ctx.get(sym)
             .map(|sym| EvalResult::Value(sym))
-            .unwrap_or( EvalResult::Value(  LispError::UndefinedSymbol {
-                                    name: sym.clone(),
-                                    pos: get_pos(&expr),
-                                }.into_blink_value())),
+            .unwrap_or( EvalResult::Value(  BlinkError::undefined_symbol(sym).with_pos(get_pos(&expr)).into_blink_value())),
         Value::List(list) if list.is_empty() => EvalResult::Value(nil()),
         Value::List(list) => {
             let head = &list[0];
@@ -158,14 +155,8 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
                     "macro" => eval_macro(&list[1..], ctx),
                     "rmac" => eval_def_reader_macro(&list[1..], ctx),
                     "quasiquote" => eval_quasiquote(&list[1..], ctx),
-                    "unquote" => EvalResult::Value(LispError::EvalError {
-                        message: "unquote used outside quasiquote".into(),
-                        pos: None,
-                    }.into_blink_value()),
-                    "unquote-splicing" => EvalResult::Value(LispError::EvalError {
-                        message: "unquote-splicing used outside quasiquote".into(),
-                        pos: None,
-                    }.into_blink_value()),
+                    "unquote" => EvalResult::Value(BlinkError::eval("unquote used outside quasiquote").into_blink_value()),
+                    "unquote-splicing" => EvalResult::Value(BlinkError::eval("unquote-splicing used outside quasiquote").into_blink_value()),
                     "go" => eval_go(&list[1..], ctx),
                     "deref" => eval_deref(&list[1..], ctx),
 
@@ -179,10 +170,7 @@ pub fn eval(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
                 }
             }
         }
-        _ => EvalResult::Value(LispError::EvalError {
-            message: "Unknown expression type".into(),
-            pos: get_pos(&expr),
-        }.into_blink_value()),
+        _ => EvalResult::Value(BlinkError::eval("Unknown expression type").with_pos(get_pos(&expr)).into_blink_value()),
     }
 }
 
@@ -205,14 +193,9 @@ pub fn trace_eval(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
     }
 }
 
-fn require_arity(args: &[BlinkValue], expected: usize, form_name: &str) -> Result<(), LispError> {
+fn require_arity(args: &[BlinkValue], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {
-        return Err(LispError::ArityMismatch {
-            expected,
-            got: args.len(),
-            form: form_name.to_string(),
-            pos: None,
-        });
+        return Err(BlinkError::arity(expected, args.len(), form_name));
     }
     Ok(())
 }
@@ -269,7 +252,7 @@ fn eval_function_call_inline(
                     return EvalResult::Value(val);
                 }
                 evaluated_args.push(val);
-                index += 1;
+                index += 1; 
             }
             EvalResult::Suspended { future, resume: _ } => {
                 return EvalResult::Suspended {
@@ -295,7 +278,7 @@ pub fn eval_func(
     match &func.read().value {
         Value::NativeFunc(f) => f(args)
             .map_or_else(
-                |e| EvalResult::Value(LispError::EvalError { message: e, pos: get_pos(&func) }.into_blink_value()),
+                |e| EvalResult::Value(BlinkError::eval(e.to_string()).with_pos(get_pos(&func)).into_blink_value()),
                 |v| EvalResult::Value(v))
         ,
         
@@ -303,20 +286,10 @@ pub fn eval_func(
             // Arity check...
             if *is_variadic {
                 if args.len() < params.len() - 1 {
-                    return EvalResult::Value(LispError::ArityMismatch {
-                        expected: params.len() - 1,
-                        got: args.len(),
-                        form: "macro (at least)".into(),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::arity(params.len() - 1, args.len(), "macro (at least)").into_blink_value());
                 }
             } else if params.len() != args.len() {
-                return EvalResult::Value(LispError::ArityMismatch {
-                    expected: params.len(),
-                    got: args.len(),
-                    form: "macro".into(),
-                    pos: None,
-                }.into_blink_value());
+                return EvalResult::Value(BlinkError::arity(params.len(), args.len(), "macro").into_blink_value());
             }
 
             // Create macro environment and bind parameters
@@ -346,12 +319,7 @@ pub fn eval_func(
         
         Value::FuncUserDefined { params, body, env } => {
             if params.len() != args.len() {
-                return EvalResult::Value(LispError::ArityMismatch {
-                    expected: params.len(),
-                    got: args.len(),
-                    form: "fn".into(),
-                    pos: None,
-                }.into_blink_value());
+                return EvalResult::Value(BlinkError::arity(params.len(), args.len(), "fn").into_blink_value());
             }
 
             let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
@@ -368,10 +336,7 @@ pub fn eval_func(
             eval_function_body_inline(body.clone(), 0, nil(), old_env, local_ctx)
         }
         
-        _ => EvalResult::Value(LispError::EvalError {
-            message: "Not a function".into(),
-            pos: get_pos(&func),
-        }.into_blink_value()),
+        _ => EvalResult::Value(BlinkError::eval("Not a function").with_pos(get_pos(&func)).into_blink_value()),
     }
 }
 
@@ -453,10 +418,7 @@ fn eval_function_body_inline(
 
 fn eval_if(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "if expects at least 2 arguments".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("if expects at least 2 arguments").into_blink_value());
     }
     let condition = try_eval!(trace_eval(args[0].clone(), ctx));
     let is_truthy = !matches!(condition.read().value, Value::Bool(false) | Value::Nil);
@@ -471,18 +433,12 @@ fn eval_if(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
 
 fn eval_def(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() != 2 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "def expects exactly 2 arguments".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(2, args.len(), "def").into_blink_value());
     }
     let name = match &args[0].read().value {
         Value::Symbol(s) => s.clone(),
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "def first argument must be a symbol".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("def first argument must be a symbol").into_blink_value());
         }
     };
     let value = try_eval!(trace_eval(args[1].clone(), ctx));
@@ -492,10 +448,7 @@ fn eval_def(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
 
 fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "fn expects a parameter list and at least one body form".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(2, args.len(), "fn").into_blink_value());
     }
     let params = match &args[0].read().value {
         Value::Vector(vs) => vs
@@ -522,23 +475,14 @@ fn eval_fn(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                         })
                         .collect()
                 } else {
-                    return EvalResult::Value(LispError::EvalError {
-                        message: "fn expects a vector of symbols as parameters".into(),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::eval("fn expects a vector of symbols as parameters").into_blink_value());
                 }
             } else {
-                return EvalResult::Value(LispError::EvalError {
-                    message: "fn expects a vector of symbols as parameters".into(),
-                    pos: None,
-                }.into_blink_value());
+                return EvalResult::Value(BlinkError::eval("fn expects a vector of symbols as parameters").into_blink_value());
             }
         }
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "fn expects a vector of symbols as parameters".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("fn expects a vector of symbols as parameters").into_blink_value());
         }
     };
 
@@ -612,11 +556,7 @@ fn eval_let_bindings_inline(
             Value::Symbol(s) => s.clone(),
             _ => {
                 return EvalResult::Value(
-                    LispError::EvalError {
-                        message: "let binding keys must be symbols".into(),
-                        pos: None,
-                    }
-                    .into_blink_value(),
+                    BlinkError::eval("let binding keys must be symbols").into_blink_value(),
                 );
             }
         };
@@ -632,13 +572,9 @@ fn eval_let_bindings_inline(
             }
 
             EvalResult::Suspended { future, resume: _ } => {
-                println!("LET: Got suspended result, handling inline");
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        println!("LET: Resume called with: {:?}", v);
-                        println!("LET: Setting '{}' in env {:p}", key, env.as_ref());
-                        println!("LET: Current ctx.env is {:p}", ctx.env.as_ref());
                         
                         // Do what the deref resume would do: just use v directly
                         if v.is_error() {
@@ -662,17 +598,10 @@ fn eval_let_bindings_inline(
 
 fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "let expects a binding vector and at least one body form".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("let expects a binding vector and at least one body form").into_blink_value());
     }
 
     let bindings_val = &args[0];
-    println!("{:?}",&bindings_val.read().value);
-
-    
-    println!("{:?}",&bindings_val.read().value);
     
     let bindings = match &bindings_val.read().value {
 
@@ -681,19 +610,12 @@ fn eval_let(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
         Value::Vector(vs) => vs.clone(),
          _ => {
             // need to print value type here
-            println!("value type: {:?}",&bindings_val.read().value);
-            return EvalResult::Value(LispError::EvalError {
-                message: "let expects a vector of bindings".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("let expects a vector of bindings").into_blink_value());
         }
     };
 
     if bindings.len() % 2 != 0 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "let binding vector must have an even number of elements".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("let binding vector must have an even number of elements").into_blink_value());
     }
 
     let local_env = Arc::new(RwLock::new(Env::with_parent(ctx.env.clone())));
@@ -804,12 +726,7 @@ fn eval_or_inline(
 
 fn eval_try(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() != 2 {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 2,
-            got: args.len(),
-            form: "try".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(2, args.len(), "try").into_blink_value());
     }
     let res = try_eval!(trace_eval(args[0].clone(), ctx));
     if res.is_error() {
@@ -821,22 +738,14 @@ fn eval_try(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
 
 fn eval_apply(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() != 2 {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 2,
-            got: args.len(),
-            form: "apply".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(2, args.len(), "apply").into_blink_value());
     }
     let func = try_eval!(trace_eval(args[0].clone(), ctx));
     let evaluated_list = try_eval!(trace_eval(args[1].clone(), ctx));
     let list_items = match &evaluated_list.read().value {
         Value::List(xs) => xs.clone(),
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "apply expects a list as second argument".into(),
-                pos: None,
-            }.into_blink_value())
+            return EvalResult::Value(BlinkError::eval("apply expects a list as second argument").into_blink_value());
         }
     };
     eval_func(func, list_items, ctx)
@@ -849,21 +758,13 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
     use libloading::Library;
 
     if args.len() != 1 {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            form: "load-native".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(1, args.len(), "load-native").into_blink_value());
     }
 
     let libname = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "load-native expects a string".into(),
-                pos: None,
-            }.into_blink_value())
+            return EvalResult::Value(BlinkError::eval("load-native expects a string").into_blink_value());
         }
     };
 
@@ -881,7 +782,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
 
     // Remove existing module if it exists (force reload)
     if ctx.module_registry.read().get_module(&libname).is_some() {
-        println!("Reloading native library '{}'", libname);
+        
         ctx.module_registry.write().remove_module(&libname);
         ctx.module_registry.write().remove_native_library(&lib_path);
     }
@@ -889,11 +790,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
     let lib = match unsafe { Library::new(&filename) } {
         Ok(lib) => lib,
         Err(e) => {
-            return EvalResult::Value(LispError::EvalError {
-                message: format!("Failed to load native lib '{}': {}", filename, e),
-                pos: None,
-            }
-            .into_blink_value());
+            return EvalResult::Value(BlinkError::eval(format!("Failed to load native lib '{}': {}", filename, e)).into_blink_value());
         }
     };
 
@@ -923,10 +820,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
                 match lib.get(b"blink_register") {
                     Ok(register) => register,
                     Err(e) => {
-                        return EvalResult::Value(LispError::EvalError {
-                            message: format!("Failed to find blink_register or blink_register_with_exports in '{}': {}", filename, e),
-                            pos: None,
-                        }.into_blink_value());
+                        return EvalResult::Value(BlinkError::eval(format!("Failed to find blink_register or blink_register_with_exports in '{}': {}", filename, e)).into_blink_value());
                     }
                 }
             };
@@ -955,8 +849,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
     // Store the library to prevent it from being unloaded
     ctx.module_registry.write().store_native_library(lib_path, lib);
 
-    println!("Loaded native library '{}' with {} exports: {:?}", 
-             libname, exports.len(), exports);
+
 
     EvalResult::Value(nil())
 }
@@ -964,7 +857,7 @@ fn load_native_library(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult
 fn load_native_code(
     args: &[BlinkValue],
     ctx: &mut EvalContext,
-) -> Result<EvalResult, LispError> {
+) -> Result<EvalResult, BlinkError> {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -974,21 +867,13 @@ fn load_native_code(
     let pos = args.get(0).and_then(|v| v.read().pos.clone());
     
     if args.len() < 1 || args.len() > 2 {
-        return Err(LispError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            form: "compile-plugin".into(),
-            pos,
-        });
+        return Err(BlinkError::arity(1, args.len(), "compile-plugin").with_pos(pos));
     }
 
     let plugin_name = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
-            return Err(LispError::EvalError {
-                message: "compile-plugin expects a string as first argument".into(),
-                pos,
-            });
+            return Err(BlinkError::eval("compile-plugin expects a string as first argument").with_pos(pos));
         }
     };
 
@@ -1028,19 +913,13 @@ fn load_native_code(
                 }
             }
         } else {
-            return Err(LispError::EvalError {
-                message: "Second argument to compile-plugin must be a map".into(),
-                pos,
-            });
+            return Err(BlinkError::eval("Second argument to compile-plugin must be a map").with_pos(pos));
         }
     }
 
     // Check if plugin directory exists
     if !Path::new(&plugin_path).exists() {
-        return Err(LispError::EvalError {
-            message: format!("Plugin path '{}' does not exist", plugin_path),
-            pos,
-        });
+        return Err(BlinkError::eval(format!("Plugin path '{}' does not exist", plugin_path)).with_pos(pos));
     }
 
     // Compile the plugin
@@ -1048,16 +927,10 @@ fn load_native_code(
         .args(["build", "--release"])
         .current_dir(&plugin_path)
         .status()
-        .map_err(|e| LispError::EvalError {
-            message: format!("Failed to build plugin: {}", e),
-            pos: None,
-        })?;
+        .map_err(|e| BlinkError::eval(format!("Failed to build plugin: {}", e)).with_pos(pos))?;
 
     if !status.success() {
-        return Err(LispError::EvalError {
-            message: "Plugin build failed".into(),
-            pos: None,
-        });
+        return Err(BlinkError::eval("Plugin build failed").with_pos(pos));
     }
 
     // Determine library extension
@@ -1074,16 +947,10 @@ fn load_native_code(
 
     // Create native directory and copy library
     fs::create_dir_all("native").ok();
-    fs::copy(&source, &dest).map_err(|e| LispError::EvalError {
-        message: format!("Failed to copy compiled plugin: {}", e),
-        pos: None,
-    })?;
+    fs::copy(&source, &dest).map_err(|e| BlinkError::eval(format!("Failed to copy compiled plugin: {}", e)).with_pos(pos))?;
 
     // Load the library
-    let lib = unsafe { Library::new(&dest) }.map_err(|e| LispError::EvalError {
-        message: format!("Failed to load compiled plugin: {}", e),
-        pos: None,
-    })?;
+    let lib = unsafe { Library::new(&dest) }.map_err(|e| BlinkError::eval(format!("Failed to load compiled plugin: {}", e)).with_pos(pos))?;
 
     // Try the new registration function first (with exports)
     let exports = match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
@@ -1109,10 +976,7 @@ fn load_native_code(
             // Fall back to old registration function (no export tracking)
             let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
                 lib.get(b"blink_register")
-                    .map_err(|e| LispError::EvalError {
-                        message: format!("Failed to find blink_register or blink_register_with_exports: {}", e),
-                        pos: None,
-                    })?
+                    .map_err(|e| BlinkError::eval(format!("Failed to find blink_register or blink_register_with_exports: {}", e)).with_pos(pos))?
             };
             
             // Create a new environment for the module
@@ -1142,8 +1006,7 @@ fn load_native_code(
     ctx.module_registry.write().store_native_library(PathBuf::from(&dest), lib);
     import_symbols_into_env(&exports.clone().into_iter().collect::<Vec<String>>(), &plugin_name, &HashMap::new(), ctx)?;
 
-    println!("Compiled and loaded plugin '{}' with {} exports: {:?}", 
-             plugin_name, exports.len(), exports);
+    
 
     Ok(EvalResult::Value(nil()))
 }
@@ -1158,21 +1021,13 @@ fn eval_def_reader_macro(
     ctx: &mut EvalContext,
 ) -> EvalResult {
     if args.len() != 2 {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 2,
-            got: args.len(),
-            form: "def-reader-macro".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(2, args.len(), "def-reader-macro").into_blink_value());
     }
 
     let char_val = match &args[0].read().value {
         Value::Str(s) => s.clone(),
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "First argument to def-reader-macro must be a string".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("First argument to def-reader-macro must be a string").into_blink_value());
         }
     };
 
@@ -1190,29 +1045,18 @@ fn eval_def_reader_macro(
 /// Module declaration and context management
 fn eval_mod(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.is_empty() {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 1,
-            got: 0,
-            form: "mod".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(1, 0, "mod").into_blink_value());
     }
     
     // Parse flags
     let (flags, name_index) = parse_flags(args);
     if flags.len() < 1 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "At least one flag is required.".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("At least one flag is required.").into_blink_value());
     }
     
     // Extract module name
     if name_index >= args.len() {
-        return EvalResult::Value(LispError::EvalError {
-            message: "Missing module name after flags".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("Missing module name after flags").into_blink_value());
     }
     
     let name = match extract_name(&args[name_index]) {
@@ -1271,10 +1115,7 @@ fn eval_mod(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
             ctx.current_module = Some(module.read().name.clone());
             ctx.env = module.read().env.clone();
         } else {
-            return EvalResult::Value(LispError::ModuleError {
-                message: "Module not found".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("Module not found").into_blink_value());
         }
     }
     EvalResult::Value(nil())
@@ -1304,7 +1145,7 @@ fn is_special_option(key: &str) -> bool {
 }
 
 /// Helper to update module exports
-fn update_module_exports(module: &mut Module, exports_val: &BlinkValue) -> Result<(), LispError> {
+fn update_module_exports(module: &mut Module, exports_val: &BlinkValue) -> Result<(), BlinkError> {
     match &exports_val.read().value {
         Value::Keyword(kw) if kw == "all" => {
             let all_keys = module.env.read().vars.keys().cloned().collect();
@@ -1316,17 +1157,11 @@ fn update_module_exports(module: &mut Module, exports_val: &BlinkValue) -> Resul
                 if let Value::Symbol(name) = &item.read().value {
                     module.exports.insert(name.clone());
                 } else {
-                    return Err(LispError::EvalError {
-                        message: "Exports must be a list of symbols".into(),
-                        pos: None,
-                    });
+                    return Err(BlinkError::eval("Exports must be a list of symbols"));
                 }
             }
         },
-        _ => return Err(LispError::EvalError {
-            message: "Exports must be a list or vector".into(),
-            pos: None,
-        }),
+        _ => return Err(BlinkError::eval("Exports must be a list or vector")),
     }
     
     Ok(())
@@ -1363,10 +1198,7 @@ fn eval_load(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                         }
                     }
                 } else {
-                    return EvalResult::Value(LispError::EvalError {
-                        message: format!("Directory '{}' is not a valid Cargo project (no Cargo.toml found)", source_value),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::eval(format!("Directory '{}' is not a valid Cargo project (no Cargo.toml found)", source_value)).into_blink_value());
                 }
             } else if path.extension().map_or(false, |ext| {
                 ext == "so" || ext == "dll" || ext == "dylib"
@@ -1374,10 +1206,7 @@ fn eval_load(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                 // It's a pre-built library file
                 load_native_library(&args, ctx)
             } else {
-                return EvalResult::Value(LispError::EvalError {
-                    message: format!("'{}' is neither a Cargo project directory nor a native library file", source_value),
-                    pos: None,
-                }.into_blink_value());
+                return EvalResult::Value(BlinkError::eval(format!("'{}' is neither a Cargo project directory nor a native library file", source_value)).into_blink_value());
             }
         },
         
@@ -1399,10 +1228,7 @@ fn eval_load(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
         //     load_git_module(source_value, options, ctx)
         // },
         
-        _ => EvalResult::Value(LispError::EvalError {
-            message: format!("Unknown load source type: :{}", source_type),
-            pos: None,
-        }.into_blink_value()),
+        _ => EvalResult::Value(BlinkError::eval(format!("Unknown load source type: :{}", source_type)).into_blink_value()),
     }
 }
 
@@ -1435,14 +1261,11 @@ fn get_string_option(options: &HashMap<String, BlinkValue>, key: &str) -> Option
 
 
 /// Extract a name from a BlinkValue
-fn extract_name(value: &BlinkValue) -> Result<String, LispError> {
+fn extract_name(value: &BlinkValue) -> Result<String, BlinkError> {
     match &value.read().value {
         Value::Symbol(s) => Ok(s.clone()),
         Value::Str(s) => Ok(s.clone()),
-        _ => Err(LispError::EvalError {
-            message: "Expected a symbol or string for name".into(),
-            pos: None,
-        }),
+        _ => Err(BlinkError::eval("Expected a symbol or string for name")),
     }
 }
 
@@ -1456,7 +1279,7 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     let contents = match fs::read_to_string(&file_path) {
         Ok(contents) => contents,
         Err(e) => {
-            return EvalResult::Value(LispError::EvalError { message: format!("Failed to read file: {}", e), pos: None }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval(format!("Failed to read file: {}", e)).into_blink_value());
         }
     };
     let mut reader_ctx = ctx.reader_macros.clone();
@@ -1478,11 +1301,11 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
             if let Some(file_name) = file_name.to_str() {
                 file_name.to_string()
             } else {
-                return EvalResult::Value(LispError::EvalError { message: "File name missing.".into(), pos: None }.into_blink_value());
+                return EvalResult::Value(BlinkError::eval("File name missing.").into_blink_value());
             }
         },
         None => {
-            return EvalResult::Value(LispError::EvalError { message: "File name missing.".into(), pos: None }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("File name missing.").into_blink_value());
         },
     };
     ctx.current_file = Some(file_name);
@@ -1532,14 +1355,9 @@ fn eval_file_forms_inline(
     }
 }
 
-fn parse_import_args(args: &[BlinkValue]) -> Result<(ImportType, Option<HashMap<String, BlinkValue>>), LispError> {
+fn parse_import_args(args: &[BlinkValue]) -> Result<(ImportType, Option<HashMap<String, BlinkValue>>), BlinkError> {
     if args.is_empty() {
-        return Err(LispError::ArityMismatch {
-            expected: 1,
-            got: 0,
-            form: "imp".into(),
-            pos: None,
-        });
+        return Err(BlinkError::arity(1, 0, "imp"));
     }
 
     let first_arg = &args[0].read().value;
@@ -1571,17 +1389,14 @@ fn parse_import_args(args: &[BlinkValue]) -> Result<(ImportType, Option<HashMap<
             Ok((import_type, Some(options)))
         },
         
-        _ => Err(LispError::EvalError {
-            message: "imp expects a string (file) or vector (symbols)".into(),
-            pos: args[0].read().pos.clone(),
-        }),
+        _ => Err( BlinkError::eval("imp expects a string (file) or vector (symbols)")),
     }
 }
 
 fn parse_symbol_import(
     symbol_list: &[BlinkValue], 
     remaining_args: &[BlinkValue]
-) -> Result<(ImportType, HashMap<String, BlinkValue>), LispError> {
+) -> Result<(ImportType, HashMap<String, BlinkValue>), BlinkError> {
     
     // Parse symbols and any aliases
     let mut symbols = Vec::new();
@@ -1612,10 +1427,7 @@ fn parse_symbol_import(
                 symbols.push(name.clone());
                 i += 1;
             },
-            _ => return Err(LispError::EvalError {
-                message: "Symbol list must contain symbols".into(),
-                pos: symbol_list[i].read().pos.clone(),
-            }),
+            _ => return Err(BlinkError::eval("Symbol list must contain symbols")),
         }
     }
     
@@ -1629,19 +1441,13 @@ fn parse_symbol_import(
             match kw.as_str() {
                 "from" => {
                     if j + 1 >= remaining_args.len() {
-                        return Err(LispError::EvalError {
-                            message: ":from requires a module name".into(),
-                            pos: remaining_args[j].read().pos.clone(),
-                        });
+                        return Err(BlinkError::eval(":from requires a module name"));
                     }
                     if let Value::Symbol(module) = &remaining_args[j + 1].read().value {
                         module_name = Some(module.clone());
                         j += 2;
                     } else {
-                        return Err(LispError::EvalError {
-                            message: ":from expects a module name".into(),
-                            pos: remaining_args[j + 1].read().pos.clone(),
-                        });
+                        return Err(BlinkError::eval(":from expects a module name"));
                     }
                 },
                 "reload" => {
@@ -1649,29 +1455,20 @@ fn parse_symbol_import(
                     j += 1;
                 },
                 other => {
-                    return Err(LispError::EvalError {
-                        message: format!("Unknown import option: {}", other),
-                        pos: remaining_args[j].read().pos.clone(),
-                    });
+                    return Err(BlinkError::eval(format!("Unknown import option: {}", other)));
                 }
             }
         } else {
-            return Err(LispError::EvalError {
-                message: "Expected keyword after symbol list".into(),
-                pos: remaining_args[j].read().pos.clone(),
-            });
+            return Err(BlinkError::eval("Expected keyword after symbol list"));
         }
     }
     
-    let module = module_name.ok_or_else(|| LispError::EvalError {
-        message: "Symbol import requires :from module-name".into(),
-        pos: None,
-    })?;
+    let module = module_name.ok_or_else(|| BlinkError::eval("Symbol import requires :from module-name"))?;
     
     Ok((ImportType::Symbols { symbols, module, aliases }, options))
 }
 
-fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), LispError> {
+fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), BlinkError> {
     let mut options = HashMap::new();
     let mut i = 0;
     
@@ -1681,19 +1478,13 @@ fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>
                 match key.as_str() {
                     "exports" => {
                         if i + 1 >= args.len() {
-                            return Err(LispError::EvalError {
-                                message: ":exports requires a list".into(),
-                                pos: args[i].read().pos.clone(),
-                            });
+                            return Err(BlinkError::eval(":exports requires a list"));
                         }
                         options.insert("exports".to_string(), args[i + 1].clone());
                         i += 2;
                     },
                     other => {
-                        return Err(LispError::EvalError {
-                            message: format!("Unknown option: {}", other),
-                            pos: args[i].read().pos.clone(),
-                        });
+                        return Err(BlinkError::eval(format!("Unknown option: {}", other)));
                     }
                 }
             },
@@ -1707,7 +1498,7 @@ fn parse_mod_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>
     Ok((options, i))
 }
 
-fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf, LispError> {
+fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf, BlinkError> {
     // 1. Check if module is already registered (we know which file it came from)
     if let Some(module) = ctx.module_registry.read().get_module(module_name) {
         let module_read = module.read();
@@ -1750,19 +1541,13 @@ fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf,
         }
     }
     
-    Err(LispError::EvalError {
-        message: format!("Module '{}' not found. Tried:\n  lib/{}.bl\n  lib/{}.bl\n  And parent directories", 
-                        module_name, module_name, parts.join("-")),
-        pos: None,
-    })
+    Err(BlinkError::eval(format!("Module '{}' not found. Tried:\n  lib/{}.bl\n  lib/{}.bl\n  And parent directories", 
+                        module_name, module_name, parts.join("-"))))
 }
 
 // Helper function to check if a file contains a specific module declaration
-fn file_contains_module(file_path: &PathBuf, module_name: &str) -> Result<bool, LispError> {
-    let content = std::fs::read_to_string(file_path).map_err(|e| LispError::EvalError {
-        message: format!("Failed to read file {:?}: {}", file_path, e),
-        pos: None,
-    })?;
+fn file_contains_module(file_path: &PathBuf, module_name: &str) -> Result<bool, BlinkError> {
+    let content = std::fs::read_to_string(file_path).map_err(|e| BlinkError::eval(format!("Failed to read file {:?}: {}", file_path, e)))?;
     
     // Quick scan for module declaration (this is a simple approach)
     // More robust would be to actually parse, but this is faster for searching
@@ -1786,12 +1571,9 @@ fn import_symbols_into_env(
     module_name: &str, 
     aliases: &HashMap<String, String>,
     ctx: &mut EvalContext
-) -> Result<(), LispError> {
+) -> Result<(), BlinkError> {
     let module = ctx.module_registry.read().get_module(module_name)
-        .ok_or_else(|| LispError::EvalError {
-            message: format!("Module '{}' not found", module_name),
-            pos: None,
-        })?;
+        .ok_or_else(|| BlinkError::eval(format!("Module '{}' not found", module_name)))?;
     
     let module_read = module.read();
     
@@ -1811,10 +1593,7 @@ fn import_symbols_into_env(
     for symbol_name in symbols {
         // Check if symbol is exported
         if !module_read.exports.contains(symbol_name) {
-            return Err(LispError::EvalError {
-                message: format!("Symbol '{}' is not exported by module '{}'", symbol_name, module_name),
-                pos: None,
-            });
+            return Err(BlinkError::eval(format!("Symbol '{}' is not exported by module '{}'", symbol_name, module_name)));
         }
         
         let local_name = aliases.get(symbol_name).unwrap_or(symbol_name);
@@ -1839,7 +1618,7 @@ fn create_module_reference(module_name: &str, symbol_name: &str) -> BlinkValue {
 }
 
 // Generic parse options function
-fn parse_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), LispError> {
+fn parse_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, usize), BlinkError> {
     let mut options = HashMap::new();
     let mut i = 0;
 
@@ -1848,10 +1627,7 @@ fn parse_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, us
             // make sure that the next argument is a value
             Value::Keyword(key) => {
                 if i + 1 >= args.len() {
-                    return Err(LispError::EvalError {
-                        message: format!("Option {} requires a value", key),
-                        pos: args[i].read().pos.clone(),
-                    });
+                    return Err(BlinkError::eval(format!("Option {} requires a value", key)));
                 }
                 options.insert(key.clone(), args[i + 1].clone());
                 i += 2;
@@ -1865,39 +1641,25 @@ fn parse_options(args: &[BlinkValue]) -> Result<(HashMap<String, BlinkValue>, us
     Ok((options, i))
 }
 
-fn parse_load_args(args: &[BlinkValue]) -> Result<(String, String, HashMap<String, BlinkValue>, usize), LispError> {
+fn parse_load_args(args: &[BlinkValue]) -> Result<(String, String, HashMap<String, BlinkValue>, usize), BlinkError> {
     if args.is_empty() {
-        return Err(LispError::ArityMismatch {
-            expected: 2,
-            got: 0,
-            form: "load".into(),
-            pos: None,
-        });
+        return Err(BlinkError::arity(2, 0, "load"));
     }
     
     // First argument should be a keyword indicating source type
     let source_type = match &args[0].read().value {
         Value::Keyword(kw) => kw.clone(),
-        _ => return Err(LispError::EvalError {
-            message: "load expects a keyword as first argument (:file, :native, :cargo, :dylib, :url, :git)".into(),
-            pos: args[0].read().pos.clone(),
-        }),
+        _ => return Err(BlinkError::eval("load expects a keyword as first argument (:file, :native, :cargo, :dylib, :url, :git)")),
     };
     
     // Second argument should be the source value
     if args.len() < 2 {
-        return Err(LispError::EvalError {
-            message: format!("load {} requires a source argument", source_type),
-            pos: None,
-        });
+        return Err(BlinkError::eval(format!("load {} requires a source argument", source_type)));
     }
     
     let source_value = match &args[1].read().value {
         Value::Str(s) => s.clone(),
-        _ => return Err(LispError::EvalError {
-            message: "load source must be a string".into(),
-            pos: args[1].read().pos.clone(),
-        }),
+        _ => return Err(BlinkError::eval("load source must be a string")),
     };
     
     // Parse any additional options
@@ -1917,7 +1679,6 @@ fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     
     match import_type {
         ImportType::File(file_name) => {
-            println!("Importing file: {}", file_name);
             // File import: (imp "module-name")
             let file_path = PathBuf::from(format!("lib/{}.blink", file_name));
             
@@ -1949,10 +1710,7 @@ fn eval_imp(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                 
                 // Verify the module is now available
                 if ctx.module_registry.read().get_module(&module).is_none() {
-                    return EvalResult::Value(LispError::EvalError {
-                        message: format!("Module '{}' was not found in the loaded file", module),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::eval(format!("Module '{}' was not found in the loaded file", module)).into_blink_value());
                 }
             }
             
@@ -1984,20 +1742,14 @@ fn expand_quasiquote(expr: BlinkValue, ctx: &mut EvalContext) -> EvalResult {
             match &first.read().value {
                 Value::Symbol(s) if s == "unquote" => {
                     if items.len() != 2 {
-                        return EvalResult::Value(LispError::EvalError {
-                            message: "unquote expects exactly one argument".into(),
-                            pos: None,
-                        }.into_blink_value());
+                        return EvalResult::Value(BlinkError::eval("unquote expects exactly one argument").into_blink_value());
                     }
                     // Just forward the eval of the unquoted form
                     forward_eval!(trace_eval(items[1].clone(), ctx))
                 }
 
                 Value::Symbol(s) if s == "unquote-splicing" => {
-                    return EvalResult::Value(LispError::EvalError {
-                        message: "unquote-splicing not valid here".into(),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::eval("unquote-splicing not valid here").into_blink_value());
                 }
 
                 _ => {
@@ -2045,10 +1797,7 @@ fn expand_quasiquote_items_inline(
                 if let Value::Symbol(s) = &inner_items[0].read().value {
                     if s == "unquote-splicing" {
                         if inner_items.len() != 2 {
-                            return EvalResult::Value(LispError::EvalError {
-                                message: "unquote-splicing expects exactly one argument".into(),
-                                pos: None,
-                            }.into_blink_value());
+                            return EvalResult::Value(BlinkError::eval("unquote-splicing expects exactly one argument").into_blink_value());
                         }
 
                         let result = trace_eval(inner_items[1].clone(), ctx);
@@ -2060,10 +1809,7 @@ fn expand_quasiquote_items_inline(
                                 if let Value::List(splice_items) = &spliced.read().value {
                                     expanded_items.extend(splice_items.clone());
                                 } else {
-                                    return EvalResult::Value(LispError::EvalError {
-                                        message: "unquote-splicing expects a list".into(),
-                                        pos: None,
-                                    }.into_blink_value());
+                                    return EvalResult::Value(BlinkError::eval("unquote-splicing expects a list").into_blink_value());
                                 }
                                 index += 1;
                                 continue;
@@ -2079,10 +1825,7 @@ fn expand_quasiquote_items_inline(
                                             expanded_items.extend(splice_items.clone());
                                             expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, original_pos, ctx)
                                         } else {
-                                            EvalResult::Value(LispError::EvalError {
-                                                message: "unquote-splicing expects a list".into(),
-                                                pos: None,
-                                            }.into_blink_value())
+                                            EvalResult::Value(BlinkError::eval("unquote-splicing expects a list").into_blink_value())
                                         }
                                     }),
                                 };
@@ -2122,10 +1865,7 @@ fn expand_quasiquote_items_inline(
 
 fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 {
-        return EvalResult::Value(LispError::EvalError {
-            message: "macro expects at least 2 arguments: params and body".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::eval("macro expects at least 2 arguments: params and body").into_blink_value());
     }
 
     let (params, is_variadic) = match &args[0].read().value {
@@ -2145,10 +1885,7 @@ fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                                 break;
                             }
                         }
-                        return EvalResult::Value(LispError::EvalError {
-                            message: "& must be followed by a parameter name".into(),
-                            pos: None,
-                        }.into_blink_value());
+                        return EvalResult::Value(BlinkError::eval("& must be followed by a parameter name").into_blink_value());
                     } else {
                         params.push(s.clone());
                     }
@@ -2174,10 +1911,7 @@ fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                                         break;
                                     }
                                 }
-                                return EvalResult::Value(LispError::EvalError {
-                                    message: "& must be followed by a parameter name".into(),
-                                    pos: None,
-                                }.into_blink_value());
+                                return EvalResult::Value(BlinkError::eval("& must be followed by a parameter name").into_blink_value());
                             } else {
                                 params.push(s.clone());
                             }
@@ -2186,23 +1920,14 @@ fn eval_macro(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                     }
                     (params, is_variadic)
                 } else {
-                    return EvalResult::Value(LispError::EvalError {
-                        message: "macro expects a vector of symbols as parameters".into(),
-                        pos: None,
-                    }.into_blink_value());
+                    return EvalResult::Value(BlinkError::eval("macro expects a vector of symbols as parameters").into_blink_value());
                 }
             } else {
-                return EvalResult::Value(LispError::EvalError {
-                    message: "macro expects a vector of symbols as parameters".into(),
-                    pos: None,
-                }.into_blink_value());
+                return EvalResult::Value(BlinkError::eval("macro expects a vector of symbols as parameters").into_blink_value());
             }
         }
         _ => {
-            return EvalResult::Value(LispError::EvalError {
-                message: "macro expects a vector of symbols as parameters".into(),
-                pos: None,
-            }.into_blink_value());
+            return EvalResult::Value(BlinkError::eval("macro expects a vector of symbols as parameters").into_blink_value());
         }
     };
 
@@ -2236,30 +1961,22 @@ fn eval_deref(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
                     });
                     EvalResult::Value(res)
                 }
-                _ => EvalResult::Value(LispError::EvalError {
-                    message: "deref can only be used on futures".into(),
-                    pos: get_pos(&future_val),
-                }.into_blink_value())
+                _ => EvalResult::Value(BlinkError::eval("deref can only be used on futures").into_blink_value())
             }
             
         },
         AsyncContext::Goroutine(_) => {
             match &future_val.read().value {
                 Value::Future(future) => {
-                    println!("DEREF: Creating suspended result in goroutine");
                     let future_clone = future.clone();
                     
                     EvalResult::Suspended { future: future_clone, resume: Box::new(|resolved, _ctx| {
-                        println!("DEREF: Resume called with: {:?}", resolved);
                         EvalResult::Value(resolved)
                     }) }
         
                     
                 }
-                _ => EvalResult::Value(LispError::EvalError {
-                    message: "deref can only be used on futures".into(),
-                    pos: get_pos(&future_val),
-                }.into_blink_value())
+                _ => EvalResult::Value(BlinkError::eval("deref can only be used on futures").into_blink_value())
             }
         }
         
@@ -2268,12 +1985,7 @@ fn eval_deref(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
 
 pub fn eval_go(args: &[BlinkValue], ctx: &mut EvalContext) -> EvalResult {
     if args.len() != 1 {
-        return EvalResult::Value(LispError::ArityMismatch {
-            expected: 1,
-            got: args.len(),
-            form: "go".into(),
-            pos: None,
-        }.into_blink_value());
+        return EvalResult::Value(BlinkError::arity(1, args.len(), "go").into_blink_value());
     }
 
     let goroutine_ctx = ctx.clone();

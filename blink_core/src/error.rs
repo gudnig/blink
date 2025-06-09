@@ -4,7 +4,126 @@ use parking_lot::RwLock;
 
 use crate::{value::{SourcePos, SourceRange, BlinkValue, LispNode, Value}};
 
+#[derive(Debug, Clone)]
+pub struct BlinkError {
+    pub message: String,
+    pub pos: Option<SourceRange>,
+    pub error_type: BlinkErrorType,
+}
 
+#[derive(Debug, Clone)]
+pub enum ParseErrorType {
+    UnclosedDelimiter(String), 
+    UnexpectedToken(String),
+    InvalidNumber(String),
+    InvalidString(String),
+    UnexpectedEof,
+    
+}
+
+#[derive(Debug, Clone)]
+pub enum BlinkErrorType {
+    Tokenizer,    
+    Parse(ParseErrorType),
+    UndefinedSymbol{
+        name: String,
+    },
+    Eval,
+    ArityMismatch{
+        expected: usize,
+        got: usize,
+        form: String,
+    },
+    UnexpectedToken{
+        token: String
+    },
+    UserDefined {
+        data: Option<BlinkValue>
+    }
+}
+
+impl BlinkError {
+    pub fn tokenizer(message: impl Into<String>, pos: SourcePos) -> Self {
+        Self {
+            message: message.into(),
+            pos: Some(SourceRange { start: pos, end: pos }),
+            error_type: BlinkErrorType::Tokenizer,
+        }
+    }
+
+    pub fn unexpected_token(token: &str, pos: SourcePos) -> Self {
+        Self {
+            message: format!("Unexpected token '{}'", token),
+            pos: Some(SourceRange { start: pos, end: pos }),
+            error_type: BlinkErrorType::UnexpectedToken { token: token.to_string() },
+        }
+    }
+
+    pub fn undefined_symbol(name: &str) -> Self {
+        Self {
+            message: format!("Undefined symbol '{}'", name),
+            pos: None,
+            error_type: BlinkErrorType::UndefinedSymbol { name: name.to_string() },
+        }
+    }
+    
+    pub fn parse(message: impl Into<String>, pos: SourceRange, error_type: ParseErrorType) -> Self {
+        Self {
+            message: message.into(),
+            pos: Some(pos),
+            error_type: BlinkErrorType::Parse(error_type),
+        }
+    }
+
+    pub fn parse_unclosed_delimiter(message: &str, delimiter: &str, pos: SourceRange) -> Self {
+        Self::parse(message, pos, ParseErrorType::UnclosedDelimiter(delimiter.into()))
+    }
+
+    pub fn parse_unexpected_token(token: &str, pos: SourceRange) -> Self {
+        Self::parse(format!("Unexpected token '{}'", token), pos, ParseErrorType::UnexpectedToken(token.into()))
+    }
+
+    pub fn parse_invalid_number(message: &str, pos: SourceRange) -> Self {
+        Self::parse(message, pos, ParseErrorType::InvalidNumber(message.into()))
+    }
+
+    pub fn parse_invalid_string(message: &str, pos: SourceRange) -> Self {
+        Self::parse(message, pos, ParseErrorType::InvalidString(message.into()))
+    }
+
+    pub fn parse_unexpected_eof(pos: SourceRange) -> Self {
+        Self::parse("Unexpected EOF", pos, ParseErrorType::UnexpectedEof)
+    }
+
+    pub fn eval(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            pos: None,
+            error_type: BlinkErrorType::Eval,
+        }
+    }
+    
+    pub fn arity(expected: usize, got: usize, form: &str) -> Self {
+        Self {
+            message: format!("Wrong number of arguments to '{}': expected {}, got {}", form.clone(), expected, got),
+            pos: None,
+            error_type: BlinkErrorType::ArityMismatch { expected, got, form: form.into() },
+        }
+    }
+    
+    pub fn with_pos(mut self, pos: Option<SourceRange>) -> Self {
+        self.pos = pos;
+        self
+    }
+    
+    pub fn into_blink_value(self) -> BlinkValue {
+        let pos = self.pos.clone();
+        BlinkValue(Arc::new(RwLock::new(LispNode {
+            value: Value::Error(self), 
+            pos: pos,
+        })))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum LispError {
@@ -45,22 +164,31 @@ pub enum LispError {
     }
 }
 
-impl LispError {
-    pub fn into_blink_value(self) -> BlinkValue {
-        let pos = match &self {
-            LispError::TokenizerError { pos, .. } => Some(SourceRange {start: pos.clone(), end: pos.clone()}),
-            LispError::ParseError { pos, .. } => Some(pos.clone()),
-            LispError::EvalError { pos, .. } => pos.clone(),
-            LispError::ArityMismatch { pos, .. } => pos.clone(),
-            LispError::UndefinedSymbol { pos, .. } => pos.clone(),
-            LispError::UnexpectedToken { token, pos } => Some(SourceRange {start: pos.clone(), end: pos.clone()}),
-            LispError::ModuleError { message, pos } => pos.clone(),
-            LispError::UserDefined { message, pos, data } => pos.clone(),
+
+impl fmt::Display for BlinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.error_type {
+            BlinkErrorType::Tokenizer => write!(f, "Tokenizer error: {}", self.message),
+            BlinkErrorType::Parse(error_type) => {
+                match error_type {
+                    ParseErrorType::UnclosedDelimiter(message) => write!(f, "Unclosed delimiter: {}", message),
+                    ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
+                    ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
+                    ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
+                    ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
+                }
+            },
+            BlinkErrorType::Eval => write!(f, "Eval error: {}", self.message),
+            BlinkErrorType::ArityMismatch { expected, got, form } => write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got),
+            BlinkErrorType::UndefinedSymbol { name } => write!(f, "Undefined symbol '{}'", name),
+            BlinkErrorType::UnexpectedToken { token } => write!(f, "Unexpected token '{}'", token),
+            BlinkErrorType::UserDefined {  data: _ } => write!(f, "User defined error: {}", self.message),
         };
-        BlinkValue(Arc::new(RwLock::new(LispNode {
-            value: Value::Error(self),
-            pos: pos,
-        }))) 
+        if let Some(pos) = self.pos {
+            write!(f, " at {}", pos);
+        }
+        
+        Ok(())
     }
 }
 
@@ -100,7 +228,7 @@ impl fmt::Display for LispError {
                 Some(p) => write!(f, "Module error at {}: {}", p, message),
                 None => write!(f, "Module error: {}", message),
             },
-            UserDefined { message, pos, data } => match pos {
+            UserDefined { message, pos, data: _ } => match pos {
                 Some(p) => write!(f, "User defined error at {}: {}", p, message),
                 None => write!(f, "User defined error: {}", message),
             },

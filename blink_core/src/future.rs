@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll, Waker}};
 
-use crate::{error::LispError, value::BlinkValue};
+use crate::{error::{BlinkError, LispError}, value::BlinkValue};
 
 #[derive(Clone)]
 pub struct BlinkFuture {
@@ -78,10 +78,7 @@ impl BlinkFuture {
         match &mut *state {
             FutureState::Pending { waker } => {
                 let old_waker = waker.take();
-                *state = FutureState::Ready(LispError::EvalError {
-                    message: error,
-                    pos: None,
-                }.into_blink_value());
+                *state = FutureState::Ready(BlinkError::eval(error).into_blink_value());
                 
                 if let Some(waker) = old_waker {
                     waker.wake();
