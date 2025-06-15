@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, sync::{Arc, Mutex}, task::{Context, Poll, Wa
 
 use crate::{error::{BlinkError, LispError}, value::BlinkValue};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BlinkFuture {
     inner: Arc<Mutex<FutureState>>,
 }

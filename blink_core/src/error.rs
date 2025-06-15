@@ -1,8 +1,6 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
 
-use parking_lot::RwLock;
-
-use crate::{value::{SourcePos, SourceRange, BlinkValue, LispNode, Value}};
+use crate::{value::{  SourcePos, SourceRange}, value_ref::ValueRef};
 
 #[derive(Debug, Clone)]
 pub struct BlinkError {
@@ -38,7 +36,7 @@ pub enum BlinkErrorType {
         token: String
     },
     UserDefined {
-        data: Option<BlinkValue>
+        data: Option<ValueRef>
     }
 }
 
@@ -115,15 +113,8 @@ impl BlinkError {
         self.pos = pos;
         self
     }
-    
-    pub fn into_blink_value(self) -> BlinkValue {
-        let pos = self.pos.clone();
-        BlinkValue(Arc::new(RwLock::new(LispNode {
-            value: Value::Error(self), 
-            pos: pos,
-        })))
-    }
 }
+
 
 #[derive(Debug, Clone)]
 pub enum LispError {
@@ -160,7 +151,7 @@ pub enum LispError {
     UserDefined {
         message: String,
         pos: Option<SourceRange>,
-        data: Option<BlinkValue>
+        data: Option<ValueRef>
     }
 }
 

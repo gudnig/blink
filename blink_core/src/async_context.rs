@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64};
 
 use crate::goroutine::GoroutineId;
 
@@ -8,7 +8,6 @@ pub enum AsyncContext {
     Goroutine(GoroutineId),
 }
 
-static NEXT_GOROUTINE_ID: AtomicU64 = AtomicU64::new(1);
 
 impl AsyncContext {
 

@@ -2,7 +2,7 @@ use crate::env::Env;
 use crate::error::{BlinkError, BlinkErrorType, LispError, ParseErrorType};
 
 use crate::parser::{parse, preload_builtin_reader_macros, tokenize, ReaderContext};
-use crate::value::{ Value};
+use crate::value_ref::ValueRef;
 
 use parking_lot::RwLock;
 use rustyline::history::FileHistory;
@@ -45,18 +45,23 @@ pub async fn start_repl() {
             Ok(code) => match run_line(&code, &mut ctx, &mut temp_reader_ctx) {
                         EvalResult::Value(val) => 
                         {
-                            match &val.read().value {
-                                Value::Error(e) =>{
+                            match &val {
+                                ValueRef::Shared(idx) =>{
+                                    let value = ctx.shared_arena.read().get(*idx).unwrap();
+                                    match value {
+                                        Value::Error(e) =>{
                                     
-                                    println!("Error: {e}");
-                                    if DEBUG_POS {
-                                        if let Some(pos) = e.pos {
-                                            println!("   [at {}]", pos);
+                                            println!("Error: {e}");
+                                            if DEBUG_POS {
+                                                if let Some(pos) = e.pos {
+                                                    println!("   [at {}]", pos);
+                                                }
+                                            }        
                                         }
-                                    }
-                                }
+                                    
+                                }}
                                 _ => {
-                                    println!("=> {}", val.read().value);
+                                    println!("=> {}", val);
                                 }
                             }
                         },
