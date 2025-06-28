@@ -1,17 +1,9 @@
-use parking_lot::RwLock;
-
-use crate::env::Env;
-use crate::error::{BlinkError, LispError, ParseErrorType};
-use crate::eval::EvalContext;
-use crate::value::{bool_val_at, keyword_at, list_val, num_at, str_val, sym, sym_at, vector_val_at, BlinkValue, SourcePos, SourceRange};
-use crate::value::{LispNode, Value};
-
+use crate::error::{BlinkError, ParseErrorType};
+use crate::value::{SourcePos, SourceRange, ParsedValue};
 use std::collections::HashMap;
 
-use std::sync::Arc;
-
 pub struct ReaderContext {
-    pub reader_macros: HashMap<String, BlinkValue>,
+    pub reader_macros: HashMap<String, u32>, // prefix -> symbol_id
 }
 
 impl ReaderContext {
@@ -20,54 +12,9 @@ impl ReaderContext {
             reader_macros: HashMap::new(),
         }
     }
-}
-
-fn expand_macro_body(form: BlinkValue, env: Arc<RwLock<Env>>) -> Result<BlinkValue, LispError> {
-    match &form.read().value {
-        Value::Symbol(s) => {
-            //let available_modules = env.read().available_modules.clone();
-            // If symbol exists in the macro local env, replace it
-            if let Some(val) = env.read().get_local(s) {
-                Ok(val)
-            } else {
-                Ok(form.clone()) // leave symbol unchanged
-            }
-        }
-
-        Value::List(forms) => {
-            // Recurse into each form inside the list
-            let mut expanded = Vec::new();
-            for f in forms {
-                expanded.push(expand_macro_body(f.clone(), env.clone())?);
-            }
-            Ok(list_val(expanded))
-        }
-
-        // All other literals stay as-is
-        _ => Ok(form.clone()),
-    }
-}
-
-fn apply_reader_macro(macro_fn: BlinkValue, form: BlinkValue) -> Result<BlinkValue, BlinkError> {
-    match &macro_fn.read().value {
-        Value::FuncUserDefined { params, body, env } => {
-            if params.len() != 1 {
-                return Err(BlinkError::eval("Reader macro must take exactly 1 argument"));
-            }
-
-            // Create fresh local env
-            let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-
-            // Bind param "x" -> the parsed form (like "foo")
-            local_env.write().set(&params[0], form);
-
-            let macro_body = body.get(0).ok_or_else(|| BlinkError::eval("Reader macro has no body"))?;
-
-            // Expand macro body inside this local env
-            expand_macro_body(macro_body.clone(), local_env).map_err(|e| BlinkError::eval(e.to_string()))
-        }
-        Value::NativeFunc(f) => f(vec![form]).map_err(|e| BlinkError::eval(e.to_string())),
-        _ => Err(BlinkError::eval("Reader macro must be a function")),
+    
+    pub fn add_reader_macro(&mut self, prefix: String, symbol_id: u32) {
+        self.reader_macros.insert(prefix, symbol_id);
     }
 }
 
@@ -101,7 +48,6 @@ pub fn tokenize_at(
         match c {
             '(' | ')' | '[' | ']' | '{' | '}' => {
                 if !current.is_empty() {
-                    
                     tokens.push((current.clone(), SourcePos { line, col }));
                     current.clear();
                 }
@@ -136,28 +82,54 @@ pub fn tokenize_at(
     Ok(tokens)
 }
 
-pub fn atom(token: &str, pos: Option<SourcePos>) -> BlinkValue {
-    
-
-    if token.starts_with('"') && token.ends_with('"') {
-        str_val(&token[1..token.len() - 1])
-    } else if let Ok(n) = token.parse::<f64>() {
-        num_at(n, pos)
-    } else if token == "true" {
-        bool_val_at(true, pos)
-    } else if token == "false" {
-        bool_val_at(false, pos)
-    } else if token.starts_with(':') {
-        keyword_at(&token[1..], pos)
+pub fn parse_symbol_token(token: &str, symbol_table: &mut dyn SymbolTableTrait) -> u32 {
+    if let Some((module_part, symbol_part)) = token.split_once('/') {
+        // Qualified symbol like "math/add"
+        let module_id = symbol_table.intern(module_part);
+        let symbol_id = symbol_table.intern(symbol_part);
+        symbol_table.intern_qualified(module_id, symbol_id)
     } else {
-        sym_at(token, pos)
+        // Simple symbol like "add"
+        symbol_table.intern(token)
     }
+}
+
+// Trait for symbol table operations that the parser needs
+pub trait SymbolTableTrait {
+    fn intern(&mut self, name: &str) -> u32;
+    fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32;
+}
+
+pub fn atom(token: &str, pos: Option<SourcePos>, symbol_table: &mut dyn SymbolTableTrait) -> ParsedValue {
+    if token.starts_with('"') && token.ends_with('"') {
+        ParsedValue::String(token[1..token.len() - 1].to_string())
+    } else if let Ok(n) = token.parse::<f64>() {
+        ParsedValue::Number(n)
+    } else if token == "true" {
+        ParsedValue::Bool(true)
+    } else if token == "false" {
+        ParsedValue::Bool(false)
+    } else if token.starts_with(':') {
+        let keyword_id = symbol_table.intern(&token[1..]);
+        ParsedValue::Keyword(keyword_id)
+    } else {
+        let symbol_id = parse_symbol_token(token, symbol_table);
+        ParsedValue::Symbol(symbol_id)
+    }
+}
+
+fn apply_reader_macro(symbol_id: u32, form: ParsedValue) -> ParsedValue {
+    ParsedValue::List(vec![
+        ParsedValue::Symbol(symbol_id),
+        form
+    ])
 }
 
 pub fn parse(
     tokens: &mut Vec<(String, SourcePos)>,
-    rcx: &mut Arc<RwLock<ReaderContext>>,
-) -> Result<BlinkValue, BlinkError> {
+    reader_ctx: &ReaderContext,
+    symbol_table: &mut dyn SymbolTableTrait,
+) -> Result<ParsedValue, BlinkError> {
     if tokens.is_empty() {
         return Err(BlinkError::unexpected_token("EOF", SourcePos { line: 0, col: 0 }));
     }
@@ -168,186 +140,116 @@ pub fn parse(
         "(" => {
             let mut list = Vec::new();
             
-            let mut end = start.clone();
-
-            while let Some((tok, next_pos)) = tokens.first() {
+            while let Some((tok, _next_pos)) = tokens.first() {
                 if tok == ")" {
-                    end = next_pos.clone(); // position of ')'
                     tokens.remove(0); // consume ')'
                     break;
                 }
-                let item = parse(tokens, rcx)?;
-                if let Some(item_end) = item.read().pos.as_ref().map(|r| r.end.clone()) {
-                    end = item_end;
-                }
+                let item = parse(tokens, reader_ctx, symbol_table)?;
                 list.push(item);
             }
 
-            let range = SourceRange { start, end };
-            Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
-                value: Value::List(list),
-                pos: Some(range),
-            }))))
+            Ok(ParsedValue::List(list))
         }
-
 
         "[" => {
             let mut elements = Vec::new();
             
-            let mut end = start.clone();
-            while let Some((t, next_pos)) = tokens.first() {
+            while let Some((t, _next_pos)) = tokens.first() {
                 if t == "]" {
-                    end = next_pos.clone(); // position of ']'
-                    tokens.remove(0); // consume ]
-
-                    return Ok(vector_val_at(elements, Some(start)));
+                    tokens.remove(0); // consume ']'
+                    return Ok(ParsedValue::Vector(elements));
                 }
-                let item = parse(tokens, rcx)?;
-                if let Some(item_end) = item.read().pos.as_ref().map(|r| r.end.clone()) {
-                    end = item_end;
-                }
+                let item = parse(tokens, reader_ctx, symbol_table)?;
                 elements.push(item); 
             }
-            let pos = SourceRange { start: start.clone(), end };
-
+            
+            let pos = SourceRange { start: start.clone(), end: start };
             Err(BlinkError::parse_unclosed_delimiter("Unclosed vector literal", "[", pos))
         }
 
         "{" => {
-            let mut entries: Vec<BlinkValue> = Vec::new();
-            let mut end = start.clone();
+            let mut entries: Vec<ParsedValue> = Vec::new();
             
-            while let Some((t, next_pos)) = tokens.first() {
+            while let Some((t, _next_pos)) = tokens.first() {
                 if t == "}" {
-                    end = next_pos.clone(); // position of '}'
-                    tokens.remove(0); // consume }
+                    tokens.remove(0); // consume '}'
                     
-                    // Convert entries to HashMap
+                    // Convert entries to key-value pairs
                     if entries.len() % 2 != 0 {
-                        return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", SourceRange { start: start.clone(), end }));
+                        let pos = SourceRange { start: start.clone(), end: start };
+                        return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", pos));
                     }
                     
-                    let mut map = HashMap::new();
-                    for pair in entries.chunks(2) {
-                        let key = pair[0].clone();
-                        let value = pair[1].clone();
-                        map.insert(key, value);
-                    }
+                    let pairs: Vec<(ParsedValue, ParsedValue)> = entries
+                        .chunks(2)
+                        .map(|pair| (pair[0].clone(), pair[1].clone()))
+                        .collect();
                     
-                    return Ok(BlinkValue(Arc::new(RwLock::new(LispNode {
-                        value: Value::Map(map),
-                        pos: Some(SourceRange { start, end }),
-                    }))));
+                    return Ok(ParsedValue::Map(pairs));
                 }
                 
                 // Parse one element (key or value)
-                let element = parse(tokens, rcx)?;
-                if let Some(element_end) = element.read().pos.as_ref().map(|r| r.end.clone()) {
-                    end = element_end;
-                }
+                let element = parse(tokens, reader_ctx, symbol_table)?;
                 entries.push(element);
             }
             
             // If we get here, we never found the closing }
-            let pos = SourceRange { start: start.clone(), end };
+            let pos = SourceRange { start: start.clone(), end: start };
             Err(BlinkError::parse_unclosed_delimiter("Unclosed map literal", "}", pos))
         }
-
-        
 
         ")" | "]" | "}" => Err(BlinkError::unexpected_token(&token, start)),
 
         _ => {
-            let mut matched_macro: Option<(String, BlinkValue)> = None;
-            {
-                let rcx_read = rcx.read();
-                for (prefix, macro_fn) in rcx_read.reader_macros.iter() {
-                    if token.starts_with(prefix) {
-                        if let Some((best_prefix, _)) = &matched_macro {
-                            if prefix.len() > best_prefix.len() {
-                                matched_macro = Some((prefix.clone(), macro_fn.clone()));
-                            }
-                        } else {
-                            matched_macro = Some((prefix.clone(), macro_fn.clone()));
+            // Check for reader macros
+            let mut matched_macro: Option<(String, u32)> = None;
+            for (prefix, &symbol_id) in &reader_ctx.reader_macros {
+                if token.starts_with(prefix) {
+                    if let Some((best_prefix, _)) = &matched_macro {
+                        if prefix.len() > best_prefix.len() {
+                            matched_macro = Some((prefix.clone(), symbol_id));
                         }
+                    } else {
+                        matched_macro = Some((prefix.clone(), symbol_id));
                     }
                 }
             }
         
-            if let Some((prefix, macro_fn)) = matched_macro {
+            if let Some((prefix, symbol_id)) = matched_macro {
                 let rest = &token[prefix.len()..];
             
                 let target_form = if rest.is_empty() {
                     if tokens.is_empty() {
-                        return Err(BlinkError::parse_unexpected_eof(SourceRange { start: start.clone(), end: start.clone() }));
+                        let pos = SourceRange { start: start.clone(), end: start };
+                        return Err(BlinkError::parse_unexpected_eof(pos));
                     }
-                    parse(tokens, rcx)?
+                    parse(tokens, reader_ctx, symbol_table)?
                 } else {
                     let mut rest_tokens = tokenize(rest)?;
-                    parse(&mut rest_tokens, rcx)?
+                    parse(&mut rest_tokens, reader_ctx, symbol_table)?
                 };
             
-                let node = apply_reader_macro(macro_fn, target_form.clone())?;
-            
-                let target_range = target_form.read().pos.clone();
-                let end = target_range.map(|r| r.end).unwrap_or_else(|| start.clone());
-            
-                node.write().pos = Some(SourceRange {
-                    start: start.clone(),
-                    end,
-                });
-            
-                return Ok(node);
+                return Ok(apply_reader_macro(symbol_id, target_form));
             }
             
-        
-            Ok(atom(&token, Some(start)))
+            Ok(atom(&token, Some(start), symbol_table))
         }
     }
 }
 
-pub fn parse_all(code: &str, ctx: &mut Arc<RwLock<ReaderContext>>) -> Result<Vec<BlinkValue>, BlinkError> {
+pub fn parse_all(
+    code: &str, 
+    reader_ctx: &ReaderContext,
+    symbol_table: &mut dyn SymbolTableTrait
+) -> Result<Vec<ParsedValue>, BlinkError> {
     let mut tokens = tokenize(code)?;
     let mut forms = Vec::new();
 
     while !tokens.is_empty() {
-        let form = parse(&mut tokens, ctx)?;
+        let form = parse(&mut tokens, reader_ctx, symbol_table)?;
         forms.push(form);
     }
 
     Ok(forms)
-}
-
-pub fn preload_builtin_reader_macros(ctx: &mut EvalContext) {
-    fn build_simple_macro(name: &str) -> BlinkValue {
-        BlinkValue(Arc::new(RwLock::new(LispNode {
-            value: Value::FuncUserDefined {
-                params: vec!["x".to_string()],
-                body: vec![list_val(vec![
-                    sym(name), // 'quote, 'quasiquote, etc.
-                    sym("x"),  // just reference the param symbol "x" at runtime
-                ])],
-                env: Arc::new(RwLock::new(Env::new())), // empty environment
-            },
-            pos: None,
-        })))
-    }
-
-    let mut rm = ctx.reader_macros.write();
-
-    // Single character reader macros
-    rm.reader_macros
-        .insert("\'".into(), build_simple_macro("quo"));
-    rm.reader_macros
-        .insert("`".into(), build_simple_macro("quasiquote"));
-    rm.reader_macros
-        .insert("~".into(), build_simple_macro("unquote"));
-
-    rm.reader_macros
-    .insert("~@".into(), build_simple_macro("unquote-splicing"));
-
-    rm.reader_macros
-    .insert("@".into(), build_simple_macro("deref"));
-
-    
 }

@@ -25,14 +25,14 @@ pub enum ModuleSource {
 /// A module in any supported format
 #[derive(Clone, Debug)]
 pub struct Module {
-    /// Module name (e.g., "math/utils", "serde-json")
-    pub name: String,
+    /// Module name ID (e.g., symbol ID for "math/utils", "serde-json")
+    pub name: u32,
     
     /// Module environment containing definitions
     pub env: Arc<RwLock<Env>>,
     
-    /// Exported symbol names
-    pub exports: HashSet<String>,
+    /// Exported symbol IDs
+    pub exports: HashSet<u32>,
     
     /// How this module was loaded
     pub source: ModuleSource,
@@ -44,15 +44,15 @@ pub struct Module {
 /// Registry supporting all module types
 #[derive(Debug)]
 pub struct ModuleRegistry {
-    /// All modules by name
-    modules: HashMap<String, Arc<RwLock<Module>>>,
+    /// All modules by ID
+    modules: HashMap<u32, Arc<RwLock<Module>>>,
     
     /// Files that have been evaluated (for Blink modules)
     evaluated_files: HashSet<PathBuf>,
     
-    /// File -> modules mapping (for multi-module .blink files)
-    file_modules: HashMap<PathBuf, Vec<String>>,
-    module_files: HashMap<String, PathBuf>,
+    /// File -> module IDs mapping (for multi-module .blink files)
+    file_modules: HashMap<PathBuf, Vec<u32>>,
+    module_files: HashMap<u32, PathBuf>,
     
     /// Native libraries that have been loaded
     loaded_libraries: HashMap<PathBuf, libloading::Library>,
@@ -69,8 +69,8 @@ impl ModuleRegistry {
         }
     }
 
-    pub fn remove_module(&mut self, name: &str) -> bool {
-        self.modules.remove(name).is_some()
+    pub fn remove_module(&mut self, name: u32) -> bool {
+        self.modules.remove(&name).is_some()
     }
     
     /// Remove a native library from storage
@@ -81,8 +81,9 @@ impl ModuleRegistry {
     pub fn store_native_library(&mut self, path: PathBuf, lib: Library) {
         self.loaded_libraries.insert(path, lib);
     }
+    
     pub fn register_module(&mut self, module: Module) -> Arc<RwLock<Module>> {
-        let name = module.name.clone(); // Get name before moving module
+        let name = module.name; // Get name before moving module
         
         // Build file_modules mapping for file-based modules
         match &module.source {
@@ -90,16 +91,16 @@ impl ModuleRegistry {
                 self.file_modules
                     .entry(path.clone())
                     .or_insert_with(Vec::new)
-                    .push(module.name.clone());
+                    .push(module.name);
                 
                 // Also build reverse mapping for fast lookup
-                self.module_files.insert(module.name.clone(), path.clone());
+                self.module_files.insert(module.name, path.clone());
             },
             ModuleSource::BlinkDll(path) | 
             ModuleSource::Wasm(path) | 
             ModuleSource::NativeDylib(path) => {
                 // For native modules, still track the reverse mapping
-                self.module_files.insert(module.name.clone(), path.clone());
+                self.module_files.insert(module.name, path.clone());
             },
             _ => (),
         }
@@ -109,13 +110,13 @@ impl ModuleRegistry {
         module_arc
     }
  
-    pub fn find_module_file(&self, module_name: &str) -> Option<PathBuf> {
-        self.module_files.get(module_name).cloned()
+    pub fn find_module_file(&self, module_name: u32) -> Option<PathBuf> {
+        self.module_files.get(&module_name).cloned()
     }
     
-    /// Get module by name
-    pub fn get_module(&self, name: &str) -> Option<Arc<RwLock<Module>>> {
-        self.modules.get(name).cloned()
+    /// Get module by ID
+    pub fn get_module(&self, name: u32) -> Option<Arc<RwLock<Module>>> {
+        self.modules.get(&name).cloned()
     }
     
     /// Mark file as evaluated
@@ -129,17 +130,17 @@ impl ModuleRegistry {
     }
     
     /// Get all modules defined in a file
-    pub fn modules_in_file(&self, file: &PathBuf) -> Vec<String> {
+    pub fn modules_in_file(&self, file: &PathBuf) -> Vec<u32> {
         self.file_modules.get(file).cloned().unwrap_or_default()
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum ImportType {
-    File(String),                    // (imp "module-name")
+    File(u32),                       // (imp "module-name") -> module name as symbol ID
     Symbols { 
-        symbols: Vec<String>, 
-        module: String,
-        aliases: HashMap<String, String>, // original -> alias
+        symbols: Vec<u32>,           // Symbol IDs to import
+        module: u32,                 // Module name as symbol ID
+        aliases: HashMap<u32, u32>,  // original symbol ID -> alias symbol ID
     },                               // (imp [sym1 sym2] :from module)
 }

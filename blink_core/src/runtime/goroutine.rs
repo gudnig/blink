@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
-use crate::{async_context::AsyncContext, error::LispError, eval::{EvalContext, EvalResult}, value::Value};
+use crate::{runtime::AsyncContext, eval::{EvalContext, EvalResult}};
 
 pub struct TokioGoroutineScheduler {
     // Track running goroutines
@@ -45,8 +45,9 @@ impl TokioGoroutineScheduler {
                 match result {
                     EvalResult::Value(val) => {
                         // Task errored
-                        if let Value::Error(e) = &val.read().value {
-                            eprintln!("Goroutine {} failed: {}", id, e);
+                        if ctx.is_err(&val) {
+                            let err = ctx.get_err(&val);
+                            eprintln!("Goroutine {} failed: {}", id, err);
                             break;
                         }
                         // Task completed successfully

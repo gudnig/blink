@@ -1,6 +1,6 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
-use crate::{value::{  SourcePos, SourceRange}, value_ref::ValueRef};
+use crate::{collections::{ContextualValueRef, ValueContext}, value::{  SourcePos, SourceRange, ValueRef}};
 
 #[derive(Debug, Clone)]
 pub struct BlinkError {
@@ -37,6 +37,35 @@ pub enum BlinkErrorType {
     },
     UserDefined {
         data: Option<ValueRef>
+    }
+}
+
+impl BlinkErrorType {
+    pub fn display_with_context(&self, f: &mut fmt::Formatter<'_>, context: &ValueContext) -> fmt::Result {
+        match self {
+            BlinkErrorType::Tokenizer => write!(f, "Tokenizer error"),
+            BlinkErrorType::Parse(parse_error_type) => {
+                match parse_error_type {
+                    ParseErrorType::UnclosedDelimiter(message) => write!(f, "Unclosed delimiter: {}", message),
+                    ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
+                    ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
+                    ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
+                    ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
+                }
+            },
+            BlinkErrorType::UndefinedSymbol { name } => write!(f, "Undefined symbol: {}", name),
+            BlinkErrorType::Eval => write!(f, "Eval error"),
+            BlinkErrorType::ArityMismatch { expected, got, form } => write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got),
+            BlinkErrorType::UnexpectedToken { token } => write!(f, "Unexpected token: {}", token),
+            BlinkErrorType::UserDefined { data } => {
+                if let Some(data) = data {
+                    let contextual = ContextualValueRef::new(data.clone(), context.clone());
+                    write!(f, "User defined error: {}", contextual)
+                } else {
+                    write!(f, "User defined error")
+                }
+            },
+        }
     }
 }
 

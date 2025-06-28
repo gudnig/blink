@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use generational_arena::{Arena, Index};
 
-use crate::value_ref::{SharedValue, ValueRef};
+use crate::value::{SharedValue, ValueRef};
 
+#[derive(Debug)]
 pub struct SharedArena {
     arena: Arena<Arc<SharedValue>>,
 }

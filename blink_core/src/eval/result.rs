@@ -1,4 +1,4 @@
-use crate::{eval::EvalContext, future::BlinkFuture, value_ref::ValueRef};
+use crate::{eval::EvalContext, future::BlinkFuture, value::ValueRef};
 
 pub enum EvalResult {
     Value(ValueRef),

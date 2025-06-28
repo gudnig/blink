@@ -1,14 +1,14 @@
 use crate::module::ModuleRegistry;
-use crate::value_ref::{SharedValue, ValueRef};
+use crate::value::{SharedValue, ValueRef};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Env {
-    pub vars: HashMap<String, ValueRef>,
+    pub vars: HashMap<u32, ValueRef>,
     pub parent: Option<Arc<RwLock<Env>>>,
-    pub available_modules: HashMap<String, String>, // alias -> full_module_name
+    pub available_modules: HashMap<u32, u32>, // alias -> full_module_name
 }
 
 impl Env {
@@ -28,13 +28,13 @@ impl Env {
         }
     }
 
-    pub fn set(&mut self, key: &str, val: ValueRef) {
-        self.vars.insert(key.to_string(), val);
+    pub fn set(&mut self, key: u32, val: ValueRef) {
+        self.vars.insert(key, val);
     }
 
-    pub fn get_with_registry(&self, key: &str, registry: &ModuleRegistry) -> Option<ValueRef> {
+    pub fn get_with_registry(&self, key: u32, registry: &ModuleRegistry) -> Option<ValueRef> {
         // Check local variables FIRST
-        if let Some(val) = self.vars.get(key) {
+        if let Some(val) = self.vars.get(&key) {
             match val {
                 // Handle module references - resolve them
                 ValueRef::Shared(idx) => {
@@ -46,35 +46,48 @@ impl Env {
                 _ => return Some(*val),
             }
         }
-        
-        // Check for qualified name (module/symbol)
-        if let Some((module_alias, symbol)) = key.split_once('/') {
-            if let Some(module_name) = self.available_modules.get(module_alias) {
-                if let Some(module) = registry.get_module(module_name) {
-                    return module.read().env.read().get_local(symbol);
-                }
-            }
-        }
-        
+
+        // Note: Qualified name checking removed since we're using u32 IDs now
+        // Qualified symbols are handled differently - either:
+        // 1. Pre-resolved during parsing via symbol table interning
+        // 2. Or handled at eval time with separate qualified lookup
+
         // Check parent
         if let Some(parent) = &self.parent {
             return parent.read().get_with_registry(key, registry);
         }
-        
+
         None
     }
-    pub fn get_local(&self, key: &str) -> Option<ValueRef> {
+
+    pub fn get_local(&self, key: u32) -> Option<ValueRef> {
         // Check local variables
-        if let Some(val) = self.vars.get(key) {
-            return Some(val.clone());
+        if let Some(val) = self.vars.get(&key) {
+            return Some(*val);
         }
-        
+
         // Check parent environment
         if let Some(parent) = &self.parent {
             return parent.read().get_local(key);
         }
-        
+
         None
     }
 
+    // Helper method for qualified lookups (module/symbol)
+    pub fn get_qualified(&self, module_alias: u32, symbol: u32, registry: &ModuleRegistry) -> Option<ValueRef> {
+        // Look up the actual module name from alias
+        if let Some(&actual_module) = self.available_modules.get(&module_alias) {
+            if let Some(module) = registry.get_module(actual_module) {
+                return module.read().env.read().get_local(symbol);
+            }
+        }
+
+        // Check parent environments
+        if let Some(parent) = &self.parent {
+            return parent.read().get_qualified(module_alias, symbol, registry);
+        }
+
+        None
+    }
 }

@@ -1,11 +1,17 @@
-use crate::env::Env;
-use crate::{error::{BlinkError}};
-use crate::future::BlinkFuture;
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::hash::{Hash, Hasher};
+mod value_ref;
+mod value_context;
+mod immediate;
+mod shared_value;
+mod isolated_value;
+mod parsed_value;
+
+
+pub use value_ref::*;
+pub use shared_value::*;
+pub use immediate::*;
+pub use value_context::*;
+pub use isolated_value::*;
+pub use parsed_value::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {
@@ -23,6 +29,17 @@ impl std::fmt::Display for SourcePos {
 pub struct SourceRange {
     pub start: SourcePos,
     pub end: SourcePos,
+}
+
+impl SourceRange {
+    pub fn new(start: SourcePos, end: SourcePos) -> Self {
+        Self { start, end }
+    }
+}
+impl Default for SourceRange {
+    fn default() -> Self {
+        Self { start: SourcePos { line: 0, col: 0 }, end: SourcePos { line: 0, col: 0 } }
+    }
 }
 
 impl std::fmt::Display for SourceRange {

@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64};
 
-use crate::goroutine::GoroutineId;
+use crate::runtime::GoroutineId;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AsyncContext {

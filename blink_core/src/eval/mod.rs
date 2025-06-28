@@ -1,16 +1,20 @@
-mod context;
+
 mod helpers;
 mod result;
 mod special_forms;
 
 use std::{sync::Arc, time::Instant};
 
-pub use context::EvalContext;
+pub use crate::runtime::EvalContext;
+pub use result::EvalResult;
 pub use helpers::*;
 use parking_lot::RwLock;
 
-
-use crate::{error::BlinkError, eval::result::EvalResult, telemetry::TelemetryEvent, value_ref::{unpack_immediate, ImmediateValue, Macro, SharedValue, UserDefinedFn, ValueRef}, Env};
+use crate::{
+    error::BlinkError, eval::special_forms::{
+            eval_and, eval_apply, eval_def, eval_def_reader_macro, eval_deref, eval_do, eval_fn, eval_go, eval_if, eval_imp, eval_let, eval_load, eval_macro, eval_mod, eval_or, eval_quasiquote, eval_quote, eval_try
+        }, runtime::{ContextualBoundary, ValueBoundary}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, IsolatedValue, Macro, SharedValue, UserDefinedFn, ValueRef}, Env
+};
 
 macro_rules! try_eval {
     ($expr:expr, $ctx:expr) => {
@@ -41,7 +45,7 @@ macro_rules! forward_eval {
 }
 
 // Make them available to submodules
-pub(crate) use {try_eval, forward_eval};
+pub(crate) use {forward_eval, try_eval};
 
 pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
     match expr {
@@ -53,20 +57,10 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
             };
             if let Some(shared_value) = shared_value {
                 match shared_value.as_ref() {
-                    SharedValue::Symbol(sym) => {
-                        // Symbol lookup
-                        ctx.get(&sym)
-                            .map(|val| EvalResult::Value(val))
-                            .unwrap_or_else(|| EvalResult::Value(
-                                ctx.error_value(BlinkError::undefined_symbol(sym))
-                            ))
-                    }
                     SharedValue::List(list) if list.is_empty() => {
                         EvalResult::Value(ValueRef::nil())
                     }
-                    SharedValue::List(list) => {
-                        eval_list(&list, ctx)
-                    }
+                    SharedValue::List(list) => eval_list(&list, ctx),
                     _ => {
                         // Everything else is self-evaluating
                         EvalResult::Value(expr)
@@ -76,25 +70,26 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                 // Invalid/stale arena index
                 EvalResult::Value(ctx.eval_error("Invalid value reference"))
             }
-        },
-        
+        }
+
         ValueRef::Immediate(packed) => {
             match unpack_immediate(packed) {
-                ImmediateValue::Number(_) | 
-                ImmediateValue::Bool(_) | 
-                ImmediateValue::Keyword(_) |
-                ImmediateValue::Nil => {
+                ImmediateValue::Number(_)
+                | ImmediateValue::Bool(_)
+                | ImmediateValue::Keyword(_)
+                | ImmediateValue::Nil => {
                     // Self-evaluating
                     EvalResult::Value(expr)
                 }
                 ImmediateValue::Symbol(symbol_id) => {
                     // Symbol lookup - need to resolve symbol ID to name first
                     let symbol_name = {
-                        ctx.symbol_table.read()
+                        ctx.symbol_table
+                            .read()
                             .get_symbol(symbol_id)
                             .map(|s| s.to_string())
                     };
-                    
+
                     if let Some(name) = symbol_name {
                         match ctx.resolve_symbol(&name) {
                             Ok(val) => EvalResult::Value(val),
@@ -105,14 +100,12 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                     }
                 }
             }
-        },
-        
+        }
+
         ValueRef::Gc(_gc_ptr) => {
             // TODO: Handle GC values when implemented
             todo!("GC values not yet implemented")
-        },
-        
-        ValueRef::Nil => EvalResult::Value(ValueRef::Nil),
+        }
     }
 }
 
@@ -121,7 +114,6 @@ pub fn trace_eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
         let start = Instant::now();
         let val = try_eval!(eval(expr, ctx), ctx);
         if let Some(sink) = &*ctx.telemetry_sink {
-            
             sink(TelemetryEvent {
                 form: format!("{:?}", expr),
                 duration_us: start.elapsed().as_micros(),
@@ -138,8 +130,7 @@ pub fn trace_eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
 
 pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     let head = &list[0];
-    
-    
+
     // Check if head is a symbol (immediate value)
     if let ValueRef::Immediate(packed) = head {
         if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(*packed) {
@@ -152,7 +143,7 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
             };
             if symbol_name.is_none() {
                 return EvalResult::Value(
-                    ctx.eval_error(&format!("Invalid symbol ID: {}", symbol_id))
+                    ctx.eval_error(&format!("Invalid symbol ID: {}", symbol_id)),
                 );
             }
             let symbol_name = symbol_name.unwrap();
@@ -173,12 +164,14 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
                 "macro" => return eval_macro(&list[1..], ctx),
                 "rmac" => return eval_def_reader_macro(&list[1..], ctx),
                 "quasiquote" => return eval_quasiquote(&list[1..], ctx),
-                "unquote" => return EvalResult::Value(
-                    ctx.eval_error("unquote used outside quasiquote")
-                ),
-                "unquote-splicing" => return EvalResult::Value(
-                    ctx.eval_error("unquote-splicing used outside quasiquote")
-                ),
+                "unquote" => {
+                    return EvalResult::Value(ctx.eval_error("unquote used outside quasiquote"))
+                }
+                "unquote-splicing" => {
+                    return EvalResult::Value(
+                        ctx.eval_error("unquote-splicing used outside quasiquote"),
+                    )
+                }
                 "go" => return eval_go(&list[1..], ctx),
                 "deref" => return eval_deref(&list[1..], ctx),
                 _ => {
@@ -189,13 +182,10 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
             }
         }
     }
-    
+
     // Head is not a symbol - evaluate it and call as function
     eval_function_call_inline(list.clone(), 0, Vec::new(), None, ctx)
 }
-
-
-
 
 fn eval_symbol_and_call(symbol_name: &str, args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // Resolve symbol to actual function
@@ -203,11 +193,11 @@ fn eval_symbol_and_call(symbol_name: &str, args: &[ValueRef], ctx: &mut EvalCont
         Ok(val) => val,
         Err(e) => return EvalResult::Value(ctx.error_value(e)),
     };
-    
+
     // Create args list with function first
     let mut all_args = vec![function_val];
     all_args.extend_from_slice(args);
-    
+
     eval_function_call_inline(all_args, 1, Vec::new(), Some(function_val), ctx)
 }
 
@@ -256,7 +246,7 @@ fn eval_function_call_inline(
                     return EvalResult::Value(val);
                 }
                 evaluated_args.push(val);
-                index += 1; 
+                index += 1;
             }
             EvalResult::Suspended { future, resume: _ } => {
                 return EvalResult::Suspended {
@@ -275,11 +265,11 @@ fn eval_function_call_inline(
 }
 
 fn eval_macro_body_inline(
-    body: Vec<ValueRef>, 
-    mut index: usize, 
+    body: Vec<ValueRef>,
+    mut index: usize,
     mut expansion: ValueRef,
     original_env: Arc<RwLock<Env>>,
-    mut ctx: EvalContext
+    mut ctx: EvalContext,
 ) -> EvalResult {
     loop {
         if index >= body.len() {
@@ -313,11 +303,11 @@ fn eval_macro_body_inline(
 }
 
 fn eval_function_body_inline(
-    body: Vec<ValueRef>, 
-    mut index: usize, 
+    body: Vec<ValueRef>,
+    mut index: usize,
     mut result: ValueRef,
     original_env: Arc<RwLock<Env>>,
-    mut ctx: EvalContext
+    mut ctx: EvalContext,
 ) -> EvalResult {
     loop {
         if index >= body.len() {
@@ -350,85 +340,93 @@ fn eval_function_body_inline(
     }
 }
 
-pub fn eval_func(
-    func: ValueRef,
-    args: Vec<ValueRef>,
-    ctx: &mut EvalContext,
-) -> EvalResult {
+pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     match &func {
         ValueRef::Shared(idx) => {
+            let func = {
+                let arena = ctx.shared_arena.read();
+                arena.get(*idx).unwrap().clone()
+            };
 
-        let func = {
-            let arena = ctx.shared_arena.read();
-            arena.get(*idx).unwrap().clone()
-        };
-        
-        match func.as_ref() {
-            
-        
-        SharedValue::NativeFunction(f) => f(args)
-            .map_or_else(
-                |e| EvalResult::Value(ctx.eval_error(&e.to_string())),
-                |v| EvalResult::Value(v)),
-        
-        // destructuring the macro
-        SharedValue::Macro (Macro { params, body, env, is_variadic } )=> {
-            // Arity check...
-            if *is_variadic {
-                if args.len() < params.len() - 1 {
-                    return EvalResult::Value(ctx.arity_error(params.len() - 1, args.len(), "macro (at least)"));
-                }
-            } else if params.len() != args.len() {
-                return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "macro"));
-            }
+            match func.as_ref() {
+                SharedValue::NativeFunction(f) => {
+                    match f.call(args, ctx) {
+                        Ok(v) => EvalResult::Value(v),
+                        Err(e) => EvalResult::Value(ctx.error_value(e)),
+                    }
+                },
 
-            // Create macro environment and bind parameters
-            let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-            {
-                let mut env_guard = macro_env.write();
+                // destructuring the macro
+                SharedValue::Macro(Macro {
+                    params,
+                    body,
+                    env,
+                    is_variadic,
+                }) => {
+                    // Arity check...
                     if *is_variadic {
-                        for (i, param) in params.iter().take(params.len() - 1).enumerate() {
-                            env_guard.set(param, args[i].clone());
+                        if args.len() < params.len() - 1 {
+                            return EvalResult::Value(ctx.arity_error(
+                                params.len() - 1,
+                                args.len(),
+                                "macro (at least)",
+                            ));
                         }
-                        let rest_param = &params[params.len() - 1];
-                        let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
-                        env_guard.set(rest_param, ctx.list_value(rest_args));
-                    } else {
-                        for (param, arg) in params.iter().zip(args.iter()) {
-                            env_guard.set(param, arg.clone());
+                    } else if params.len() != args.len() {
+                        return EvalResult::Value(ctx.arity_error(
+                            params.len(),
+                            args.len(),
+                            "macro",
+                        ));
+                    }
+
+                    // Create macro environment and bind parameters
+                    let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
+                    {
+                        let mut env_guard = macro_env.write();
+                        if *is_variadic {
+                            for (i, param) in params.iter().take(params.len() - 1).enumerate() {
+                                env_guard.set(*param, args[i].clone());
+                            }
+                            let rest_param = &params[params.len() - 1];
+                            let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
+                            env_guard.set(*rest_param, ctx.list_value(rest_args));
+                        } else {
+                            for (param, arg) in params.iter().zip(args.iter()) {
+                                env_guard.set(*param, arg.clone());
+                            }
                         }
                     }
+
+                    let old_env = ctx.env.clone();
+                    let macro_ctx = ctx.with_env(macro_env);
+
+                    // Evaluate macro body with proper suspension handling
+                    eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, macro_ctx)
                 }
 
-                let old_env = ctx.env.clone();
-                let macro_ctx = ctx.with_env(macro_env);
-                
-                // Evaluate macro body with proper suspension handling
-                eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, macro_ctx)
-            },
-            
-            SharedValue::UserDefinedFunction (UserDefinedFn{ params, body, env }) => {
-                if params.len() != args.len() {
-                    return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "fn"));
-                }
-
-                let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-                {
-                    let mut env_guard = local_env.write();
-                    for (param, val) in params.iter().zip(args) {
-                        env_guard.set(param, val);
+                SharedValue::UserDefinedFunction(UserDefinedFn { params, body, env }) => {
+                    if params.len() != args.len() {
+                        return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "fn"));
                     }
-                }
 
-                let old_env = ctx.env.clone();
-                let local_ctx = ctx.with_env(local_env);
-                
-                eval_function_body_inline(body.clone(), 0, ctx.nil_value(), old_env, local_ctx)
-            },
-            _ => EvalResult::Value(ctx.eval_error("Not a function")),
+                    let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
+                    {
+                        let mut env_guard = local_env.write();
+                        for (param, val) in params.iter().zip(args) {
+                            env_guard.set(*param, val);
+                        }
+                    }
+
+                    let old_env = ctx.env.clone();
+                    let local_ctx = ctx.with_env(local_env);
+
+                    eval_function_body_inline(body.clone(), 0, ctx.nil_value(), old_env, local_ctx)
+                }
+                _ => EvalResult::Value(ctx.eval_error("Not a function")),
+            }
         }
-    }
-        
+
         _ => EvalResult::Value(ctx.eval_error("Not a function")),
     }
 }
