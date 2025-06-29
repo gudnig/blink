@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
 
-use crate::{runtime::AsyncContext, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, value::{unpack_immediate, ImmediateValue, Macro, ModuleRef, SharedValue, UserDefinedFn, ValueRef}, Env};
+use crate::{runtime::AsyncContext, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, value::{unpack_immediate, ImmediateValue, Macro, ModuleRef, SharedValue, UserDefinedFn, ValueRef}, env::Env};
 
 fn require_arity(args: &[ValueRef], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {
@@ -43,8 +43,8 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     }
     
     // Extract symbol name from first argument
-    let name = match ctx.get_symbol_name(args[0]) {
-        Some(name) => name,
+    let sym = match ctx.get_symbol_id(args[0]) {
+        Some(sym) => sym,
         None => {
             return EvalResult::Value(ctx.eval_error("def first argument must be a symbol"));
         }
@@ -54,7 +54,7 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     let value = try_eval!(trace_eval(args[1], ctx), ctx);
     
     // Bind the symbol to the value in the current environment
-    ctx.set_symbol(&name, value);
+    ctx.set_symbol(sym, value);
     
     // Return the value that was bound
     EvalResult::Value(value)
@@ -143,7 +143,7 @@ fn eval_let_bindings_inline(
         let key_val = &bindings[index];
         let val_expr = &bindings[index + 1];
 
-        let key = match ctx.get_symbol_name(*key_val) {
+        let key = match ctx.get_symbol_id(*key_val) {
             Some(key) => key,
             None => {
                 return EvalResult::Value(ctx.eval_error("let binding keys must be symbols"));
@@ -156,7 +156,7 @@ fn eval_let_bindings_inline(
                 if ctx.is_err(&v) {
                     return EvalResult::Value(v);
                 }
-                env.write().set(&key, v);
+                env.write().set(key, v);
                 index += 2;
             }
 
@@ -171,7 +171,7 @@ fn eval_let_bindings_inline(
                         }
                         
                         // Set the binding and continue
-                        env.write().set(&key, v);
+                        env.write().set(key, v);
 
                         ctx.env = env.clone();
 
@@ -353,7 +353,6 @@ pub fn eval_apply(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     eval_func(func, list_items, ctx)
 }
 
-
 fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -363,46 +362,23 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "load-native"));
     }
 
-    let libname = match &args[0] {
-        ValueRef::Shared(idx) => {
-            let shared_value = {
-                let shared_arena = ctx.shared_arena.read();
-                let res = shared_arena.get(*idx);
-                res.map(|v| v.clone())
-            };
-            if let Some(shared) = shared_value {
-
-                match shared.as_ref() {
-                    SharedValue::Str(s) => s.clone(),
-                    _ => {
-                        return EvalResult::Value(ctx.eval_error("load-native expects a string"));
-                    }
-                } 
-            } else  {
-                return EvalResult::Value(ctx.eval_error("load-native expects a string"));
-            }
-        },
-        _ => {
-            return EvalResult::Value(ctx.eval_error("load-native expects a string"));
-        }
+    let libname = match ctx.get_string(args[0]) {
+        Some(s) => s,
+        None => return EvalResult::Value(ctx.eval_error("load-native expects a string")),
     };
 
-    // Determine the correct file extension
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else if cfg!(target_os = "windows") {
-        "dll"
-    } else {
-        "so"
-    };
+    let ext = if cfg!(target_os = "macos") { "dylib" } 
+              else if cfg!(target_os = "windows") { "dll" } 
+              else { "so" };
 
     let filename = format!("native/lib{}.{}", libname, ext);
     let lib_path = PathBuf::from(&filename);
+    let lib_symbol_id = ctx.intern_symbol(&libname); // Returns valueRef
+    let lib_symbol_id = ctx.get_symbol_id(lib_symbol_id).unwrap(); // Change valueRef to u32 symbol representation
 
-    // Remove existing module if it exists (force reload)
-    if ctx.module_registry.read().get_module(&libname).is_some() {
-        
-        ctx.module_registry.write().remove_module(&libname);
+    // Remove existing module if it exists
+    if ctx.module_registry.read().get_module(lib_symbol_id).is_some() {
+        ctx.module_registry.write().remove_module(lib_symbol_id);
         ctx.module_registry.write().remove_native_library(&lib_path);
     }
 
@@ -413,67 +389,67 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         }
     };
 
-    // Try the new registration function first (with exports)
-    let exports = match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
+    // Try new registration function first
+    match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
         Ok(register_with_exports) => {
-            // Create a new environment for the module
             let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
             let exported_names = unsafe { register_with_exports(&mut *module_env.write()) };
             
-            // Register the module with known exports
-            let exports_set: HashSet<String> = exported_names.into_iter().collect();
+            // Convert exported names to symbol IDs
+            let mut exports_set = HashSet::new();
+            for name in exported_names {
+                let symbol_id = ctx.symbol_table.write().intern(&name);
+                exports_set.insert(symbol_id);
+            }
+            
             let module = Module {
-                name: libname.to_string(),
                 source: ModuleSource::NativeDylib(lib_path.clone()),
                 exports: exports_set.clone(),
                 env: module_env,
                 ready: true,
+                name: lib_symbol_id,
             };
-            let _arc_mod = ctx.module_registry.write().register_module(module);
-            
-            exports_set
+            ctx.module_registry.write().register_module(module);
         },
         Err(_) => {
-            // Fall back to old registration function (no export tracking)
+            // Fall back to old registration
             let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
                 match lib.get(b"blink_register") {
                     Ok(register) => register,
                     Err(e) => {
-                        return EvalResult::Value(ctx.eval_error(&format!("Failed to find blink_register or blink_register_with_exports in '{}': {}", filename, e)));
+                        return EvalResult::Value(ctx.eval_error(&format!("Failed to find registration function in '{}': {}", filename, e)));
                     }
                 }
             };
             
-            // Create a new environment for the module
             let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
             unsafe { register(&mut *module_env.write()) };
             
-            // Extract exports from the environment (since old function doesn't return them)
+            // Extract exports from environment - need to convert to symbol IDs
             let exports = extract_env_symbols(&module_env);
+            let mut exports_set = HashSet::new();
+            for symbol_id in exports {
+                exports_set.insert(symbol_id);
+            }
             
-            // Register the module
             let module = Module {
-                name: libname.clone(),
+                name: lib_symbol_id,
                 source: ModuleSource::NativeDylib(lib_path.clone()),
-                exports: exports.clone(),
+                exports: exports_set,
                 env: module_env,
                 ready: true,
             };
-            let _arc_mod = ctx.module_registry.write().register_module(module);
+            ctx.module_registry.write().register_module(module);
             
-            exports
         }
     };
 
-    // Store the library to prevent it from being unloaded
     ctx.module_registry.write().store_native_library(lib_path, lib);
-
-
-
     EvalResult::Value(ctx.nil_value())
 }
+
 fn import_symbols_into_env(
-    symbols: &[ValueRef],
+    symbols: &[ValueRef], //TODO this should be a vector of u32s
     module_name: u32,
     aliases: &HashMap<u32, u32>,
     ctx: &mut EvalContext
@@ -489,7 +465,7 @@ fn import_symbols_into_env(
             if first_name == ":all" {
                 for export_name in &module_read.exports {
                     let local_name = aliases.get(export_name).unwrap_or(export_name);
-                    let reference = ctx.module_value(module_name, export_name);
+                    let reference = ctx.module_value(module_name, *export_name);
                     ctx.env.write().vars.insert(*local_name, reference);
                 }
                 return Ok(());
@@ -499,7 +475,7 @@ fn import_symbols_into_env(
     
     // Import specific symbols
     for symbol_ref in symbols {
-        let symbol_name = ctx.get_symbol_name(symbol_ref.clone())
+        let symbol_name = ctx.get_symbol_id(*symbol_ref)
             .ok_or_else(|| BlinkError::eval("Non-symbol argument to import"))?;
         
         // Check if symbol is exported
@@ -511,7 +487,7 @@ fn import_symbols_into_env(
         }
         
         let local_name = aliases.get(&symbol_name).unwrap_or(&symbol_name);
-        let reference = ctx.module_value(module_name, &symbol_name);
+        let reference = ctx.module_value(module_name, symbol_name);
         ctx.env.write().vars.insert(*local_name, reference);
     }
     
@@ -534,11 +510,11 @@ fn load_native_code(
         return Err(BlinkError::arity(1, args.len(), "compile-plugin").with_pos(pos));
     }
 
-    let plugin_name = match &args[0] {
+    let plugin_name =  match args[0] {
         ValueRef::Shared(idx) => {
             let shared_value = {
                 let shared_arena = ctx.shared_arena.read();
-                let res = shared_arena.get(*idx);
+                let res = shared_arena.get(idx);
                 res.map(|v| v.clone())
             };
             if let Some(shared) = shared_value {
@@ -556,6 +532,9 @@ fn load_native_code(
             return Err(BlinkError::eval("compile-plugin expects a string as first argument").with_pos(pos));
         }
     };
+
+    let plugin_symbol_id = ctx.intern_symbol(&plugin_name);
+    let plugin_symbol_id = ctx.get_symbol_id(plugin_symbol_id).unwrap();
 
     let mut plugin_path = format!("plugins/{}", plugin_name);
     let mut auto_import = false;
@@ -640,12 +619,20 @@ fn load_native_code(
         Ok(register_with_exports) => {
             // Create a new environment for the module
             let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
-            let exported_names = unsafe { register_with_exports(&mut *module_env.write()) };
+            let mut exports_set: HashSet<u32> = HashSet::new();
+            let exported_names = unsafe {
+                register_with_exports(&mut *module_env.write())
+             };
+             for name in exported_names {
+                let symbol = ctx.intern_symbol(&name);
+                let symbol_id = ctx.get_symbol_id(symbol).unwrap();
+                exports_set.insert(symbol_id);
+             }
             
             // Register the module with known exports
-            let exports_set: HashSet<String> = exported_names.into_iter().collect();
+            
             let module = Module {
-                name: plugin_name.clone(),
+                name: plugin_symbol_id,
                 source: ModuleSource::NativeDylib(PathBuf::from(&dest)),
                 exports: exports_set.clone(),
                 env: module_env,
@@ -667,27 +654,28 @@ fn load_native_code(
             unsafe { register(&mut *module_env.write()) };
             
             // We don't know the exports, so we'll have to extract them from the environment
-            let exports = extract_env_symbols(&module_env);
+            let export_symbols =extract_env_symbols(&module_env);
+            let exports = export_symbols.iter().map(|s| ValueRef::symbol(*s)).collect::<Vec<ValueRef>>();
             let module = Module {
-                name: plugin_name.clone(),
+                name: plugin_symbol_id,
                 source: ModuleSource::NativeDylib(PathBuf::from(&dest)),
-                exports: exports.clone(),
+                exports: export_symbols.clone(),
                 env: module_env,
                 ready: true,
             };
             // Register the module
             let _arc_mod = ctx.module_registry.write().register_module(module);
             if auto_import {
-                import_symbols_into_env(&exports.clone().into_iter().collect::<Vec<String>>(), &plugin_name, &HashMap::new(), ctx)?;
+                import_symbols_into_env(&exports, plugin_symbol_id, &HashMap::new(), ctx)?;
             }
             
-            exports
+            export_symbols
         }
     };
-
+    let exports = exports.iter().map(|s| ValueRef::symbol(*s)).collect::<Vec<ValueRef>>();
     // Store the library to prevent it from being unloaded
     ctx.module_registry.write().store_native_library(PathBuf::from(&dest), lib);
-    import_symbols_into_env(&exports.clone().into_iter().collect::<Vec<String>>(), &plugin_name, &HashMap::new(), ctx)?;
+    import_symbols_into_env(&exports, plugin_symbol_id, &HashMap::new(), ctx)?;
 
     
 
@@ -742,15 +730,21 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     };
     let mut reader_ctx = ctx.reader_macros.clone();
     // Parse the file
-    let forms = crate::parser::parse_all(&contents, &mut reader_ctx);
+    let parsed_forms = crate::parser::parse_all(&contents, &mut reader_ctx.write(), &mut ctx.symbol_table.write());
 
 
-    let forms = match forms {
+    let parsed_forms = match   parsed_forms {
         Ok(forms) => forms,
         Err(e) => {
-            return EvalResult::Value(e.into_blink_value());
+            return EvalResult::Value(ctx.error_value(e));
         }
     };
+
+    let mut forms = Vec::new();
+    for form in parsed_forms {
+        let value = ctx.alloc_parsed_value(form);
+        forms.push(value);
+    }
     
     // Set current file context
     let old_file = ctx.current_file.clone();
@@ -950,13 +944,13 @@ fn parse_symbol_import(
     
     let mut j = 0;
     while j < remaining_args.len() {
-        if let Some(kw) = ctx.get_keyword_name(remaining_args[j].clone()) {
+        if let Some(kw) = ctx.get_keyword_name(remaining_args[j]) {
             match kw.as_str() {
                 "from" => {
                     if j + 1 >= remaining_args.len() {
                         return Err(BlinkError::eval(":from requires a module name"));
                     }
-                    if let Some(module) = ctx.get_symbol_name(remaining_args[j + 1].clone()) {
+                    if let Some(module) = ctx.get_symbol_id(remaining_args[j + 1]) {
                         module_name = Some(module.clone());
                         j += 2;
                     } else {
@@ -1007,11 +1001,13 @@ pub fn eval_def_reader_macro(
     let ch = char_val;
 
     let func = try_eval!(trace_eval(args[1].clone(), ctx), ctx);
-
+    let func_symbol = ctx.intern_symbol(&ch);
+    let func_symbol_id = ctx.get_symbol_id(func_symbol).unwrap();
+    ctx.set_symbol(func_symbol_id, func);
     ctx.reader_macros
         .write()
         .reader_macros
-        .insert(ch, func.clone());
+        .insert(ch, func_symbol_id);
     EvalResult::Value(func)
 }
 
@@ -1024,9 +1020,9 @@ fn update_module_exports(module: &mut Module, exports_val: &ValueRef, ctx: &mut 
                 match list.as_ref() {
                     SharedValue::List(items) => {
                         for item in items {
-                            let sym  = ctx.get_symbol_name(item.clone());
+                            let sym  = ctx.get_symbol_id(*item);
                             if let Some(sym) = sym {
-                                module.exports.insert(sym.clone());
+                                module.exports.insert(sym);
                             }
                         }
                     }
@@ -1045,7 +1041,6 @@ fn update_module_exports(module: &mut Module, exports_val: &ValueRef, ctx: &mut 
             }            
         }
         ValueRef::Gc(_gc_ptr) => todo!(),
-        ValueRef::Nil => return Err(BlinkError::eval("Exports must be a list or vector")),        
     }
     
     Ok(())
@@ -1125,10 +1120,10 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.eval_error("Missing module name after flags"));
     }
     
-    let name = match extract_name(&args[name_index], ctx) {
-        Ok(name) => name,
-        Err(e) => {
-            return EvalResult::Value(ctx.error_value(e));
+    let name = match ctx.get_symbol_id(args[name_index]) {
+        Some(name) => name,
+        None => {
+            return EvalResult::Value(ctx.eval_error("Expected a symbol for module name"));
         }
     };
     
@@ -1144,7 +1139,7 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     let should_declare = flags.contains("declare") || flags.is_empty();
     let should_enter = flags.contains("enter");
     
-    let mut module = ctx.module_registry.read().get_module(&name);
+    let mut module = ctx.module_registry.read().get_module(name);
     
 
     if should_declare && module.is_none() {
@@ -1192,7 +1187,10 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
 
 fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf, BlinkError> {
     // 1. Check if module is already registered (we know which file it came from)
-    if let Some(module) = ctx.module_registry.read().get_module(module_name) {
+    let module_symbol_id = ctx.intern_symbol(module_name);
+    let module_symbol_id = ctx.get_symbol_id(module_symbol_id).unwrap();
+
+    if let Some(module) = ctx.module_registry.read().get_module(module_symbol_id) {
         let module_read = module.read();
         if let ModuleSource::BlinkFile(ref path) = module_read.source {
             return Ok(path.clone());
@@ -1288,12 +1286,18 @@ pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         
         ImportType::Symbols { symbols, module, aliases } => {
             // Check if module already exists
-            let module_exists = ctx.module_registry.read().get_module(&module).is_some();
+            let module_exists = ctx.module_registry.read().get_module(module).is_some();
+            let module_name = match ctx.resolve_symbol_name(module) {
+                Some(name) => name,
+                None => {
+                    return EvalResult::Value(ctx.eval_error("Module not found"));
+                }
+            };
             
             if !module_exists {
                 
                 // Find which file contains the module
-                let file_path = find_module_file(&module, ctx);
+                let file_path = find_module_file(&module_name, ctx);
                 if let Err(e) = file_path {
                     return EvalResult::Value(ctx.error_value(e));
                 }
@@ -1304,13 +1308,15 @@ pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
                 try_eval!(loaded, ctx);
                 
                 // Verify the module is now available
-                if ctx.module_registry.read().get_module(&module).is_none() {
+                if ctx.module_registry.read().get_module(module).is_none() {
                     return EvalResult::Value(ctx.eval_error(&format!("Module '{}' was not found in the loaded file", module)));
                 }
             }
+
+            let symbol_values = symbols.iter().map(|s| ValueRef::symbol(*s)).collect::<Vec<ValueRef>>();
             
             // Import the symbols into current environment
-            match import_symbols_into_env(&symbols, &module, &aliases, ctx) {
+            match import_symbols_into_env(&symbol_values, module, &aliases, ctx) {
                 Ok(_) => (),
                 Err(e) => {
                     return EvalResult::Value(ctx.error_value(e));
@@ -1506,7 +1512,7 @@ pub fn eval_macro(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     EvalResult::Value(macro_ref)
 }
 
-fn extract_macro_params(param_expr: ValueRef, ctx: &mut EvalContext) -> Result<(Vec<String>, bool), ValueRef> {
+fn extract_macro_params(param_expr: ValueRef, ctx: &mut EvalContext) -> Result<(Vec<u32>, bool), ValueRef> {
     // Use the existing method from your EvalContext
     match ctx.get_vector_of_symbols(param_expr) {
         Ok(symbol_names) => {
@@ -1518,25 +1524,26 @@ fn extract_macro_params(param_expr: ValueRef, ctx: &mut EvalContext) -> Result<(
     }
 }
 
-fn parse_variadic_params(symbol_names: Vec<String>, ctx: &mut EvalContext) -> Result<(Vec<String>, bool), ValueRef> {
+fn parse_variadic_params(symbol_ids: Vec<u32>, ctx: &mut EvalContext) -> Result<(Vec<u32>, bool), ValueRef> {
     let mut params = Vec::new();
     let mut is_variadic = false;
     let mut i = 0;
 
-    while i < symbol_names.len() {
-        let symbol_name = &symbol_names[i];
+    while i < symbol_ids.len() {
+        let symbol_id = &symbol_ids[i];
+        let symbol_name = ctx.resolve_symbol_name(*symbol_id).unwrap();
         
         if symbol_name == "&" {
             // Next symbol is the rest parameter
-            if i + 1 < symbol_names.len() {
-                params.push(symbol_names[i + 1].clone());
+            if i + 1 < symbol_ids.len() {
+                params.push(symbol_ids[i + 1].clone());
                 is_variadic = true;
                 break;
             } else {
                 return Err(ctx.eval_error("& must be followed by a parameter name"));
             }
         } else {
-            params.push(symbol_name.clone());
+            params.push(symbol_id.clone());
         }
         
         i += 1;

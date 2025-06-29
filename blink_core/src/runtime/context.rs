@@ -2,7 +2,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
 
-use crate::{error::BlinkError, module::ModuleRegistry, parser::ReaderContext, runtime::{AsyncContext, HandleRegistry, SharedArena, SymbolTable, TokioGoroutineScheduler, ValueMetadataStore}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, ModuleRef, SharedValue, SourceRange, ValueRef}, Env};
+use crate::{error::BlinkError, module::ModuleRegistry, parser::ReaderContext, runtime::{AsyncContext, HandleRegistry, SharedArena, SymbolTable, TokioGoroutineScheduler, ValueMetadataStore}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, ModuleRef, ParsedValue, SharedValue, SourceRange, ValueRef}};
+use crate::env::Env;
 
 #[derive(Clone)]
 pub struct EvalContext {
@@ -15,7 +16,7 @@ pub struct EvalContext {
     pub reader_macros: Arc<RwLock<ReaderContext>>,
     pub value_metadata: Arc<RwLock<ValueMetadataStore>>,
     pub current_file: Option<String>,
-    pub current_module: Option<String>,
+    pub current_module: Option<u32>,
     pub async_ctx: AsyncContext,
     pub tracing_enabled: bool,
     pub symbol_table: Arc<RwLock<SymbolTable>>,
@@ -24,6 +25,55 @@ pub struct EvalContext {
 }
 
 impl EvalContext {
+
+    pub fn alloc_parsed_value(&mut self, parsed: ParsedValue) -> ValueRef {
+        match parsed {
+            // Immediate values - pack directly
+            ParsedValue::Number(n) => ValueRef::number(n),
+            ParsedValue::Bool(b) => ValueRef::boolean(b),
+            ParsedValue::Symbol(id) => ValueRef::symbol(id),
+            ParsedValue::Keyword(id) => ValueRef::keyword(id),
+            ParsedValue::Nil => ValueRef::nil(),
+            
+            // Complex values - allocate in shared arena
+            ParsedValue::String(s) => {
+                self.string_value(&s)
+            }
+            
+            ParsedValue::List(items) => {
+                let converted_items: Vec<ValueRef> = items
+                    .into_iter()
+                    .map(|item| self.alloc_parsed_value(item))
+                    .collect();
+                
+                self.list_value(converted_items)
+            }
+            
+            ParsedValue::Vector(items) => {
+                let converted_items: Vec<ValueRef> = items
+                    .into_iter()
+                    .map(|item| self.alloc_parsed_value(item))
+                    .collect();
+                
+                self.vector_value(converted_items)
+            }
+            
+            ParsedValue::Map(pairs) => {
+                let value_pairs = pairs
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let key = self.alloc_parsed_value(k);
+                        let value = self.alloc_parsed_value(v);
+                        (key, value)
+                    })
+                    .collect();
+                
+                self.map_value(value_pairs)
+                
+            }
+        }
+    }
+    
     pub fn resolve_module_symbol(&self, module_alias: u32, symbol: u32) -> Result<ValueRef, BlinkError> {
         // Step 1: Look up module alias -> full module name (acquire and release lock)
         let module_name = {
@@ -213,7 +263,9 @@ impl EvalContext {
     }
 
 
-    
+    pub fn get_symbol_name_from_id(&self, id: u32) -> Option<String> {
+        self.symbol_table.read().get_symbol(id).map(|s| s.to_string())
+    }
 
 
     pub fn get_symbol_name(&self, val: ValueRef) -> Option<String> {
@@ -240,7 +292,7 @@ impl EvalContext {
 
     /// Extract a vector of symbol names from a ValueRef
     /// Handles both [sym1 sym2] and (vector sym1 sym2) forms
-    pub fn get_vector_of_symbols(&self, val: ValueRef) -> Result<Vec<String>, String> {
+    pub fn get_vector_of_symbols(&self, val: ValueRef) -> Result<Vec<u32>, String> {
         match val {
             ValueRef::Shared(idx) => {
                 if let Some(shared) = self.shared_arena.read().get(idx) {
@@ -271,12 +323,12 @@ impl EvalContext {
     }
     
     /// Helper to extract symbol names from a slice of ValueRefs
-    fn extract_symbol_names(&self, items: &[ValueRef]) -> Result<Vec<String>, String> {
+    fn extract_symbol_names(&self, items: &[ValueRef]) -> Result<Vec<u32>, String> {
         let mut params = Vec::new();
         
         for &item in items {
-            match self.get_symbol_name(item) {
-                Some(name) => params.push(name),
+            match self.get_symbol_id(item) {
+                Some(sym) => params.push(sym),
                 None => return Err("fn parameter list must contain only symbols".to_string()),
             }
         }

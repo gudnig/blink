@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Display};
 
 use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
 
@@ -7,6 +7,20 @@ use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
 pub struct BlinkHashSet {
     context: ValueContext,
     set: HashSet<ContextualValueRef>,
+}
+
+impl Display for BlinkHashSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{{")?;
+        for (i, value) in self.set.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+     
+            write!(f, "{}", value)?;
+        }
+        write!(f, "}}")
+    }
 }
 
 impl BlinkHashSet {

@@ -1,14 +1,16 @@
 
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+
 use crate::collections::{ContextualValueRef, ValueContext};
-use crate::env::Env;
+
 use crate::error::{BlinkError, BlinkErrorType};
 use crate::eval::{eval_func, EvalContext, EvalResult};
 use crate::future::BlinkFuture;
-use crate::value::{unpack_immediate, ImmediateValue, IsolatedValue, Macro, NativeFn};
-use crate::{SharedValue, ValueRef};
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::value::{unpack_immediate, ValueRef, ImmediateValue, Macro, NativeFn};
+use crate::Env;
+
 
 pub fn native_add(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     if args.is_empty() {
@@ -156,7 +158,7 @@ pub fn native_map_construct(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalR
 pub fn native_print(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     let context = ValueContext::new(ctx.shared_arena.clone());
     for val in args {
-        let contextual_val = ContextualValueRef::new(val, &context);
+        let contextual_val = ContextualValueRef::new(val, context.clone());
         print!("{} ", contextual_val);
     }
     println!();
@@ -477,12 +479,9 @@ pub fn register_builtins(ctx: &mut EvalContext) {
 }
 
 pub fn register_builtin_macros(ctx: &mut EvalContext) {
-    let symbol_table = {
-        let symbol_table = ctx.symbol_table.clone();
-        symbol_table
-    };
+    
 
-    let mut symbol_table = symbol_table.write();
+    
     let current_env = ctx.env.clone();
     
     let if_sym_val = ctx.symbol_value("if");
@@ -502,27 +501,22 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
     let true_sym_val = ctx.symbol_value("true");
     let eq_sym_val = ctx.symbol_value("=");
 
-    let condition_sym = symbol_table.intern("condition");
-    let when_sym = symbol_table.intern("when");
-    let unless_sym = symbol_table.intern("unless");
-    let forms_sym = symbol_table.intern("forms");
-    let and_sym = symbol_table.intern("and");
-    let or_sym = symbol_table.intern("or");
-
-    let condition_sym_val = ValueRef::symbol(condition_sym);
-    let body_sym_val = ctx.symbol_value("body");
-    let forms_sym_val = ctx.symbol_value("forms");
-    let clauses_sym_val = ctx.symbol_value("clauses");
-    let name_sym_val = ctx.symbol_value("name");
-    let args_sym_val = ctx.symbol_value("args");
+    let condition_sym_val = ctx.symbol_value("condition");
+    let when_sym_val = ctx.symbol_value("when");
     let unless_sym_val = ctx.symbol_value("unless");
+    let forms_sym_val = ctx.symbol_value("forms");
     let and_sym_val = ctx.symbol_value("and");
     let or_sym_val = ctx.symbol_value("or");
-    let cond_sym_val = ctx.symbol_value("cond");
+
+    let condition_sym = ctx.get_symbol_id(condition_sym_val).unwrap();
+    let when_sym = ctx.get_symbol_id(when_sym_val).unwrap();
+    let unless_sym = ctx.get_symbol_id(unless_sym_val).unwrap();
+    let forms_sym = ctx.get_symbol_id(forms_sym_val).unwrap();
+    let and_sym = ctx.get_symbol_id(and_sym_val).unwrap();
+    let or_sym = ctx.get_symbol_id(or_sym_val).unwrap();
+
     
-    let defn_sym_val = ctx.symbol_value("defn");
-    let thread_first_sym_val = ctx.symbol_value("->");
-    let thread_last_sym_val = ctx.symbol_value("->>");
+    let body_sym_val = ctx.symbol_value("body");
     
     
     // when - expands to (if condition (do ...))
@@ -533,7 +527,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         params: vec![condition_sym],  
         is_variadic: true,       
         body: when_body,        
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
     
     let macro_value = ctx.macro_value(when_macro);
@@ -546,7 +540,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         params: vec![condition_sym],
         is_variadic: true,
         body: unless_body,
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
     let macro_value = ctx.macro_value(unless_macro);
     ctx.set_symbol(unless_sym, macro_value);
@@ -589,7 +583,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         params: vec![forms_sym],
         is_variadic: true,
         body: vec![and_body], // Single expansion expression
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let macro_value = ctx.macro_value(and_macro);
@@ -619,7 +613,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         params: vec![forms_sym],
         is_variadic: true,
         body: vec![or_body],
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let macro_value = ctx.macro_value(or_macro);
@@ -630,8 +624,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
 }
 
 pub fn register_complex_macros(ctx: &mut EvalContext) {
-    let symbol_table = ctx.symbol_table.clone();
-    let mut symbol_table = symbol_table.write();
+    
     let current_env = ctx.env.clone();
     
     // Pre-allocate all the symbols and values we'll need
@@ -647,11 +640,13 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
     let let_sym_val = ctx.symbol_value("let");
     let list_check_sym_val = ctx.symbol_value("list?");
 
-    // cond macro - recursive expansion
-    let cond_sym = symbol_table.intern("cond");
-    let clauses_sym = symbol_table.intern("clauses");
-    let clauses_sym_val = ValueRef::symbol(clauses_sym);
     let cond_sym_val = ctx.symbol_value("cond");
+    let clauses_sym_val = ctx.symbol_value("clauses");
+    // cond macro - recursive expansion
+    let cond_sym = ctx.get_symbol_id(cond_sym_val).unwrap();
+    let clauses_sym = ctx.get_symbol_id(clauses_sym_val).unwrap();
+    
+    
     
     // Build the macro body step by step to avoid nested ctx borrows
     let empty_check = ctx.list_value(vec![empty_sym_val.clone(), clauses_sym_val.clone()]);
@@ -679,21 +674,22 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         params: vec![clauses_sym],
         is_variadic: true,
         body: vec![cond_body],
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let cond_macro_val = ctx.macro_value(cond_macro);
     ctx.set_symbol(cond_sym, cond_macro_val);
 
     // defn macro - simple expansion
-    let defn_sym = symbol_table.intern("defn");
-    let name_sym = symbol_table.intern("name");
-    let args_sym = symbol_table.intern("args");
-    let body_sym = symbol_table.intern("body");
+    let defn_sym_val = ctx.symbol_value("defn");
+    let name_sym_val = ctx.symbol_value("name");
+    let args_sym_val = ctx.symbol_value("args");
+    let body_sym_val = ctx.symbol_value("body");
     
-    let name_sym_val = ValueRef::symbol(name_sym);
-    let args_sym_val = ValueRef::symbol(args_sym);
-    let body_sym_val = ValueRef::symbol(body_sym);
+    let defn_sym = ctx.get_symbol_id(defn_sym_val).unwrap();
+    let name_sym = ctx.get_symbol_id(name_sym_val).unwrap();
+    let args_sym = ctx.get_symbol_id(args_sym_val).unwrap();
+    let body_sym = ctx.get_symbol_id(body_sym_val).unwrap();
     
     // Build step by step
     let cons_args_body = ctx.list_value(vec![cons_sym_val.clone(), args_sym_val, body_sym_val]);
@@ -713,27 +709,29 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         params: vec![name_sym, args_sym],
         is_variadic: true,
         body: vec![defn_body],
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let defn_macro_val = ctx.macro_value(defn_macro);
     ctx.set_symbol(defn_sym, defn_macro_val);
 
     // -> (thread-first) macro
-    let thread_first_sym = symbol_table.intern("->");
-    let x_sym = symbol_table.intern("x");
-    let forms_sym = symbol_table.intern("forms");
-    let form_sym = symbol_table.intern("form");
-    let rest_forms_sym = symbol_table.intern("rest-forms");
-    let threaded_sym = symbol_table.intern("threaded");
+
     
-    let x_sym_val = ValueRef::symbol(x_sym);
-    let forms_sym_val = ValueRef::symbol(forms_sym);
-    let form_sym_val = ValueRef::symbol(form_sym);
-    let rest_forms_sym_val = ValueRef::symbol(rest_forms_sym);
-    let threaded_sym_val = ValueRef::symbol(threaded_sym);
+    let x_sym_val = ctx.symbol_value("x");
+    let forms_sym_val = ctx.symbol_value("forms");
+    let form_sym_val = ctx.symbol_value("form");
+    let rest_forms_sym_val = ctx.symbol_value("rest-forms");
+    let threaded_sym_val = ctx.symbol_value("threaded");
     
     let thread_first_sym_val = ctx.symbol_value("->");
+
+    let thread_first_sym = ctx.get_symbol_id(thread_first_sym_val).unwrap();
+    let x_sym = ctx.get_symbol_id(x_sym_val).unwrap();
+    let forms_sym = ctx.get_symbol_id(forms_sym_val).unwrap();
+    let form_sym = ctx.get_symbol_id(form_sym_val).unwrap();
+    let rest_forms_sym = ctx.get_symbol_id(rest_forms_sym_val).unwrap();
+    let threaded_sym = ctx.get_symbol_id(threaded_sym_val).unwrap();
     
     // Build all the sub-expressions step by step
     let empty_forms_check = ctx.list_value(vec![empty_sym_val.clone(), forms_sym_val.clone()]);
@@ -783,18 +781,17 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         params: vec![x_sym, forms_sym],
         is_variadic: true,
         body: vec![thread_first_body],
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let thread_first_macro_val = ctx.macro_value(thread_first_macro);
     ctx.set_symbol(thread_first_sym, thread_first_macro_val);
 
     // ->> (thread-last) macro - similar but threads as last argument
-    let thread_last_sym = symbol_table.intern("->>");
     let thread_last_sym_val = ctx.symbol_value("->>");
+    let thread_last_sym = ctx.get_symbol_id(thread_last_sym_val).unwrap();
     
     // ->> (thread-last) macro - similar but threads as last argument
-    let thread_last_sym = symbol_table.intern("->>");
     let thread_last_sym_val = ctx.symbol_value("->>");
     let concat_sym_val = ctx.symbol_value("concat"); // You'll need this function
 
@@ -841,7 +838,7 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         params: vec![x_sym, forms_sym],
         is_variadic: true,
         body: vec![thread_last_body],
-        env: current_env.clone(),
+        env: Arc::new(RwLock::new(Env::with_parent(current_env.clone()))),
     };
 
     let thread_last_macro_val = ctx.macro_value(thread_last_macro);

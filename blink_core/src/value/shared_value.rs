@@ -25,7 +25,7 @@ pub enum SharedValue {
 }
 
 impl SharedValue {
-    pub fn display_with_context(&self, f: &mut std::fmt::Formatter<'_>, context: &ValueContext) -> std::fmt::Result {
+    pub fn display_with_context(&self, f: &mut std::fmt::Formatter<'_>, context: ValueContext) -> std::fmt::Result {
         match self {
             SharedValue::List(value_refs) => {
                         write!(f, "(")?;
@@ -34,7 +34,7 @@ impl SharedValue {
                                 write!(f, " ")?;
                             }
                             // Create a ContextualValueRef to display nested values
-                            let contextual = ContextualValueRef::new(value_ref.clone(), &context);
+                            let contextual = ContextualValueRef::new(value_ref.clone(), context.clone());
                             write!(f, "{}", contextual)?;
                         }
                         write!(f, ")")
@@ -45,42 +45,25 @@ impl SharedValue {
                             if i > 0 {
                                 write!(f, " ")?;
                             }
-                            let contextual = ContextualValueRef::new(value_ref.clone(), &context);
+                            let contextual = ContextualValueRef::new(value_ref.clone(), context.clone());
                             write!(f, "{}", contextual)?;
                         }
                         write!(f, "]")
                     }
             SharedValue::Map(hash_map) => {
-                        write!(f, "{{")?;
-                        for (i, (k, v)) in hash_map.iter().enumerate() {
-                            if i > 0 {
-                                write!(f, " ")?;
-                            }
-                            let key_contextual = ContextualValueRef::new(k.clone(), &context);
-                            let val_contextual = ContextualValueRef::new(v.clone(), &context);
-                            write!(f, "{} {}", key_contextual, val_contextual)?;
-                        }
-                        write!(f, "}}")
+                write!(f, "{}", hash_map)
                     }
             SharedValue::Str(s) => write!(f, "\"{}\"", s),
             SharedValue::Future(_) => write!(f, "#<future>"),
             SharedValue::NativeFunction(_) => write!(f, "#<native-fn>"),
             SharedValue::Module(_) => write!(f, "#<module>"),
             SharedValue::Set(blink_hash_set) => {
-                write!(f, "#{{")?;  // Sets typically use #{...} notation
-                for (i, item) in blink_hash_set.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    let contextual = ContextualValueRef::new(item.clone(), &context);
-                    write!(f, "{}", contextual)?;
-                }
-                write!(f, "}}")
+                write!(f, "{}", blink_hash_set)
             },
             
             SharedValue::Error(blink_error) => {
                 write!(f, "#<error: ")?;
-                blink_error.error_type.display_with_context(f, context)?;
+                blink_error.error_type.display_with_context(f, &context)?;
                 write!(f, ": {}", blink_error.message)?;
                 write!(f, ">")
             },

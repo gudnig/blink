@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::atomic::{AtomicU64, Ordering}};
 
-use crate::{value::{FunctionHandle, FutureHandle}, ValueRef};
+use crate::{value::{FunctionHandle, FutureHandle, ValueRef}};
 
 pub struct HandleRegistry {
     functions: HashMap<u64, ValueRef>,

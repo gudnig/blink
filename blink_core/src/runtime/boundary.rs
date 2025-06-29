@@ -1,6 +1,6 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::collections::{HashMap, HashSet};
 
-use crate::{collections::ValueContext, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_keyword, pack_number, pack_symbol, unpack_immediate, ImmediateValue, IsolatedValue}, BlinkHashMap, BlinkHashSet, SharedValue, ValueRef};
+use crate::{collections::ValueContext, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue}, collections::{BlinkHashMap, BlinkHashSet}, value::{SharedValue, ValueRef}};
 
 
 
@@ -148,9 +148,6 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                     },
                 }
             },
-            
-            ValueRef::Nil => Ok(IsolatedValue::Nil),
-            
             _ => Err(format!("Unsupported value type for boundary crossing")),
         }
     }
@@ -158,94 +155,82 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
     fn alloc_from_isolated(&mut self, value: IsolatedValue) -> ValueRef {
         match value {
             IsolatedValue::Number(n) => {
-                ValueRef::Immediate(pack_number(n))
-            },
-            
+                        ValueRef::Immediate(pack_number(n))
+                    },
             IsolatedValue::Bool(b) => {
-                ValueRef::Immediate(pack_bool(b))
-            },
-            
-            IsolatedValue::Nil => ValueRef::Nil,
-            
+                        ValueRef::Immediate(pack_bool(b))
+                    },
             IsolatedValue::Symbol(s) => {
-                self.context.intern_symbol(&s)
-            },
-            
+                        self.context.intern_symbol(&s)
+                    },
             IsolatedValue::Keyword(k) => {
-                self.context.intern_keyword(&k)
-            },
-            
+                        self.context.intern_keyword(&k)
+                    },
             IsolatedValue::String(s) => {
-                let shared_value =  SharedValue::Str(s);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
-            
+                        let shared_value =  SharedValue::Str(s);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
             IsolatedValue::List(items) => {
-                let value_refs: Vec<ValueRef> = items.into_iter()
-                    .map(|item| self.alloc_from_isolated(item))
-                    .collect();
-                let shared_value = SharedValue::List(value_refs);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
-            
+                        let value_refs: Vec<ValueRef> = items.into_iter()
+                            .map(|item| self.alloc_from_isolated(item))
+                            .collect();
+                        let shared_value = SharedValue::List(value_refs);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
             IsolatedValue::Vector(items) => {
-                let value_refs: Vec<ValueRef> = items.into_iter()
-                    .map(|item| self.alloc_from_isolated(item))
-                    .collect();
-                let shared_value = SharedValue::Vector(value_refs);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
-            
+                        let value_refs: Vec<ValueRef> = items.into_iter()
+                            .map(|item| self.alloc_from_isolated(item))
+                            .collect();
+                        let shared_value = SharedValue::Vector(value_refs);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
             IsolatedValue::Map(map) => {
 
                 
-                let mut value_map = BlinkHashMap::new(ValueContext::new(self.context.shared_arena.clone()));
+                        let mut value_map = BlinkHashMap::new(ValueContext::new(self.context.shared_arena.clone()));
                 
-                for (k, v) in map {
-                    let key_ref = self.alloc_from_isolated(k);
-                    let val_ref = self.alloc_from_isolated(v);
-                    value_map.insert(key_ref, val_ref);
-                }
-                let shared_value = SharedValue::Map(value_map);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
-            
+                        for (k, v) in map {
+                            let key_ref = self.alloc_from_isolated(k);
+                            let val_ref = self.alloc_from_isolated(v);
+                            value_map.insert(key_ref, val_ref);
+                        }
+                        let shared_value = SharedValue::Map(value_map);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
             IsolatedValue::Set(set) => {
-                let mut value_set = BlinkHashSet::new(ValueContext::new(self.context.shared_arena.clone()));
-                for item in set {
-                    value_set.insert(self.alloc_from_isolated(item));
-                }
-                let shared_value = SharedValue::Set(value_set);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
-            
-            // Resolve handles back to original values:
+                        let mut value_set = BlinkHashSet::new(ValueContext::new(self.context.shared_arena.clone()));
+                        for item in set {
+                            value_set.insert(self.alloc_from_isolated(item));
+                        }
+                        let shared_value = SharedValue::Set(value_set);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
             IsolatedValue::Function(handle) => {
-                self.context.handle_registry.read().resolve_function(&handle)
-                    .unwrap_or(ValueRef::Nil)
-            },
-            
+                        self.context.handle_registry.read().resolve_function(&handle)
+                            .unwrap_or(ValueRef::Immediate(pack_nil()))
+                    },
             IsolatedValue::Macro(handle) => {
-                self.context.handle_registry.read().resolve_function(&handle)
-                    .unwrap_or(ValueRef::Nil)
-            },
-            
+                        self.context.handle_registry.read().resolve_function(&handle)
+                            .unwrap_or(ValueRef::Immediate(pack_nil()))
+                    },
             IsolatedValue::Future(handle) => {
-                self.context.handle_registry.read().resolve_future(&handle)
-                    .unwrap_or(ValueRef::Nil)
-            },
-            
+                        self.context.handle_registry.read().resolve_future(&handle)
+                            .unwrap_or(ValueRef::Immediate(pack_nil()))
+                    },
             IsolatedValue::Error(msg) => {
-                let error = BlinkError::eval(msg);
-                let shared_value = SharedValue::Error(error);
-                let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                shared_ref
-            },
+                        let error = BlinkError::eval(msg);
+                        let shared_value = SharedValue::Error(error);
+                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
+                        shared_ref
+                    },
+            IsolatedValue::Nil => {
+                ValueRef::Immediate(pack_nil())
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
 
@@ -6,6 +6,20 @@ use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
 pub struct BlinkHashMap {
     context: ValueContext,
     map: HashMap<ContextualValueRef, ValueRef>
+}
+
+impl Display for BlinkHashMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{{")?;
+        for (i, (k, v)) in self.map.iter().enumerate() {
+            if i > 0 {
+                write!(f, " ")?;
+            }
+            let v_contextual = ContextualValueRef::new(v.clone(), self.context.clone());
+            write!(f, "{} {}", k, v_contextual)?;
+        }
+        write!(f, "}}")
+    }
 }
 
 impl BlinkHashMap {
@@ -47,6 +61,7 @@ impl BlinkHashMap {
         let contextual_key = ContextualValueRef::new(*key, self.context.clone());
         self.map.contains_key(&contextual_key)
     }
+
 
     // Standard interface
     pub fn len(&self) -> usize { self.map.len() }

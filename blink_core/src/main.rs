@@ -8,12 +8,8 @@ mod telemetry;
 mod value;
 mod module;
 mod future;
-mod async_context;
-mod goroutine;
-mod metadata;
-mod value_ref;
-mod shared_arena;
-mod symbol_table;
+mod collections;
+mod runtime;
 
 #[tokio::main]
 async fn main() {

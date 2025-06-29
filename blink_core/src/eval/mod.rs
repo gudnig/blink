@@ -13,7 +13,8 @@ use parking_lot::RwLock;
 use crate::{
     error::BlinkError, eval::special_forms::{
             eval_and, eval_apply, eval_def, eval_def_reader_macro, eval_deref, eval_do, eval_fn, eval_go, eval_if, eval_imp, eval_let, eval_load, eval_macro, eval_mod, eval_or, eval_quasiquote, eval_quote, eval_try
-        }, runtime::{ContextualBoundary, ValueBoundary}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, IsolatedValue, Macro, SharedValue, UserDefinedFn, ValueRef}, Env
+        }, runtime::{ContextualBoundary, ValueBoundary}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, IsolatedValue, Macro, SharedValue, UserDefinedFn, ValueRef}
+        , env::Env
 };
 
 macro_rules! try_eval {
@@ -82,21 +83,9 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                     EvalResult::Value(expr)
                 }
                 ImmediateValue::Symbol(symbol_id) => {
-                    // Symbol lookup - need to resolve symbol ID to name first
-                    let symbol_name = {
-                        ctx.symbol_table
-                            .read()
-                            .get_symbol(symbol_id)
-                            .map(|s| s.to_string())
-                    };
-
-                    if let Some(name) = symbol_name {
-                        match ctx.resolve_symbol(&name) {
-                            Ok(val) => EvalResult::Value(val),
-                            Err(err) => EvalResult::Value(ctx.error_value(err)),
-                        }
-                    } else {
-                        EvalResult::Value(ctx.eval_error("Invalid symbol ID"))
+                    match ctx.resolve_symbol(symbol_id) {
+                        Ok(val) => EvalResult::Value(val),
+                        Err(err) => EvalResult::Value(ctx.error_value(err)),
                     }
                 }
             }
@@ -177,7 +166,7 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
                 _ => {
                     // Not a special form - treat as function call
                     // This is where symbol resolution happens!
-                    return eval_symbol_and_call(symbol_name.as_str(), &list[1..], ctx);
+                    return eval_symbol_and_call(symbol_id, &list[1..], ctx);
                 }
             }
         }
@@ -187,9 +176,9 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     eval_function_call_inline(list.clone(), 0, Vec::new(), None, ctx)
 }
 
-fn eval_symbol_and_call(symbol_name: &str, args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
+fn eval_symbol_and_call(symbol_id: u32, args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // Resolve symbol to actual function
-    let function_val = match ctx.resolve_symbol(symbol_name) {
+    let function_val = match ctx.resolve_symbol(symbol_id) {
         Ok(val) => val,
         Err(e) => return EvalResult::Value(ctx.error_value(e)),
     };
@@ -350,10 +339,7 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
 
             match func.as_ref() {
                 SharedValue::NativeFunction(f) => {
-                    match f.call(args, ctx) {
-                        Ok(v) => EvalResult::Value(v),
-                        Err(e) => EvalResult::Value(ctx.error_value(e)),
-                    }
+                    f.call(args, ctx)
                 },
 
                 // destructuring the macro

@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
-
-use crate::{collections::{ContextualValueRef, ValueContext}, value::{  SourcePos, SourceRange, ValueRef}};
+use crate::collections::{ContextualValueRef, ValueContext};
+use crate::value::{  SourcePos, SourceRange, ValueRef};
 
 #[derive(Debug, Clone)]
 pub struct BlinkError {

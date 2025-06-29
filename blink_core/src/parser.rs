@@ -1,6 +1,14 @@
+use parking_lot::RwLock;
+
 use crate::error::{BlinkError, ParseErrorType};
+use crate::eval::EvalContext;
+use crate::runtime::SymbolTable;
 use crate::value::{SourcePos, SourceRange, ParsedValue};
+use crate::env::Env;
+use crate::value::ValueRef;
 use std::collections::HashMap;
+use std::sync::Arc;
+
 
 pub struct ReaderContext {
     pub reader_macros: HashMap<String, u32>, // prefix -> symbol_id
@@ -82,7 +90,7 @@ pub fn tokenize_at(
     Ok(tokens)
 }
 
-pub fn parse_symbol_token(token: &str, symbol_table: &mut dyn SymbolTableTrait) -> u32 {
+pub fn parse_symbol_token(token: &str, symbol_table: &mut SymbolTable) -> u32 {
     if let Some((module_part, symbol_part)) = token.split_once('/') {
         // Qualified symbol like "math/add"
         let module_id = symbol_table.intern(module_part);
@@ -100,7 +108,7 @@ pub trait SymbolTableTrait {
     fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32;
 }
 
-pub fn atom(token: &str, pos: Option<SourcePos>, symbol_table: &mut dyn SymbolTableTrait) -> ParsedValue {
+pub fn atom(token: &str, pos: Option<SourcePos>, symbol_table: &mut SymbolTable) -> ParsedValue {
     if token.starts_with('"') && token.ends_with('"') {
         ParsedValue::String(token[1..token.len() - 1].to_string())
     } else if let Ok(n) = token.parse::<f64>() {
@@ -128,7 +136,7 @@ fn apply_reader_macro(symbol_id: u32, form: ParsedValue) -> ParsedValue {
 pub fn parse(
     tokens: &mut Vec<(String, SourcePos)>,
     reader_ctx: &ReaderContext,
-    symbol_table: &mut dyn SymbolTableTrait,
+    symbol_table: &mut SymbolTable,
 ) -> Result<ParsedValue, BlinkError> {
     if tokens.is_empty() {
         return Err(BlinkError::unexpected_token("EOF", SourcePos { line: 0, col: 0 }));
@@ -169,32 +177,30 @@ pub fn parse(
         }
 
         "{" => {
-            let mut entries: Vec<ParsedValue> = Vec::new();
+            let mut pairs: Vec<(ParsedValue, ParsedValue)> = Vec::new();
             
-            while let Some((t, _next_pos)) = tokens.first() {
+            while let Some((t, next_pos)) = tokens.first() {
                 if t == "}" {
                     tokens.remove(0); // consume '}'
-                    
-                    // Convert entries to key-value pairs
-                    if entries.len() % 2 != 0 {
-                        let pos = SourceRange { start: start.clone(), end: start };
-                        return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", pos));
-                    }
-                    
-                    let pairs: Vec<(ParsedValue, ParsedValue)> = entries
-                        .chunks(2)
-                        .map(|pair| (pair[0].clone(), pair[1].clone()))
-                        .collect();
-                    
                     return Ok(ParsedValue::Map(pairs));
                 }
                 
-                // Parse one element (key or value)
-                let element = parse(tokens, reader_ctx, symbol_table)?;
-                entries.push(element);
+                // Parse key
+                let key = parse(tokens, reader_ctx, symbol_table)?;
+                
+                // Ensure we have a value
+                if tokens.is_empty() || tokens.first().map(|(t, _)| t) == Some(&"}".to_string()) {
+                    let pos = SourceRange { start: start.clone(), end: start };
+                    return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", pos));
+                }
+                
+                // Parse value
+                let value = parse(tokens, reader_ctx, symbol_table)?;
+                
+                pairs.push((key, value));
             }
             
-            // If we get here, we never found the closing }
+            // Unclosed map
             let pos = SourceRange { start: start.clone(), end: start };
             Err(BlinkError::parse_unclosed_delimiter("Unclosed map literal", "}", pos))
         }
@@ -240,8 +246,8 @@ pub fn parse(
 
 pub fn parse_all(
     code: &str, 
-    reader_ctx: &ReaderContext,
-    symbol_table: &mut dyn SymbolTableTrait
+    reader_ctx: &mut ReaderContext,
+    symbol_table: &mut SymbolTable
 ) -> Result<Vec<ParsedValue>, BlinkError> {
     let mut tokens = tokenize(code)?;
     let mut forms = Vec::new();
@@ -252,4 +258,42 @@ pub fn parse_all(
     }
 
     Ok(forms)
+}
+
+fn build_simple_macro(name: &str, ctx: &mut EvalContext) -> u32 {
+    let symbol_id = ctx.intern_symbol(name);
+    let symbol_id = ctx.get_symbol_id(symbol_id).unwrap();
+    let list = ctx.list_value(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)]);
+    let body = vec![list];
+    let func = ctx.user_defined_function_value(vec![symbol_id], body, Arc::new(RwLock::new(Env::new())));
+    ctx.set_symbol(symbol_id, func);
+    symbol_id
+
+}
+
+pub fn preload_builtin_reader_macros(ctx: &mut EvalContext) {
+    
+    let quote = build_simple_macro("quo", ctx);
+    let quasiquote = build_simple_macro("quasiquote", ctx);
+    let unquote = build_simple_macro("unquote", ctx);
+    let unquote_splicing = build_simple_macro("unquote-splicing", ctx);
+    let deref = build_simple_macro("deref", ctx);
+
+    let mut rm = ctx.reader_macros.write();
+
+    // Single character reader macros
+    rm.reader_macros
+        .insert("\'".into(), quote);
+    rm.reader_macros
+        .insert("`".into(), quasiquote);
+    rm.reader_macros
+        .insert("~".into(), unquote);
+
+    rm.reader_macros
+    .insert("~@".into(), unquote_splicing);
+
+    rm.reader_macros
+    .insert("@".into(), deref);
+
+    
 }

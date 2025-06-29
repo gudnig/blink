@@ -137,7 +137,7 @@ impl ModuleRegistry {
 
 #[derive(Debug, Clone)]
 pub enum ImportType {
-    File(u32),                       // (imp "module-name") -> module name as symbol ID
+    File(String),                       // (imp "module-name") -> module name as symbol ID
     Symbols { 
         symbols: Vec<u32>,           // Symbol IDs to import
         module: u32,                 // Module name as symbol ID

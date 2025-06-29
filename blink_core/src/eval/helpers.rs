@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{pack_bool, unpack_immediate, ImmediateValue, Macro, ModuleRef, NativeFn, SharedValue, UserDefinedFn, ValueRef}, Env};
+use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{pack_bool, unpack_immediate, ImmediateValue, Macro, ModuleRef, NativeFn, SharedValue, UserDefinedFn, ValueRef}};
+use crate::env::Env;
 
 impl EvalContext {
 
@@ -46,6 +47,16 @@ impl EvalContext {
                 return Some(n);
             }
         } 
+        None
+    }
+
+    pub fn get_symbol_id(&self, val: ValueRef) -> Option<u32> {
+        if let ValueRef::Immediate(packed) = val {
+            let unpacked = unpack_immediate(packed);
+            if let ImmediateValue::Symbol(id) = unpacked {
+                return Some(id);
+            }
+        }
         None
     }
 

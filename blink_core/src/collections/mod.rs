@@ -37,16 +37,16 @@ impl ValueContext {
 #[derive(Clone, Debug)]
 pub struct ContextualValueRef {
     value: ValueRef,
-    context: &ValueContext,
+    context: ValueContext,
 }
 
 impl ContextualValueRef {
-    pub fn new(value: ValueRef, context: &ValueContext) -> Self {
+    pub fn new(value: ValueRef, context: ValueContext) -> Self {
         Self { value, context }
     }
 
     pub fn value(&self) -> &ValueRef { &self.value }
-    pub fn context(&self) -> &ValueContext { &self.context }
+    pub fn context(&self) -> ValueContext { self.context.clone() }
     pub fn into_value(self) -> ValueRef { self.value }
 }
 
@@ -76,8 +76,13 @@ impl Display for ContextualValueRef {
             }
             ValueRef::Gc(gc_ptr) => todo!(),
             ValueRef::Shared(index) => {
-                let shared_val = self.context.arena().read().get(index);
-                write!(f, "{}", shared_val)
+                let arena = self.context.arena().read();
+                let shared_val = arena.get(index);
+                if let Some(shared_val) = shared_val {
+                    shared_val.display_with_context(f,self.context.clone())
+                } else {
+                    write!(f, "nil")
+                }
             }
         }
         
