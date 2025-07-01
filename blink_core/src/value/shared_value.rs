@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, fmt::Display, hash::{Hash, Hasher}};
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet, ContextualValueRef, ValueContext}, error::BlinkError, future::BlinkFuture, value::{Macro, ModuleRef, NativeFn, UserDefinedFn, ValueRef} };
+use crate::{collections::{BlinkHashMap, BlinkHashSet, ContextualValueRef, ValueContext}, error::BlinkError, eval::{EvalContext, EvalResult}, future::BlinkFuture, value::{IsolatedValue, Macro, ModuleRef, NativeFn, UserDefinedFn, ValueRef} };
 
 #[derive(Debug)]
 pub enum SharedValue {
@@ -167,15 +167,16 @@ impl SharedValue {
             }
             SharedValue::NativeFunction(f) => {
                 "native-func".hash(state);
-                // Function pointers can be hashed by address
                 match f {
-                    NativeFn::Isolated(f) => {
+                    NativeFn::Isolated(func) => {
                         "isolated-native-func".hash(state);
-                        f.hash(state);
+                        // Hash by memory address since we can't hash the trait object
+                        (func.as_ref() as *const dyn Fn(Vec<IsolatedValue>) -> Result<IsolatedValue, String> as *const () as usize).hash(state);
                     }
-                    NativeFn::Contextual(f) => {
-                        "contextual-native-func".hash(state);   
-                        f.hash(state);
+                    NativeFn::Contextual(func) => {
+                        "contextual-native-func".hash(state);
+                        // Hash by memory address
+                        (func.as_ref() as *const dyn Fn(Vec<ValueRef>, &mut EvalContext) -> EvalResult as *const () as usize).hash(state);
                     }
                 }
             }

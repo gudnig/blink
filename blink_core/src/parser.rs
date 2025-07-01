@@ -3,7 +3,7 @@ use parking_lot::RwLock;
 use crate::error::{BlinkError, ParseErrorType};
 use crate::eval::EvalContext;
 use crate::runtime::SymbolTable;
-use crate::value::{SourcePos, SourceRange, ParsedValue};
+use crate::value::{ParsedValue, ParsedValueWithPos, SourcePos, SourceRange};
 use crate::env::Env;
 use crate::value::ValueRef;
 use std::collections::HashMap;
@@ -108,104 +108,118 @@ pub trait SymbolTableTrait {
     fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32;
 }
 
-pub fn atom(token: &str, pos: Option<SourcePos>, symbol_table: &mut SymbolTable) -> ParsedValue {
-    if token.starts_with('"') && token.ends_with('"') {
-        ParsedValue::String(token[1..token.len() - 1].to_string())
-    } else if let Ok(n) = token.parse::<f64>() {
-        ParsedValue::Number(n)
-    } else if token == "true" {
-        ParsedValue::Bool(true)
-    } else if token == "false" {
-        ParsedValue::Bool(false)
-    } else if token.starts_with(':') {
-        let keyword_id = symbol_table.intern(&token[1..]);
-        ParsedValue::Keyword(keyword_id)
-    } else {
-        let symbol_id = parse_symbol_token(token, symbol_table);
-        ParsedValue::Symbol(symbol_id)
-    }
-}
 
-fn apply_reader_macro(symbol_id: u32, form: ParsedValue) -> ParsedValue {
-    ParsedValue::List(vec![
-        ParsedValue::Symbol(symbol_id),
-        form
-    ])
+fn apply_reader_macro(symbol_id: u32, form: ParsedValueWithPos) -> ParsedValueWithPos {
+    let pos = form.pos;
+    let symbol = ParsedValueWithPos { value: ParsedValue::Symbol(symbol_id), pos: pos };
+    ParsedValueWithPos {
+        value: ParsedValue::List(vec![symbol, form]),
+        pos: pos,
+    }
+    
 }
 
 pub fn parse(
     tokens: &mut Vec<(String, SourcePos)>,
     reader_ctx: &ReaderContext,
     symbol_table: &mut SymbolTable,
-) -> Result<ParsedValue, BlinkError> {
+) -> Result<ParsedValueWithPos, BlinkError> {
     if tokens.is_empty() {
         return Err(BlinkError::unexpected_token("EOF", SourcePos { line: 0, col: 0 }));
     }
 
-    let (token, start) = tokens.remove(0);
+    let (token, start_pos) = tokens.remove(0);
 
     match token.as_str() {
         "(" => {
             let mut list = Vec::new();
+            let mut end_pos = start_pos;
             
-            while let Some((tok, _next_pos)) = tokens.first() {
+            while let Some((tok, next_pos)) = tokens.first() {
                 if tok == ")" {
+                    end_pos = *next_pos;
                     tokens.remove(0); // consume ')'
                     break;
                 }
                 let item = parse(tokens, reader_ctx, symbol_table)?;
+                // Update end position to the last item's end
+                if let Some(item_end) = item.pos.as_ref().map(|r| r.end) {
+                    end_pos = item_end;
+                }
                 list.push(item);
             }
 
-            Ok(ParsedValue::List(list))
+            let range = SourceRange { start: start_pos, end: end_pos };
+            Ok(ParsedValueWithPos::new(ParsedValue::List(list), Some(range)))
         }
 
         "[" => {
             let mut elements = Vec::new();
+            let mut end_pos = start_pos;
             
-            while let Some((t, _next_pos)) = tokens.first() {
+            while let Some((t, next_pos)) = tokens.first() {
                 if t == "]" {
+                    end_pos = *next_pos;
                     tokens.remove(0); // consume ']'
-                    return Ok(ParsedValue::Vector(elements));
+                    
+                    let range = SourceRange { start: start_pos, end: end_pos };
+                    return Ok(ParsedValueWithPos::new(ParsedValue::Vector(elements), Some(range)));
                 }
                 let item = parse(tokens, reader_ctx, symbol_table)?;
+                if let Some(item_end) = item.pos.as_ref().map(|r| r.end) {
+                    end_pos = item_end;
+                }
                 elements.push(item); 
             }
             
-            let pos = SourceRange { start: start.clone(), end: start };
+            let pos = SourceRange { start: start_pos, end: end_pos };
             Err(BlinkError::parse_unclosed_delimiter("Unclosed vector literal", "[", pos))
         }
 
         "{" => {
-            let mut pairs: Vec<(ParsedValue, ParsedValue)> = Vec::new();
+            let mut pairs: Vec<(ParsedValueWithPos, ParsedValueWithPos)> = Vec::new();
+            let mut end_pos = start_pos;
             
             while let Some((t, next_pos)) = tokens.first() {
                 if t == "}" {
+                    end_pos = *next_pos;
                     tokens.remove(0); // consume '}'
-                    return Ok(ParsedValue::Map(pairs));
+                    
+                    let range = SourceRange { start: start_pos, end: end_pos };
+                    return Ok(ParsedValueWithPos::new(ParsedValue::Map(pairs), Some(range)));
                 }
                 
                 // Parse key
                 let key = parse(tokens, reader_ctx, symbol_table)?;
+                if let Some(key_end) = key.pos.as_ref().map(|r| r.end) {
+                    end_pos = key_end;
+                }
                 
                 // Ensure we have a value
                 if tokens.is_empty() || tokens.first().map(|(t, _)| t) == Some(&"}".to_string()) {
-                    let pos = SourceRange { start: start.clone(), end: start };
+                    let pos = SourceRange { start: start_pos, end: end_pos };
                     return Err(BlinkError::parse_invalid_number("Map literal must have even number of elements (key-value pairs)", pos));
                 }
                 
                 // Parse value
                 let value = parse(tokens, reader_ctx, symbol_table)?;
+                if let Some(value_end) = value.pos.as_ref().map(|r| r.end) {
+                    end_pos = value_end;
+                }
                 
                 pairs.push((key, value));
             }
             
             // Unclosed map
-            let pos = SourceRange { start: start.clone(), end: start };
+            let pos = SourceRange { start: start_pos, end: end_pos };
             Err(BlinkError::parse_unclosed_delimiter("Unclosed map literal", "}", pos))
         }
 
-        ")" | "]" | "}" => Err(BlinkError::unexpected_token(&token, start)),
+        ")" | "]" | "}" => {
+            let end_pos = calculate_token_end(&token, &start_pos);
+            let range = SourceRange { start: start_pos, end: end_pos };
+            Err(BlinkError::unexpected_token(&token, start_pos).with_pos(Some(range)))
+        }
 
         _ => {
             // Check for reader macros
@@ -227,7 +241,7 @@ pub fn parse(
             
                 let target_form = if rest.is_empty() {
                     if tokens.is_empty() {
-                        let pos = SourceRange { start: start.clone(), end: start };
+                        let pos = SourceRange { start: start_pos, end: start_pos };
                         return Err(BlinkError::parse_unexpected_eof(pos));
                     }
                     parse(tokens, reader_ctx, symbol_table)?
@@ -235,20 +249,73 @@ pub fn parse(
                     let mut rest_tokens = tokenize(rest)?;
                     parse(&mut rest_tokens, reader_ctx, symbol_table)?
                 };
-            
-                return Ok(apply_reader_macro(symbol_id, target_form));
+
+                let end_pos = target_form.pos.as_ref()
+                    .map(|r| r.end)
+                    .unwrap_or_else(|| calculate_token_end(&token, &start_pos));
+
+                let expanded = apply_reader_macro(symbol_id, target_form);
+                
+                return Ok(expanded);
             }
             
-            Ok(atom(&token, Some(start), symbol_table))
+            Ok(atom_with_pos(&token, start_pos, symbol_table))
         }
     }
+}
+
+// Helper function to calculate where a token ends
+fn calculate_token_end(token: &str, start_pos: &SourcePos) -> SourcePos {
+    if token.contains('\n') {
+        // Handle multi-line tokens (like multi-line strings)
+        let lines: Vec<&str> = token.split('\n').collect();
+        SourcePos {
+            line: start_pos.line + lines.len() - 1,
+            col: if lines.len() > 1 {
+                lines.last().unwrap().len() + 1
+            } else {
+                start_pos.col + token.len()
+            },
+        }
+    } else {
+        SourcePos {
+            line: start_pos.line,
+            col: start_pos.col + token.len(),
+        }
+    }
+}
+
+// Updated atom function to return ParsedValueWithPos
+fn atom_with_pos(token: &str, start_pos: SourcePos, symbol_table: &mut SymbolTable) -> ParsedValueWithPos {
+    let end_pos = calculate_token_end(token, &start_pos);
+    let range = Some(SourceRange { start: start_pos, end: end_pos });
+
+    let value = if token.starts_with('"') && token.ends_with('"') {
+        ParsedValue::String(token[1..token.len() - 1].to_string())
+    } else if let Ok(n) = token.parse::<f64>() {
+        ParsedValue::Number(n)
+    } else if token == "true" {
+        ParsedValue::Bool(true)
+    } else if token == "false" {
+        ParsedValue::Bool(false)
+    } else if token == "nil" {
+        ParsedValue::Nil
+    } else if token.starts_with(':') {
+        let id = symbol_table.intern(&token[1..]);
+        ParsedValue::Keyword(id)
+    } else {
+        let id = symbol_table.intern(token);
+        ParsedValue::Symbol(id)
+    };
+
+    ParsedValueWithPos::new(value, range)
 }
 
 pub fn parse_all(
     code: &str, 
     reader_ctx: &mut ReaderContext,
     symbol_table: &mut SymbolTable
-) -> Result<Vec<ParsedValue>, BlinkError> {
+) -> Result<Vec<ParsedValueWithPos>, BlinkError> {
     let mut tokens = tokenize(code)?;
     let mut forms = Vec::new();
 

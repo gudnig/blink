@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
 
-use crate::{error::BlinkError, module::ModuleRegistry, parser::ReaderContext, runtime::{AsyncContext, HandleRegistry, SharedArena, SymbolTable, TokioGoroutineScheduler, ValueMetadataStore}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, ModuleRef, ParsedValue, SharedValue, SourceRange, ValueRef}};
+use crate::{collections::{ContextualValueRef, ValueContext}, error::BlinkError, module::ModuleRegistry, parser::ReaderContext, runtime::{AsyncContext, HandleRegistry, SharedArena, SymbolTable, TokioGoroutineScheduler, ValueMetadataStore}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, ModuleRef, ParsedValue, ParsedValueWithPos, SharedValue, SourceRange, ValueRef}};
 use crate::env::Env;
 
 #[derive(Clone)]
@@ -26,8 +26,16 @@ pub struct EvalContext {
 
 impl EvalContext {
 
-    pub fn alloc_parsed_value(&mut self, parsed: ParsedValue) -> ValueRef {
-        match parsed {
+    pub fn get_value_context(&self) -> ValueContext {
+        ValueContext::new(self.shared_arena.clone())
+    }
+
+    pub fn get_contextual_value(&self, value: ValueRef) -> ContextualValueRef {
+        ContextualValueRef::new(value, self.get_value_context())
+    }
+
+    pub fn alloc_parsed_value(&mut self, parsed: ParsedValueWithPos) -> ValueRef {
+        let value_ref = match parsed.value {
             // Immediate values - pack directly
             ParsedValue::Number(n) => ValueRef::number(n),
             ParsedValue::Bool(b) => ValueRef::boolean(b),
@@ -71,7 +79,13 @@ impl EvalContext {
                 self.map_value(value_pairs)
                 
             }
+        };
+
+        if let (Some(id), Some(pos)) = (value_ref.get_or_create_id(), parsed.pos) {
+            self.value_metadata.write().set_position(id, pos);
         }
+
+        value_ref
     }
     
     pub fn resolve_module_symbol(&self, module_alias: u32, symbol: u32) -> Result<ValueRef, BlinkError> {
@@ -177,7 +191,7 @@ impl EvalContext {
 }
 
 impl EvalContext {
-    pub fn new(parent: Arc<RwLock<Env>>) -> Self {
+    pub fn new(parent: Arc<RwLock<Env>>, symbol_table: Arc<RwLock<SymbolTable>>) -> Self {
         EvalContext {
             global_env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
             env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
@@ -186,7 +200,7 @@ impl EvalContext {
             module_registry: Arc::new(RwLock::new(ModuleRegistry::new())),
             value_metadata: Arc::new(RwLock::new(ValueMetadataStore::new())),
             current_file: None,
-            symbol_table: Arc::new(RwLock::new(SymbolTable::new())),
+            symbol_table: symbol_table,
             tracing_enabled: false,
             reader_macros: Arc::new(RwLock::new(ReaderContext::new())),
             file_to_modules: Arc::new(HashMap::new()),
@@ -202,7 +216,9 @@ impl EvalContext {
         value.type_tag(&arena).to_string()
     }
 
-    
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.goroutine_scheduler.runtime  // assuming it has this field
+    }
 
 
     pub fn intern_symbol(&self, name: &str) -> ValueRef {

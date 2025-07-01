@@ -22,13 +22,22 @@ pub enum ValueRef {
     Shared(Index),
 }
 
-pub type IsolatedNativeFn = fn(Vec<IsolatedValue>) -> Result<IsolatedValue, String>;
-pub type ContextualNativeFn = fn(Vec<ValueRef>, &mut EvalContext) -> EvalResult;
+pub type IsolatedNativeFn = Box<dyn Fn(Vec<IsolatedValue>) -> Result<IsolatedValue, String> + Send + Sync>;
+pub type ContextualNativeFn = Box<dyn Fn(Vec<ValueRef>, &mut EvalContext) -> EvalResult + Send + Sync>;
 
-#[derive(Debug)]
+
 pub enum NativeFn {
     Isolated(IsolatedNativeFn),
     Contextual(ContextualNativeFn),
+}
+
+impl std::fmt::Debug for NativeFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NativeFn::Isolated(_) => write!(f, "NativeFn::Isolated(<function>)"),
+            NativeFn::Contextual(_) => write!(f, "NativeFn::Contextual(<function>)"),
+        }
+    }
 }
 
 impl NativeFn {

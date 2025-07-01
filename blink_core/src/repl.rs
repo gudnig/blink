@@ -3,7 +3,8 @@ use crate::env::Env;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 
 use crate::parser::{parse, tokenize, ReaderContext};
-use crate::value::{ParsedValue, ValueRef};
+use crate::runtime::SymbolTable;
+use crate::value::{ParsedValue, ParsedValueWithPos, ValueRef};
 use crate::value::SharedValue;
 
 use parking_lot::RwLock;
@@ -27,9 +28,9 @@ pub async fn start_repl() {
 
     let global_env = Arc::new(RwLock::new(Env::new()));
 
-    
+    let symbol_table = Arc::new(RwLock::new(SymbolTable::new()));
 
-    let mut ctx = EvalContext::new(global_env.clone());
+    let mut ctx = EvalContext::new(global_env.clone(), symbol_table.clone());
     {
         crate::native_functions::register_builtins(&mut ctx);
         crate::native_functions::register_builtin_macros(&mut ctx);
@@ -48,7 +49,7 @@ pub async fn start_repl() {
         match read_multiline(&mut rl, &mut ctx) {
             
             Ok(parsed) => {
-                match parsed {
+                match parsed.value {
                     ParsedValue::Symbol(s) => {
                         let name = ctx.get_symbol_name_from_id(s);
                         if let Some(name) = name {
@@ -143,7 +144,7 @@ enum ReadError {
 pub fn read_multiline(
     rl: &mut Editor<(), FileHistory>,
     ctx: &mut EvalContext,
-) -> Result<ParsedValue, ReadError> {
+) -> Result<ParsedValueWithPos, ReadError> {
     let mut lines = Vec::new();
 
     loop {
@@ -167,7 +168,7 @@ pub fn read_multiline(
 }
 
 fn run_line(
-    parsed: ParsedValue,
+    parsed: ParsedValueWithPos,
     ctx: &mut EvalContext,
 ) -> EvalResult {
 

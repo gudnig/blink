@@ -1,8 +1,9 @@
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc};
 
+use libloading::Library;
 use parking_lot::RwLock;
 
-use crate::{runtime::AsyncContext, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, value::{unpack_immediate, ImmediateValue, Macro, ModuleRef, SharedValue, UserDefinedFn, ValueRef}, env::Env};
+use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Macro, ModuleRef, Plugin, SharedValue, UserDefinedFn, ValueRef}};
 
 fn require_arity(args: &[ValueRef], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {
@@ -352,7 +353,6 @@ pub fn eval_apply(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     };
     eval_func(func, list_items, ctx)
 }
-
 fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -367,14 +367,14 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         None => return EvalResult::Value(ctx.eval_error("load-native expects a string")),
     };
 
-    let ext = if cfg!(target_os = "macos") { "dylib" } 
-              else if cfg!(target_os = "windows") { "dll" } 
-              else { "so" };
+    let ext = if cfg!(target_os = "macos") { "dylib" }
+    else if cfg!(target_os = "windows") { "dll" }
+    else { "so" };
 
     let filename = format!("native/lib{}.{}", libname, ext);
     let lib_path = PathBuf::from(&filename);
-    let lib_symbol_id = ctx.intern_symbol(&libname); // Returns valueRef
-    let lib_symbol_id = ctx.get_symbol_id(lib_symbol_id).unwrap(); // Change valueRef to u32 symbol representation
+    let lib_symbol_id = ctx.intern_symbol(&libname);
+    let lib_symbol_id = ctx.get_symbol_id(lib_symbol_id).unwrap();
 
     // Remove existing module if it exists
     if ctx.module_registry.read().get_module(lib_symbol_id).is_some() {
@@ -389,62 +389,60 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         }
     };
 
-    // Try new registration function first
-    match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
-        Ok(register_with_exports) => {
-            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
-            let exported_names = unsafe { register_with_exports(&mut *module_env.write()) };
-            
-            // Convert exported names to symbol IDs
-            let mut exports_set = HashSet::new();
-            for name in exported_names {
-                let symbol_id = ctx.symbol_table.write().intern(&name);
-                exports_set.insert(symbol_id);
+    // Load using new Plugin system
+    let plugin_register: libloading::Symbol<extern "C" fn() -> Plugin> = unsafe {
+        match lib.get(b"blink_register") {
+            Ok(register) => register,
+            Err(e) => {
+                return EvalResult::Value(ctx.eval_error(&format!("Plugin '{}' missing blink_register function: {}", filename, e)));
             }
-            
-            let module = Module {
-                source: ModuleSource::NativeDylib(lib_path.clone()),
-                exports: exports_set.clone(),
-                env: module_env,
-                ready: true,
-                name: lib_symbol_id,
-            };
-            ctx.module_registry.write().register_module(module);
-        },
-        Err(_) => {
-            // Fall back to old registration
-            let register: libloading::Symbol<unsafe extern "C" fn(&mut Env)> = unsafe {
-                match lib.get(b"blink_register") {
-                    Ok(register) => register,
-                    Err(e) => {
-                        return EvalResult::Value(ctx.eval_error(&format!("Failed to find registration function in '{}': {}", filename, e)));
-                    }
-                }
-            };
-            
-            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
-            unsafe { register(&mut *module_env.write()) };
-            
-            // Extract exports from environment - need to convert to symbol IDs
-            let exports = extract_env_symbols(&module_env);
-            let mut exports_set = HashSet::new();
-            for symbol_id in exports {
-                exports_set.insert(symbol_id);
-            }
-            
-            let module = Module {
-                name: lib_symbol_id,
-                source: ModuleSource::NativeDylib(lib_path.clone()),
-                exports: exports_set,
-                env: module_env,
-                ready: true,
-            };
-            ctx.module_registry.write().register_module(module);
-            
         }
     };
 
+    let plugin = plugin_register();
+    load_plugin_as_module(plugin, lib_symbol_id, lib_path, lib, ctx)
+}
+
+fn load_plugin_as_module(
+    plugin: Plugin, 
+    lib_symbol_id: u32,
+    lib_path: PathBuf,
+    lib: Library,
+    ctx: &mut EvalContext
+) -> EvalResult {
+    use std::collections::HashSet;
+
+    // Create module environment
+    let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+    
+    // Register each function in the module environment
+    let mut exports_set = HashSet::new();
+    for (func_name, native_fn) in plugin.functions {
+        // Convert function name to symbol ID for exports
+        
+        let func_symbol = ctx.symbol_value(&func_name);
+        let func_symbol_id = ctx.get_symbol_id(func_symbol).unwrap();
+        exports_set.insert(func_symbol_id);
+        
+        // Create ValueRef that wraps the NativeFn
+        let function_value = ctx.native_function_value(native_fn);
+        
+        // Set in environment
+        module_env.write().set(func_symbol_id, function_value);
+    }
+
+    // Create and register the module
+    let module = Module {
+        name: lib_symbol_id,
+        source: ModuleSource::NativeDylib(lib_path.clone()),
+        exports: exports_set,
+        env: module_env,
+        ready: true,
+    };
+
+    ctx.module_registry.write().register_module(module);
     ctx.module_registry.write().store_native_library(lib_path, lib);
+    
     EvalResult::Value(ctx.nil_value())
 }
 

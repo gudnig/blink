@@ -18,7 +18,7 @@ pub struct TokioGoroutineScheduler {
     next_id: AtomicU64,
     
     // Tokio runtime handle
-    runtime: tokio::runtime::Handle,
+    pub runtime: tokio::runtime::Handle,
 }
 
 impl TokioGoroutineScheduler {

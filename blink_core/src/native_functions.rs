@@ -9,7 +9,7 @@ use crate::error::{BlinkError, BlinkErrorType};
 use crate::eval::{eval_func, EvalContext, EvalResult};
 use crate::future::BlinkFuture;
 use crate::value::{unpack_immediate, ValueRef, ImmediateValue, Macro, NativeFn};
-use crate::Env;
+use crate::env::Env;
 
 
 pub fn native_add(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
@@ -442,7 +442,7 @@ pub fn register_builtins(ctx: &mut EvalContext) {
 
     let reg = |s: &str, f: fn(Vec<ValueRef>, &mut EvalContext) -> EvalResult, ctx: &mut EvalContext| -> ValueRef {
         let sym = ctx.symbol_table.write().intern(s);
-        let native_fn = NativeFn::Contextual(f);
+        let native_fn = NativeFn::Contextual(Box::new(f));
         let val = ctx.native_function_value(native_fn);
         ctx.set_symbol(sym, val);
         val

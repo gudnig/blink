@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::HashMap, fmt::Display, sync::Arc, time::Instant};
 
-use blink_core::{ eval::EvalContext, value::{SourcePos, SourceRange}, BlinkValue};
+use blink_core::{ eval::EvalContext, runtime::SymbolTable, value::{ParsedValue, ParsedValueWithPos, SourceRange}};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +57,11 @@ pub enum SymbolKind {
     List,
     Vector,
     Map,
+    Set,
+    Error,
+    Future,
+    Module,
+    Nil,
     Unknown,
 }
 
@@ -92,7 +97,7 @@ pub enum SymbolSource {
 pub struct Document {
     pub uri: String,
     pub text: String,
-    pub forms: Vec<BlinkValue>,
+    pub forms: Vec<ParsedValueWithPos>,
 }
 
 pub struct Session {
@@ -103,11 +108,12 @@ pub struct Session {
     pub eval_ctx: Arc<RwLock<Option<Box<EvalContext>>>>,
     pub connected_at: RwLock<Instant>,
     pub last_activity: RwLock<Instant>,
-    pub symbols: RwLock<HashMap<String, SymbolInfo>>
+    pub symbols: RwLock<HashMap<String, SymbolInfo>>,
+    pub symbol_table: Arc<RwLock<SymbolTable>>,
 }
 
 impl Session {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: String, symbol_table: Arc<RwLock<SymbolTable>>) -> Self {
         Self {
             id: id,
             features: RwLock::new(SessionFeatures::default()),
@@ -116,6 +122,7 @@ impl Session {
             symbols: RwLock::new(HashMap::new()),   
             connected_at: RwLock::new(Instant::now()),
             last_activity: RwLock::new(Instant::now()),
+            symbol_table: symbol_table,
             
         }
     }

@@ -4,7 +4,7 @@ use crate::{
     helpers::collect_symbols_from_forms, lsp_messages::{create_server_capabilities, CompletionItem, CompletionParams, Diagnostic, DiagnosticsParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams, LspError, LspMessage, Position, Range}, session::{Document, Session, SymbolSource}, session_manager::SessionManager
 };
 use anyhow::{anyhow, Context, Result};
-use blink_core::{ error::{BlinkError, BlinkErrorType, ParseErrorType}, parser::{parse_all, ReaderContext}, value::SourcePos};
+use blink_core::{ error::{BlinkError, BlinkErrorType, ParseErrorType}, parser::{parse_all, ReaderContext}, runtime::SymbolTable, value::SourcePos};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -80,7 +80,8 @@ where
                 .with_context(|| format!("Session '{}' not found", session_id))?
         } else {
             let new_id = uuid::Uuid::new_v4().to_string();
-            let session = Session::new(new_id.clone());
+            let symbol_table = Arc::new(RwLock::new(SymbolTable::new()));
+            let session = Session::new(new_id.clone(), symbol_table);
             session.features.write().lsp = true;
             let arc_session = Arc::new(session);
             session_manager.register(arc_session.clone()).await;
@@ -417,7 +418,7 @@ where
 
     async fn handle_text_document_did_open(
         &mut self,
-        params: Value,
+        params: Value
     ) -> Result<DiagnosticsParams, String> {
         
     
@@ -432,8 +433,13 @@ where
         let source = SymbolSource::File(uri_clone.clone());
     
         let mut reader_ctx = self.get_reader_ctx();
-
-        match parse_all(&text, &mut reader_ctx) {
+        let symbol_table = self.session.as_ref().unwrap().eval_ctx.read().as_deref().unwrap().symbol_table.clone();
+        let parsed_result = {
+            let mut symbol_table_guard = symbol_table.write();
+            let mut reader_ctx_guard = reader_ctx.write();
+            parse_all(&text, &mut *reader_ctx_guard, &mut *symbol_table_guard)
+        };
+        match parsed_result {
             Ok(forms) => {
                 
                 let new_doc = Document {
@@ -446,7 +452,10 @@ where
                 if let Some(session) = &self.session {
                     {
                         let mut symbols = session.symbols.write();
-                        collect_symbols_from_forms(&mut symbols, &new_doc.forms, source);
+                        
+                        let symbol_table = session.symbol_table.clone();
+                        let symbol_table_guard = symbol_table.read();
+                        collect_symbols_from_forms(&mut symbols, &new_doc.forms, source, &symbol_table_guard);
                     }
                     {
                         let mut documents = session.documents.write();
@@ -518,7 +527,12 @@ where
         }
         let source = SymbolSource::File(uri.clone());
         let mut reader_ctx = self.get_reader_ctx();
-        let forms = parse_all(&current_text, &mut reader_ctx);
+        let forms = {
+            let symbol_table = session.eval_ctx.read().as_deref().unwrap().symbol_table.clone();
+            let mut symbol_table_guard = symbol_table.write();
+            let mut reader_ctx_guard = reader_ctx.write();
+            parse_all(&current_text, &mut *reader_ctx_guard, &mut *symbol_table_guard)
+        };
         match forms {
             Ok(forms) =>  // Update document in session
                     {
@@ -536,7 +550,13 @@ where
                         };
                         // Update symbols
                         let mut symbols = session.symbols.write();
-                        collect_symbols_from_forms(&mut symbols, &new_doc.forms, source);
+
+                        
+                        {
+                            let symbol_table = session.symbol_table.clone();
+                            let symbol_table_guard = symbol_table.read();
+                            collect_symbols_from_forms(&mut symbols, &new_doc.forms, source, &symbol_table_guard);
+                        }
                         documents.insert(new_doc.uri.clone(), new_doc);
                         
                         

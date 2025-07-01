@@ -4,7 +4,7 @@ mod immediate;
 mod shared_value;
 mod isolated_value;
 mod parsed_value;
-
+mod plugin;
 
 pub use value_ref::*;
 pub use shared_value::*;
@@ -12,6 +12,7 @@ pub use immediate::*;
 pub use value_context::*;
 pub use isolated_value::*;
 pub use parsed_value::*;
+pub use plugin::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {
