@@ -109,11 +109,8 @@ GitHub or Git repos (cloned into lib/<name>/)
 ✅ VS Code plugin
 
 ⬜ Syntax highlighting
-⬜ Inline eval / hover docs
-⬜ Integration with socket REPL
-
-
-⬜ blink daemon for editor/linter/tooling integration
+✅ Inline eval / hover docs
+✅ Integration with socket REPL
 ⬜ Code formatter and/or linter for .blink files
 
 📦 Native Binaries
