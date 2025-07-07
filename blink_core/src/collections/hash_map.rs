@@ -1,11 +1,10 @@
 use std::{collections::HashMap, fmt::Display};
 
-use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
+use crate::value::ValueRef;
 
 #[derive(Debug)]
 pub struct BlinkHashMap {
-    context: ValueContext,
-    map: HashMap<ContextualValueRef, ValueRef>
+    map: HashMap<ValueRef, ValueRef>
 }
 
 impl Display for BlinkHashMap {
@@ -15,51 +14,43 @@ impl Display for BlinkHashMap {
             if i > 0 {
                 write!(f, " ")?;
             }
-            let v_contextual = ContextualValueRef::new(v.clone(), self.context.clone());
-            write!(f, "{} {}", k, v_contextual)?;
+            write!(f, "{} {}", k, v)?;
         }
         write!(f, "}}")
     }
 }
 
 impl BlinkHashMap {
-    pub fn new(context: ValueContext) -> Self {
+    pub fn new() -> Self {
         Self {
-            context: context.clone(),
             map: HashMap::new(),
         }
     }
 
-    pub fn with_capacity(capacity: usize, context: ValueContext) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            context: context.clone(),
             map: HashMap::with_capacity(capacity),
         }
     }
 
     pub fn insert(&mut self, key: ValueRef, value: ValueRef) -> Option<ValueRef> {
-        let contextual_key = ContextualValueRef::new(key, self.context.clone());
-        self.map.insert(contextual_key, value)
+        self.map.insert(key, value)
     }
 
     pub fn get(&self, key: &ValueRef) -> Option<&ValueRef> {
-        let contextual_key = ContextualValueRef::new(*key, self.context.clone());
-        self.map.get(&contextual_key)
+        self.map.get(key)
     }
 
     pub fn get_mut(&mut self, key: &ValueRef) -> Option<&mut ValueRef> {
-        let contextual_key = ContextualValueRef::new(*key, self.context.clone());
-        self.map.get_mut(&contextual_key)
+        self.map.get_mut(key)
     }
 
     pub fn remove(&mut self, key: &ValueRef) -> Option<ValueRef> {
-        let contextual_key = ContextualValueRef::new(*key, self.context.clone());
-        self.map.remove(&contextual_key)
+        self.map.remove(key)
     }
 
     pub fn contains_key(&self, key: &ValueRef) -> bool {
-        let contextual_key = ContextualValueRef::new(*key, self.context.clone());
-        self.map.contains_key(&contextual_key)
+        self.map.contains_key(key)
     }
 
 
@@ -70,15 +61,15 @@ impl BlinkHashMap {
 
     // Iterators that return ValueRef pairs
     pub fn iter(&self) -> impl Iterator<Item = (&ValueRef, &ValueRef)> {
-        self.map.iter().map(|(k, v)| (k.value(), v))
+        self.map.iter()
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&ValueRef, &mut ValueRef)> {
-        self.map.iter_mut().map(|(k, v)| (k.value(), v))
+        self.map.iter_mut()
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &ValueRef> {
-        self.map.keys().map(|k| k.value())
+        self.map.keys()
     }
 
     pub fn values(&self) -> impl Iterator<Item = &ValueRef> {
@@ -114,16 +105,12 @@ impl BlinkHashMap {
         })
     }
 
-    pub fn context(&self) -> &ValueContext {
-        &self.context
-    }
-
     // Convenient constructors for common operations
-    pub fn from_pairs<I>(pairs: I, context: ValueContext) -> Self 
+    pub fn from_pairs<I>(pairs: I) -> Self 
     where 
         I: IntoIterator<Item = (ValueRef, ValueRef)>
     {
-        let mut map = Self::new(context);
+        let mut map = Self::new();
         for (k, v) in pairs {
             map.insert(k, v);
         }
@@ -135,7 +122,6 @@ impl BlinkHashMap {
 impl Clone for BlinkHashMap {
     fn clone(&self) -> Self {
         Self {
-            context: self.context.clone(),
             map: self.map.clone(),
         }
     }

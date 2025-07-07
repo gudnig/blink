@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{collections::ValueContext, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue}, collections::{BlinkHashMap, BlinkHashSet}, value::{SharedValue, ValueRef}};
+use crate::{collections::ValueContext, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue}, collections::{BlinkHashMap, BlinkHashSet}, value::{ValueRef}};
 
 
 
@@ -202,7 +202,7 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                         shared_ref
                     },
             IsolatedValue::Set(set) => {
-                        let mut value_set = BlinkHashSet::new(ValueContext::new(self.context.shared_arena.clone()));
+                        let mut value_set = BlinkHashSet::new();
                         for item in set {
                             value_set.insert(self.alloc_from_isolated(item));
                         }

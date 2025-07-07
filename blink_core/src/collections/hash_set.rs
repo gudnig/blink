@@ -1,12 +1,11 @@
 use std::{collections::HashSet, fmt::Display};
 
-use crate::{collections::{ContextualValueRef, ValueContext}, value::ValueRef};
+use crate::value::ValueRef;
 
 /// Native HashSet for your language runtime - ValueRef values
 #[derive(Debug)]
 pub struct BlinkHashSet {
-    context: ValueContext,
-    set: HashSet<ContextualValueRef>,
+    set: HashSet<ValueRef>,
 }
 
 impl Display for BlinkHashSet {
@@ -24,33 +23,28 @@ impl Display for BlinkHashSet {
 }
 
 impl BlinkHashSet {
-    pub fn new(context: ValueContext) -> Self {
+    pub fn new() -> Self {
         Self {
-            context: context.clone(),
             set: HashSet::new(),
         }
     }
 
-    pub fn with_capacity(capacity: usize, context: ValueContext) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            context: context.clone(),
             set: HashSet::with_capacity(capacity),
         }
     }
 
     pub fn insert(&mut self, value: ValueRef) -> bool {
-        let contextual_value = ContextualValueRef::new(value, self.context.clone());
-        self.set.insert(contextual_value)
+        self.set.insert(value)
     }
 
     pub fn contains(&self, value: &ValueRef) -> bool {
-        let contextual_value = ContextualValueRef::new(*value, self.context.clone());
-        self.set.contains(&contextual_value)
+        self.set.contains(value)
     }
 
     pub fn remove(&mut self, value: &ValueRef) -> bool {
-        let contextual_value = ContextualValueRef::new(*value, self.context.clone());
-        self.set.remove(&contextual_value)
+        self.set.remove(value)
     }
 
     // Standard interface
@@ -60,7 +54,7 @@ impl BlinkHashSet {
 
     // Iterators
     pub fn iter(&self) -> impl Iterator<Item = &ValueRef> {
-        self.set.iter().map(|v| v.value())
+        self.set.iter()
     }
 
     // Set operations
@@ -98,22 +92,18 @@ impl BlinkHashSet {
         }
     }
 
-    pub fn context(&self) -> &ValueContext {
-        &self.context
-    }
-
     // Convenient constructors
-    pub fn from_iter<I>(iter: I, context: ValueContext) -> Self 
+    pub fn from_iter<I>(iter: I) -> Self 
     where 
         I: IntoIterator<Item = ValueRef>
     {
-        let mut set = Self::new(context);
+        let mut set = Self::new();
         set.extend(iter);
         set
     }
 
-    pub fn from_values(values: &[ValueRef], context: ValueContext) -> Self {
-        Self::from_iter(values.iter().copied(), context)
+    pub fn from_values(values: &[ValueRef]) -> Self {
+        Self::from_iter(values.iter().copied())
     }
 
     // Language-specific helpers
@@ -162,7 +152,6 @@ impl BlinkHashSet {
 impl Clone for BlinkHashSet {
     fn clone(&self) -> Self {
         Self {
-            context: self.context.clone(),
             set: self.set.clone(),
         }
     }
@@ -181,7 +170,7 @@ impl BlinkHashSet {
 
     /// Create a new set with the intersection of both sets
     pub fn intersection_with(&self, other: &BlinkHashSet) -> BlinkHashSet {
-        let mut result = BlinkHashSet::new(self.context.clone());
+        let mut result = BlinkHashSet::new();
         for value in self.iter() {
             if other.contains(value) {
                 result.insert(*value);
@@ -192,7 +181,7 @@ impl BlinkHashSet {
 
     /// Create a new set with values in self but not in other
     pub fn difference_with(&self, other: &BlinkHashSet) -> BlinkHashSet {
-        let mut result = BlinkHashSet::new(self.context.clone());
+        let mut result = BlinkHashSet::new();
         for value in self.iter() {
             if !other.contains(value) {
                 result.insert(*value);
@@ -203,7 +192,7 @@ impl BlinkHashSet {
 
     /// Create a new set with values in either set but not both
     pub fn symmetric_difference_with(&self, other: &BlinkHashSet) -> BlinkHashSet {
-        let mut result = BlinkHashSet::new(self.context.clone());
+        let mut result = BlinkHashSet::new();
         
         // Add values from self that aren't in other
         for value in self.iter() {

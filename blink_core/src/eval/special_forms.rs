@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc};
 use libloading::Library;
 use parking_lot::RwLock;
 
-use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Macro, ModuleRef, Plugin, SharedValue, UserDefinedFn, ValueRef}};
+use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Macro, Plugin, UserDefinedFn, ValueRef}};
 
 fn require_arity(args: &[ValueRef], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {

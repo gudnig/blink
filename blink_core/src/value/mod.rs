@@ -1,18 +1,20 @@
-mod value_ref;
-mod value_context;
+mod gc_ptr;
+mod heap_value;
 mod immediate;
-mod shared_value;
 mod isolated_value;
+mod native_fn;
 mod parsed_value;
 mod plugin;
+mod value_ref;
 
-pub use value_ref::*;
-pub use shared_value::*;
+pub use gc_ptr::*;
+pub use heap_value::*;
 pub use immediate::*;
-pub use value_context::*;
 pub use isolated_value::*;
+pub use native_fn::*;
 pub use parsed_value::*;
 pub use plugin::*;
+pub use value_ref::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {
@@ -39,7 +41,10 @@ impl SourceRange {
 }
 impl Default for SourceRange {
     fn default() -> Self {
-        Self { start: SourcePos { line: 0, col: 0 }, end: SourcePos { line: 0, col: 0 } }
+        Self {
+            start: SourcePos { line: 0, col: 0 },
+            end: SourcePos { line: 0, col: 0 },
+        }
     }
 }
 

@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{pack_bool, unpack_immediate, ImmediateValue, Macro, ModuleRef, NativeFn, SharedValue, UserDefinedFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{pack_bool, unpack_immediate, ImmediateValue, Macro, ModuleRef, NativeFn, UserDefinedFn, ValueRef}};
 use crate::env::Env;
 
-impl EvalContext {
+impl EvalContext<'_> {
 
     // Getters
     pub fn get_err(&self, value: &ValueRef) -> BlinkError {
@@ -203,7 +203,7 @@ impl EvalContext {
     }
 
     pub fn list_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::List(values))
+        self.alloc_list(values)
     }
 
     pub fn vector_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
@@ -211,12 +211,12 @@ impl EvalContext {
     }
 
     pub fn map_value(&mut self, pairs: Vec<(ValueRef, ValueRef)>) -> ValueRef {
-        let map = BlinkHashMap::from_pairs(pairs, ValueContext::new(self.shared_arena.clone()));
+        let map = BlinkHashMap::from_pairs(pairs);
         self.shared_arena.write().alloc(SharedValue::Map(map))
     }   
 
     pub fn set_value(&mut self, set: Vec<ValueRef>) -> ValueRef {
-        let set = BlinkHashSet::from_iter(set, ValueContext::new(self.shared_arena.clone()));
+        let set = BlinkHashSet::from_iter(set);
         self.shared_arena.write().alloc(SharedValue::Set(set))
     }
 

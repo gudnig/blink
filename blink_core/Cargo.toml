@@ -20,5 +20,6 @@ rustyline = "15.0.0"
 libloading = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 generational-arena = "0.2"
+mmtk = "0.31.0"
 tokio = { version = "1.0", features = ["full"] }
 

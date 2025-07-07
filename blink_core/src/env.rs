@@ -1,5 +1,5 @@
 use crate::module::ModuleRegistry;
-use crate::value::{SharedValue, ValueRef};
+use crate::{ValueRef};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,18 +33,9 @@ impl Env {
     }
 
     pub fn get_with_registry(&self, key: u32, registry: &ModuleRegistry) -> Option<ValueRef> {
-        // Check local variables FIRST
+        //TODO module resolution
         if let Some(val) = self.vars.get(&key) {
-            match val {
-                // Handle module references - resolve them
-                ValueRef::Shared(idx) => {
-                    // Need to check if this is a module reference in the shared arena
-                    // For now, just return the value - module reference resolution
-                    // would happen at a higher level
-                    return Some(*val);
-                }
-                _ => return Some(*val),
-            }
+            return Some(*val);
         }
 
         // Note: Qualified name checking removed since we're using u32 IDs now
