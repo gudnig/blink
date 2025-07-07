@@ -20,6 +20,13 @@ impl Display for BlinkHashMap {
     }
 }
 
+impl Iterator for BlinkHashMap {
+    type Item = (ValueRef, ValueRef);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.map.iter().next()
+    }
+}
+
 impl BlinkHashMap {
     pub fn new() -> Self {
         Self {

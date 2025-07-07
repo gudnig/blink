@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc};
 use libloading::Library;
 use parking_lot::RwLock;
 
-use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Macro, Plugin, UserDefinedFn, ValueRef}};
+use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Plugin, Callable, ValueRef}};
 
 fn require_arity(args: &[ValueRef], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {
@@ -74,15 +74,16 @@ pub fn eval_fn(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     };
     
     // Create the user-defined function
-    let user_fn = UserDefinedFn {
+    let user_fn = Callable {
         params,
         body: args[1..].to_vec(),
         env: Arc::clone(&ctx.env),
+        is_variadic: false  //TODO: handle variadic functions
     };
     
-    // Store in shared arena
-    let shared_fn = SharedValue::UserDefinedFunction(user_fn);
-    let value_ref = ctx.shared_arena.write().alloc(shared_fn);
+    
+    
+    let value_ref = ctx.alloc_user_fn(user_fn);
     
     EvalResult::Value(value_ref)
 }

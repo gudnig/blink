@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{collections::ValueContext, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue}, collections::{BlinkHashMap, BlinkHashSet}, value::{ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue, ValueRef}, HeapValue};
 
 
 
@@ -43,17 +43,17 @@ pub trait ValueBoundary {
 
 
 // Current implementation
-pub struct ContextualBoundary<'a> {
-    pub context: &'a mut EvalContext,
+pub struct ContextualBoundary<'a, 'vm> {
+    pub context: &'a mut EvalContext<'vm>,
 }
 
-impl<'a> ContextualBoundary<'a> {
-    pub fn new(context: &'a mut EvalContext) -> Self {
+impl<'a, 'vm> ContextualBoundary<'a, 'vm> {
+    pub fn new(context: &'a mut EvalContext<'vm>) -> Self {
         Self { context }
     }
 }
 
-impl<'a> ValueBoundary for ContextualBoundary<'a> {
+impl<'a, 'vm> ValueBoundary for ContextualBoundary<'a, 'vm> {
     fn extract_isolated(&self, value: ValueRef) -> Result<IsolatedValue, String> {
         match value {
             ValueRef::Immediate(packed) => {
@@ -77,77 +77,61 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                 }
             },
             
-            ValueRef::Shared(shared_ref) => {
-                let shared_value = self.context.shared_arena.read().get(shared_ref)
-                    .ok_or("Shared value not found")?
-                    .clone();
-                
-                match shared_value.as_ref() {
-                    SharedValue::Str(s) => Ok(IsolatedValue::String(s.clone())),
-                    
-                    SharedValue::List(items) => {
-                        let isolated_items: Result<Vec<_>, _> = items.iter()
-                            .map(|item| self.extract_isolated(*item))
-                            .collect();
-                        Ok(IsolatedValue::List(isolated_items?))
-                    },
-                    
-                    SharedValue::Vector(items) => {
-                        let isolated_items: Result<Vec<_>, _> = items.iter()
-                            .map(|item| self.extract_isolated(*item))
-                            .collect();
-                        Ok(IsolatedValue::Vector(isolated_items?))
-                    },
-                    
-                    SharedValue::Map(map) => {
-                        let mut isolated_map = HashMap::new();
-                        for (k, v) in map.iter() {
-                            let isolated_key = self.extract_isolated(*k)?;
-                            let isolated_value = self.extract_isolated(*v)?;
-                            isolated_map.insert(isolated_key, isolated_value);
-                        }
-                        Ok(IsolatedValue::Map(isolated_map))
-                    },
-                    
-                    SharedValue::Set(set) => {
-                        let mut isolated_set = HashSet::new();
-                        for item in set.iter() {
-                            isolated_set.insert(self.extract_isolated(*item)?);
-                        }
-                        Ok(IsolatedValue::Set(isolated_set))
-                    },
-                    
-                    SharedValue::Error(error) => {
-                        Ok(IsolatedValue::Error(error.message.clone()))
-                    },
-                    
-                    // These become handles:
-                    SharedValue::NativeFunction(_) => {
-                        let handle = self.context.handle_registry.write().register_function(value);
-                        Ok(IsolatedValue::Function(handle))
-                    },
-                    
-                    SharedValue::UserDefinedFunction(_) => {
-                        let handle = self.context.handle_registry.write().register_function(value);
-                        Ok(IsolatedValue::Function(handle))
-                    },
-                    
-                    SharedValue::Macro(_) => {
-                        let handle = self.context.handle_registry.write().register_function(value);
-                        Ok(IsolatedValue::Macro(handle))
-                    },
-                    
-                    SharedValue::Future(_) => {
-                        let handle = self.context.handle_registry.write().register_future(value);
-                        Ok(IsolatedValue::Future(handle))
-                    },
-                    
-                    SharedValue::Module(_) => {
-                        // Modules don't cross boundary
-                        Ok(IsolatedValue::Nil)
-                    },
+            ValueRef::Heap(gc_ptr) => {
+                let heap_val = value.read_heap_value();
+                if let Some(heap_val) = heap_val {
+                    match heap_val {
+                        HeapValue::List(value_refs) => {
+                            let isolated_values: Vec<IsolatedValue> = value_refs.into_iter()
+                                .map(|item| self.extract_isolated(*item))
+                                .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                            Ok(IsolatedValue::List(isolated_values))
+                        },
+                        HeapValue::Vector(value_refs) => {
+                            let isolated_values: Vec<IsolatedValue> = value_refs.into_iter()
+                                .map(|item| self.extract_isolated(*item))
+                                .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                            Ok(IsolatedValue::Vector(isolated_values))
+                        },
+                        HeapValue::Map(blink_hash_map) => {
+                            let isolated_values = blink_hash_map.into_iter()
+                                .map(|(k, v)| (self.extract_isolated(k)?, self.extract_isolated(v)?))
+                                .collect::<Result<Vec<(IsolatedValue, IsolatedValue)>, String>>()?;
+                            let map = HashMap::from_iter(isolated_values);
+                            Ok(IsolatedValue::Map(map))
+                        },
+                        HeapValue::Str(s) => Ok(IsolatedValue::String(s)),
+                        HeapValue::Set(blink_hash_set) => {
+                            let isolated_values: Vec<IsolatedValue> = blink_hash_set.into_iter()
+                                .map(|item| self.extract_isolated(item))
+                                .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                            Ok(IsolatedValue::Set(isolated_values))
+                        },
+                        HeapValue::Error(blink_error) => {
+                            let error = BlinkError::eval(blink_error.to_string());
+                            Ok(IsolatedValue::Error(error.to_string()))
+                        },
+                        HeapValue::Function(callable) => {
+                            let handle = self.context.register_function(value);
+                            Ok(IsolatedValue::Function(handle))
+                        },
+                        HeapValue::Macro(callable) => {
+                            let handle = self.context.register_function(value);
+                            Ok(IsolatedValue::Macro(handle))
+                        },
+                        HeapValue::Future(blink_future) => {
+                            let handle = self.context.register_future(value);
+                            Ok(IsolatedValue::Future(handle))
+                        },
+                        HeapValue::Env(env) => {
+                            Err(format!("Env is not supported for boundary crossing"))
+                        },
+                    }
                 }
-            },
+                else {
+                    Err(format!("Unsupported value type for boundary crossing"))
+                }
+            }
             _ => Err(format!("Unsupported value type for boundary crossing")),
         }
     }
@@ -167,66 +151,50 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                         self.context.intern_keyword(&k)
                     },
             IsolatedValue::String(s) => {
-                        let shared_value =  SharedValue::Str(s);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        self.context.string_value(&s)
+                        
                     },
             IsolatedValue::List(items) => {
                         let value_refs: Vec<ValueRef> = items.into_iter()
                             .map(|item| self.alloc_from_isolated(item))
                             .collect();
-                        let shared_value = SharedValue::List(value_refs);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        self.context.list_value(value_refs)
                     },
             IsolatedValue::Vector(items) => {
                         let value_refs: Vec<ValueRef> = items.into_iter()
                             .map(|item| self.alloc_from_isolated(item))
                             .collect();
-                        let shared_value = SharedValue::Vector(value_refs);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        self.context.vector_value(value_refs)
                     },
             IsolatedValue::Map(map) => {
 
-                
-                        let mut value_map = BlinkHashMap::new(ValueContext::new(self.context.shared_arena.clone()));
-                
-                        for (k, v) in map {
-                            let key_ref = self.alloc_from_isolated(k);
-                            let val_ref = self.alloc_from_isolated(v);
-                            value_map.insert(key_ref, val_ref);
-                        }
-                        let shared_value = SharedValue::Map(value_map);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        let pairs: Vec<(ValueRef, ValueRef)> = map.into_iter()
+                            .map(|(k, v)| (self.alloc_from_isolated(k), self.alloc_from_isolated(v)))
+                            .collect();
+                        
+                        self.context.map_value(pairs)
                     },
             IsolatedValue::Set(set) => {
-                        let mut value_set = BlinkHashSet::new();
-                        for item in set {
-                            value_set.insert(self.alloc_from_isolated(item));
-                        }
-                        let shared_value = SharedValue::Set(value_set);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        let value_refs: Vec<ValueRef> = set.into_iter()
+                            .map(|item| self.alloc_from_isolated(item))
+                            .collect();
+                        self.context.set_value(value_refs)
                     },
             IsolatedValue::Function(handle) => {
-                        self.context.handle_registry.read().resolve_function(&handle)
+                        self.context.resolve_function(handle)
                             .unwrap_or(ValueRef::Immediate(pack_nil()))
                     },
             IsolatedValue::Macro(handle) => {
-                        self.context.handle_registry.read().resolve_function(&handle)
+                        self.context.resolve_function(handle)
                             .unwrap_or(ValueRef::Immediate(pack_nil()))
                     },
             IsolatedValue::Future(handle) => {
-                        self.context.handle_registry.read().resolve_future(&handle)
+                        self.context.resolve_future(handle)
                             .unwrap_or(ValueRef::Immediate(pack_nil()))
                     },
             IsolatedValue::Error(msg) => {
                         let error = BlinkError::eval(msg);
-                        let shared_value = SharedValue::Error(error);
-                        let shared_ref = self.context.shared_arena.write().alloc(shared_value);
-                        shared_ref
+                        self.context.error_value(error)
                     },
             IsolatedValue::Nil => {
                 ValueRef::Immediate(pack_nil())

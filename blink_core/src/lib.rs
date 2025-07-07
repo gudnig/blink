@@ -12,7 +12,7 @@ pub mod runtime;
 pub mod collections;
 pub use env::Env;
 // TODO expose value creation
-pub use value::{ValueRef, SharedValue}; 
+pub use value::{ValueRef, HeapValue, ImmediateValue}; 
 pub use collections::{BlinkHashMap, BlinkHashSet};
 
 

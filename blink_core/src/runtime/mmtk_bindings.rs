@@ -1,9 +1,9 @@
 use mmtk::{
-    util::{, Address, ObjectReference}, 
+    util::{Address, ObjectReference}, 
     vm::{slot::{MemorySlice, Slot}, ActivePlan, Collection, ReferenceGlue, Scanning, VMBinding}, 
     Mutator
 };
-use crate::{runtime::{ BlinkObjectModel, BlinkVM, TypeTag}, ValueRef};
+use crate::runtime::{ BlinkObjectModel, BlinkVM};
 
 
 
@@ -15,45 +15,19 @@ use crate::{runtime::{ BlinkObjectModel, BlinkVM, TypeTag}, ValueRef};
 // Scanning - tells MMTK how to find references within objects
 pub struct BlinkScanning;
 
-// Scanning implementation
 impl Scanning<BlinkVM> for BlinkScanning {
-    fn scan_object<EV: mmtk::vm::EdgeVisitor>(
-        _tls: mmtk::util::VMWorkerThread,
+    fn scan_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        tls: mmtk::util::VMWorkerThread,
         object: ObjectReference,
-        edge_visitor: &mut EV,
+        slot_visitor: &mut SV,
     ) {
-        let header = BlinkVM::get_header(object);
-        
-        match header.get_type() {
-            TypeTag::List | TypeTag::Vector => {
-                if let Some(slice) = BlinkVM::get_list(object) {
-                    for value_ref in slice {
-                        if let ValueRef::Gc(obj_ref) = value_ref {
-                            edge_visitor.visit_edge(*obj_ref);
-                        }
-                    }
-                }
-            }
-            
-            TypeTag::UserDefinedFunction => {
-                // You'd need similar accessors for UserDefinedFn
-                // Scan the function body and environment
-                todo!("Scan UserDefinedFunction references")
-            }
-            
-            TypeTag::Str | TypeTag::Native | TypeTag::Module => {
-                // These don't contain object references
-            }
-            
-            // Handle other types...
-            _ => {}
-        }
+        todo!()
     }
-    
+
     fn notify_initial_thread_scan_complete(partial_scan: bool, tls: mmtk::util::VMWorkerThread) {
         todo!()
     }
-    
+
     fn scan_roots_in_mutator_thread(
         tls: mmtk::util::VMWorkerThread,
         mutator: &'static mut Mutator<BlinkVM>,
@@ -61,15 +35,15 @@ impl Scanning<BlinkVM> for BlinkScanning {
     ) {
         todo!()
     }
-    
+
     fn scan_vm_specific_roots(tls: mmtk::util::VMWorkerThread, factory: impl mmtk::vm::RootsWorkFactory<<BlinkVM as VMBinding>::VMSlot>) {
         todo!()
     }
-    
+
     fn supports_return_barrier() -> bool {
         todo!()
     }
-    
+
     fn prepare_for_roots_re_scanning() {
         todo!()
     }
@@ -161,7 +135,7 @@ pub struct BlinkSlot(Address);
 
 impl Slot for BlinkSlot {
     fn load(&self) -> Option<ObjectReference> {
-        unsafe { self.0.load::<ObjectReference>() }
+        unsafe { Some(self.0.load::<ObjectReference>()) }
     }
     
     fn store(&self, object: ObjectReference) {

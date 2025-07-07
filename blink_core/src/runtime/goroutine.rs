@@ -1,16 +1,13 @@
 use std::collections::{HashMap};
 
-
-
-
 pub type GoroutineId = u64;
 use tokio::task::JoinHandle;
 
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
-use crate::{runtime::AsyncContext, eval::{EvalContext, EvalResult}};
+use crate::{error::BlinkError, eval::{EvalContext, EvalResult}, runtime::{AsyncContext, BlinkVM}};
 
-pub struct TokioGoroutineScheduler {
+pub struct TokioGoroutineScheduler<'vm> {
     // Track running goroutines
     goroutines: Arc<Mutex<HashMap<GoroutineId, JoinHandle<()>>>>,
     
@@ -19,22 +16,25 @@ pub struct TokioGoroutineScheduler {
     
     // Tokio runtime handle
     pub runtime: tokio::runtime::Handle,
+    vm: &'vm BlinkVM
 }
 
-impl TokioGoroutineScheduler {
-    pub fn new() -> Self {
+impl<'vm> TokioGoroutineScheduler<'vm> {
+    pub fn new(vm: &'vm BlinkVM) -> Self {
         Self {
             goroutines: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             runtime: tokio::runtime::Handle::current(),
+            vm,
         }
     }
     
-    pub fn spawn_with_context<F>(&self, mut ctx: EvalContext, task: F) -> GoroutineId 
+    pub fn spawn_with_context<F>(&self, mut ctx: EvalContext, task: F) -> Result<GoroutineId, BlinkError>
     where 
         F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static,
     {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let ctx = ctx.with_env(ctx.env.clone());
     
         let handle = tokio::spawn(async move {
             ctx.async_ctx = AsyncContext::Goroutine(id);
@@ -44,13 +44,9 @@ impl TokioGoroutineScheduler {
             loop {
                 match result {
                     EvalResult::Value(val) => {
-                        // Task errored
-                        if ctx.is_err(&val) {
-                            let err = ctx.get_err(&val);
+                        if let Some(err) = val.get_error() {
                             eprintln!("Goroutine {} failed: {}", id, err);
-                            break;
                         }
-                        // Task completed successfully
                         break;
                     }
                     EvalResult::Suspended { future, resume } => {
@@ -63,7 +59,7 @@ impl TokioGoroutineScheduler {
         });
     
         self.goroutines.lock().unwrap().insert(id, handle);
-        id
+        Ok(id)
     }
     
     

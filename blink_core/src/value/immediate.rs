@@ -9,6 +9,7 @@ const BOOL_TAG: u64 = 1;
 const SYMBOL_TAG: u64 = 2;
 const NIL_TAG: u64 = 3;
 const KEYWORD_TAG: u64 = 4;
+const MODULE_TAG: u64 = 5;
 
 // Packing functions
 pub fn pack_number(n: f64) -> u64 {
@@ -35,12 +36,17 @@ pub fn pack_keyword(keyword_id: u32) -> u64 {
     NAN_MASK | ((keyword_id as u64) << 3) | KEYWORD_TAG
 }
 
+pub fn pack_module(module_id: u32, symbol_id: u32) -> u64 {
+    NAN_MASK | ((module_id as u64) << 3) | MODULE_TAG
+}
+
 // Unpacking
 pub enum ImmediateValue {
     Number(f64),
     Bool(bool),
     Symbol(u32),
     Keyword(u32),
+    Module(u32, u32),
     Nil,
 }
 
@@ -51,6 +57,7 @@ impl Display for ImmediateValue {
             ImmediateValue::Bool(b) => write!(f, "{}", b),
             ImmediateValue::Symbol(s) => write!(f, "{}", s),
             ImmediateValue::Keyword(k) => write!(f, "{}", k),
+            ImmediateValue::Module(m, s) => write!(f, "{}:{}", m, s),
             ImmediateValue::Nil => write!(f, "nil"),
         }
     }
@@ -63,6 +70,7 @@ impl ImmediateValue {
             ImmediateValue::Bool(_) => "bool",
             ImmediateValue::Symbol(_) => "symbol",
             ImmediateValue::Keyword(_) => "keyword",
+            ImmediateValue::Module(_, _) => "module",
             ImmediateValue::Nil => "nil",
         }
     }
@@ -98,4 +106,8 @@ pub fn is_nil(packed: u64) -> bool {
 
 pub fn is_symbol(packed: u64) -> bool {
     (packed & NAN_MASK) == NAN_MASK && (packed & TAG_MASK) == SYMBOL_TAG
+}
+
+pub fn is_module(packed: u64) -> bool {
+    (packed & NAN_MASK) == NAN_MASK && (packed & TAG_MASK) == MODULE_TAG
 }

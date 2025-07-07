@@ -1,6 +1,7 @@
-use std::fmt::{self, Display};
 use crate::collections::{ContextualValueRef, ValueContext};
-use crate::value::{  SourcePos, SourceRange, ValueRef};
+use crate::value::{SourcePos, SourceRange, ValueRef};
+use std::fmt::{self, Display};
+use std::hash::{Hash,Hasher};
 
 #[derive(Debug, Clone)]
 pub struct BlinkError {
@@ -11,51 +12,114 @@ pub struct BlinkError {
 
 #[derive(Debug, Clone)]
 pub enum ParseErrorType {
-    UnclosedDelimiter(String), 
+    UnclosedDelimiter(String),
     UnexpectedToken(String),
     InvalidNumber(String),
     InvalidString(String),
     UnexpectedEof,
-    
+}
+
+impl Hash for ParseErrorType {  
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "ParseErrorType".hash(state);
+        match self {
+            ParseErrorType::UnclosedDelimiter(message) => message.hash(state),
+            ParseErrorType::UnexpectedToken(token) => token.hash(state),
+            ParseErrorType::InvalidNumber(message) => message.hash(state),
+            ParseErrorType::InvalidString(message) => message.hash(state),
+            ParseErrorType::UnexpectedEof => "UnexpectedEof".hash(state),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum BlinkErrorType {
-    Tokenizer,    
+    Tokenizer,
     Parse(ParseErrorType),
-    UndefinedSymbol{
+    UndefinedSymbol {
         name: String,
     },
     Eval,
-    ArityMismatch{
+    ArityMismatch {
         expected: usize,
         got: usize,
         form: String,
     },
-    UnexpectedToken{
-        token: String
+    UnexpectedToken {
+        token: String,
     },
     UserDefined {
-        data: Option<ValueRef>
+        data: Option<ValueRef>,
+    },
+}
+
+impl Hash for BlinkErrorType {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            BlinkErrorType::Tokenizer => "Tokenizer".hash(state),
+            BlinkErrorType::Parse(parse_error_type) => {
+                "Parse".hash(state);
+                parse_error_type.hash(state);
+            }
+            BlinkErrorType::UndefinedSymbol { name } => {
+                "UndefinedSymbol".hash(state);
+                name.hash(state);
+            }
+            BlinkErrorType::Eval => "Eval".hash(state),
+            BlinkErrorType::ArityMismatch {
+                expected,
+                got,
+                form,
+            } => {
+                "ArityMismatch".hash(state);
+                expected.hash(state);
+                got.hash(state);
+                form.hash(state);
+            }
+            BlinkErrorType::UnexpectedToken { token } => {
+                "UnexpectedToken".hash(state);
+                token.hash(state);
+            }
+            BlinkErrorType::UserDefined { data } => {
+                "UserDefined".hash(state);
+                if let Some(data) = data {
+                    data.hash(state);
+                } else {
+                    "nil".hash(state);
+                }
+            }
+        }
     }
 }
 
 impl BlinkErrorType {
-    pub fn display_with_context(&self, f: &mut fmt::Formatter<'_>, context: &ValueContext) -> fmt::Result {
+    pub fn display_with_context(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        context: &ValueContext,
+    ) -> fmt::Result {
         match self {
             BlinkErrorType::Tokenizer => write!(f, "Tokenizer error"),
-            BlinkErrorType::Parse(parse_error_type) => {
-                match parse_error_type {
-                    ParseErrorType::UnclosedDelimiter(message) => write!(f, "Unclosed delimiter: {}", message),
-                    ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
-                    ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
-                    ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
-                    ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
+            BlinkErrorType::Parse(parse_error_type) => match parse_error_type {
+                ParseErrorType::UnclosedDelimiter(message) => {
+                    write!(f, "Unclosed delimiter: {}", message)
                 }
+                ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
+                ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
+                ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
+                ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
             },
             BlinkErrorType::UndefinedSymbol { name } => write!(f, "Undefined symbol: {}", name),
             BlinkErrorType::Eval => write!(f, "Eval error"),
-            BlinkErrorType::ArityMismatch { expected, got, form } => write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got),
+            BlinkErrorType::ArityMismatch {
+                expected,
+                got,
+                form,
+            } => write!(
+                f,
+                "Arity mismatch in '{}': expected {}, got {}",
+                form, expected, got
+            ),
             BlinkErrorType::UnexpectedToken { token } => write!(f, "Unexpected token: {}", token),
             BlinkErrorType::UserDefined { data } => {
                 if let Some(data) = data {
@@ -64,7 +128,7 @@ impl BlinkErrorType {
                 } else {
                     write!(f, "User defined error")
                 }
-            },
+            }
         }
     }
 }
@@ -73,7 +137,10 @@ impl BlinkError {
     pub fn tokenizer(message: impl Into<String>, pos: SourcePos) -> Self {
         Self {
             message: message.into(),
-            pos: Some(SourceRange { start: pos, end: pos }),
+            pos: Some(SourceRange {
+                start: pos,
+                end: pos,
+            }),
             error_type: BlinkErrorType::Tokenizer,
         }
     }
@@ -81,8 +148,13 @@ impl BlinkError {
     pub fn unexpected_token(token: &str, pos: SourcePos) -> Self {
         Self {
             message: format!("Unexpected token '{}'", token),
-            pos: Some(SourceRange { start: pos, end: pos }),
-            error_type: BlinkErrorType::UnexpectedToken { token: token.to_string() },
+            pos: Some(SourceRange {
+                start: pos,
+                end: pos,
+            }),
+            error_type: BlinkErrorType::UnexpectedToken {
+                token: token.to_string(),
+            },
         }
     }
 
@@ -90,10 +162,12 @@ impl BlinkError {
         Self {
             message: format!("Undefined symbol '{}'", name),
             pos: None,
-            error_type: BlinkErrorType::UndefinedSymbol { name: name.to_string() },
+            error_type: BlinkErrorType::UndefinedSymbol {
+                name: name.to_string(),
+            },
         }
     }
-    
+
     pub fn parse(message: impl Into<String>, pos: SourceRange, error_type: ParseErrorType) -> Self {
         Self {
             message: message.into(),
@@ -103,11 +177,19 @@ impl BlinkError {
     }
 
     pub fn parse_unclosed_delimiter(message: &str, delimiter: &str, pos: SourceRange) -> Self {
-        Self::parse(message, pos, ParseErrorType::UnclosedDelimiter(delimiter.into()))
+        Self::parse(
+            message,
+            pos,
+            ParseErrorType::UnclosedDelimiter(delimiter.into()),
+        )
     }
 
     pub fn parse_unexpected_token(token: &str, pos: SourceRange) -> Self {
-        Self::parse(format!("Unexpected token '{}'", token), pos, ParseErrorType::UnexpectedToken(token.into()))
+        Self::parse(
+            format!("Unexpected token '{}'", token),
+            pos,
+            ParseErrorType::UnexpectedToken(token.into()),
+        )
     }
 
     pub fn parse_invalid_number(message: &str, pos: SourceRange) -> Self {
@@ -129,21 +211,29 @@ impl BlinkError {
             error_type: BlinkErrorType::Eval,
         }
     }
-    
+
     pub fn arity(expected: usize, got: usize, form: &str) -> Self {
         Self {
-            message: format!("Wrong number of arguments to '{}': expected {}, got {}", form.clone(), expected, got),
+            message: format!(
+                "Wrong number of arguments to '{}': expected {}, got {}",
+                form.clone(),
+                expected,
+                got
+            ),
             pos: None,
-            error_type: BlinkErrorType::ArityMismatch { expected, got, form: form.into() },
+            error_type: BlinkErrorType::ArityMismatch {
+                expected,
+                got,
+                form: form.into(),
+            },
         }
     }
-    
+
     pub fn with_pos(mut self, pos: Option<SourceRange>) -> Self {
         self.pos = pos;
         self
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub enum LispError {
@@ -180,34 +270,43 @@ pub enum LispError {
     UserDefined {
         message: String,
         pos: Option<SourceRange>,
-        data: Option<ValueRef>
-    }
+        data: Option<ValueRef>,
+    },
 }
-
 
 impl fmt::Display for BlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error_type {
             BlinkErrorType::Tokenizer => write!(f, "Tokenizer error: {}", self.message),
-            BlinkErrorType::Parse(error_type) => {
-                match error_type {
-                    ParseErrorType::UnclosedDelimiter(message) => write!(f, "Unclosed delimiter: {}", message),
-                    ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
-                    ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
-                    ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
-                    ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
+            BlinkErrorType::Parse(error_type) => match error_type {
+                ParseErrorType::UnclosedDelimiter(message) => {
+                    write!(f, "Unclosed delimiter: {}", message)
                 }
+                ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
+                ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
+                ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
+                ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
             },
             BlinkErrorType::Eval => write!(f, "Eval error: {}", self.message),
-            BlinkErrorType::ArityMismatch { expected, got, form } => write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got),
+            BlinkErrorType::ArityMismatch {
+                expected,
+                got,
+                form,
+            } => write!(
+                f,
+                "Arity mismatch in '{}': expected {}, got {}",
+                form, expected, got
+            ),
             BlinkErrorType::UndefinedSymbol { name } => write!(f, "Undefined symbol '{}'", name),
             BlinkErrorType::UnexpectedToken { token } => write!(f, "Unexpected token '{}'", token),
-            BlinkErrorType::UserDefined {  data: _ } => write!(f, "User defined error: {}", self.message),
+            BlinkErrorType::UserDefined { data: _ } => {
+                write!(f, "User defined error: {}", self.message)
+            }
         };
         if let Some(pos) = self.pos {
             write!(f, " at {}", pos);
         }
-        
+
         Ok(())
     }
 }
@@ -219,36 +318,40 @@ impl fmt::Display for LispError {
             TokenizerError { message, pos } => write!(f, "Tokenizer error at {}: {}", pos, message),
             ParseError { message, pos } => write!(f, "Parse error at {}: {}", pos, message),
             EvalError { message, pos } => match pos {
-                        Some(p) => write!(f, "Eval error at {}: {}", p, message),
-                        None => write!(f, "Eval error: {}", message),
-                    },
+                Some(p) => write!(f, "Eval error at {}: {}", p, message),
+                None => write!(f, "Eval error: {}", message),
+            },
             ArityMismatch {
-                        expected,
-                        got,
-                        form,
-                        pos,
-                    } => match pos {
-                        Some(p) => write!(
-                            f,
-                            "Arity mismatch in '{}' at {}: expected {}, got {}",
-                            form, p, expected, got
-                        ),
-                        None => write!(
-                            f,
-                            "Arity mismatch in '{}': expected {}, got {}",
-                            form, expected, got
-                        ),
-                    },
+                expected,
+                got,
+                form,
+                pos,
+            } => match pos {
+                Some(p) => write!(
+                    f,
+                    "Arity mismatch in '{}' at {}: expected {}, got {}",
+                    form, p, expected, got
+                ),
+                None => write!(
+                    f,
+                    "Arity mismatch in '{}': expected {}, got {}",
+                    form, expected, got
+                ),
+            },
             UndefinedSymbol { name, pos } => match pos {
-                        Some(p) => write!(f, "Undefined symbol '{}' at {}", name, p),
-                        None => write!(f, "Undefined symbol '{}'", name),
-                    },
+                Some(p) => write!(f, "Undefined symbol '{}' at {}", name, p),
+                None => write!(f, "Undefined symbol '{}'", name),
+            },
             UnexpectedToken { token, pos } => write!(f, "Unexpected token '{}' at {}", token, pos),
             ModuleError { message, pos } => match pos {
                 Some(p) => write!(f, "Module error at {}: {}", p, message),
                 None => write!(f, "Module error: {}", message),
             },
-            UserDefined { message, pos, data: _ } => match pos {
+            UserDefined {
+                message,
+                pos,
+                data: _,
+            } => match pos {
                 Some(p) => write!(f, "User defined error at {}: {}", p, message),
                 None => write!(f, "User defined error: {}", message),
             },

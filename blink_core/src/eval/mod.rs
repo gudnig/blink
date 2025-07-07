@@ -7,14 +7,12 @@ use std::{sync::Arc, time::Instant};
 
 pub use crate::runtime::EvalContext;
 pub use result::EvalResult;
-pub use helpers::*;
 use parking_lot::RwLock;
 
 use crate::{
-    error::BlinkError, eval::special_forms::{
+    env::Env, eval::special_forms::{
             eval_and, eval_apply, eval_def, eval_def_reader_macro, eval_deref, eval_do, eval_fn, eval_go, eval_if, eval_imp, eval_let, eval_load, eval_macro, eval_mod, eval_or, eval_quasiquote, eval_quote, eval_try
-        }, runtime::{ContextualBoundary, ValueBoundary}, telemetry::TelemetryEvent, value::{unpack_immediate, ImmediateValue, IsolatedValue, Macro, SharedValue, UserDefinedFn, ValueRef}
-        , env::Env
+        }, telemetry::TelemetryEvent, value::{unpack_immediate, Callable, ImmediateValue, ValueRef}, HeapValue
 };
 
 macro_rules! try_eval {
@@ -50,50 +48,51 @@ pub(crate) use {forward_eval, try_eval};
 
 pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
     match expr {
-        ValueRef::Shared(idx) => {
+        ValueRef::Heap(gc_ptr) => {
             // Fetch from arena using the index
-            let shared_value = {
-                let arena = ctx.shared_arena.read();
-                arena.get(idx).map(|idx| idx.clone())
-            };
-            if let Some(shared_value) = shared_value {
-                match shared_value.as_ref() {
-                    SharedValue::List(list) if list.is_empty() => {
+            let heap_value = gc_ptr.to_heap_value();
+            match heap_value {
+                HeapValue::List(list) if list.is_empty() => {
                         EvalResult::Value(ValueRef::nil())
                     }
-                    SharedValue::List(list) => eval_list(&list, ctx),
+                    HeapValue::List(list) => eval_list(&list, ctx),
                     _ => {
                         // Everything else is self-evaluating
                         EvalResult::Value(expr)
                     }
                 }
-            } else {
-                // Invalid/stale arena index
-                EvalResult::Value(ctx.eval_error("Invalid value reference"))
-            }
         }
 
         ValueRef::Immediate(packed) => {
             match unpack_immediate(packed) {
                 ImmediateValue::Number(_)
-                | ImmediateValue::Bool(_)
-                | ImmediateValue::Keyword(_)
-                | ImmediateValue::Nil => {
-                    // Self-evaluating
-                    EvalResult::Value(expr)
-                }
+                            | ImmediateValue::Bool(_)
+                            | ImmediateValue::Keyword(_)
+                            | ImmediateValue::Nil => {
+                                // Self-evaluating
+                                EvalResult::Value(expr)
+                            }
                 ImmediateValue::Symbol(symbol_id) => {
-                    match ctx.resolve_symbol(symbol_id) {
+                                match ctx.resolve_symbol(symbol_id) {
+                                    Ok(val) => EvalResult::Value(val),
+                                    Err(err) => EvalResult::Value(ctx.error_value(err)),
+                                }
+                            }
+                ImmediateValue::Module(module_alias , symbol) => {
+                    match ctx.resolve_module_symbol(module_alias, symbol) {
                         Ok(val) => EvalResult::Value(val),
                         Err(err) => EvalResult::Value(ctx.error_value(err)),
                     }
                 }
             }
         }
-
-        ValueRef::Gc(_gc_ptr) => {
-            // TODO: Handle GC values when implemented
-            todo!("GC values not yet implemented")
+        ValueRef::Native(tagged_ptr) => {
+            match expr.get_native_fn() {
+                Some(native_fn) => {
+                    native_fn.call(Vec::new(), ctx)
+                }
+                None => EvalResult::Value(ctx.eval_error("Not a native function")),
+            }
         }
     }
 }
@@ -331,19 +330,13 @@ fn eval_function_body_inline(
 
 pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     match &func {
-        ValueRef::Shared(idx) => {
-            let func = {
-                let arena = ctx.shared_arena.read();
-                arena.get(*idx).unwrap().clone()
-            };
+        ValueRef::Gc(gc_ptr) => {
+            let func = gc_ptr.to_heap_value();
 
-            match func.as_ref() {
-                SharedValue::NativeFunction(f) => {
-                    f.call(args, ctx)
-                },
+            match func {
 
-                // destructuring the macro
-                SharedValue::Macro(Macro {
+
+                HeapValue::Macro(Callable {
                     params,
                     body,
                     env,
@@ -391,7 +384,7 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, macro_ctx)
                 }
 
-                SharedValue::UserDefinedFunction(UserDefinedFn { params, body, env }) => {
+                HeapValue::Function(Callable { params, body, env, is_variadic }) => {
                     if params.len() != args.len() {
                         return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "fn"));
                     }
@@ -411,6 +404,9 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                 }
                 _ => EvalResult::Value(ctx.eval_error("Not a function")),
             }
+        }
+        ValueRef::Native(_) => {
+            func.call_native(args, ctx)
         }
 
         _ => EvalResult::Value(ctx.eval_error("Not a function")),

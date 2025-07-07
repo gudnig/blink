@@ -2,28 +2,106 @@ use crate::error::BlinkError;
 use crate::runtime::mmtk::ObjectHeader;
 use crate::runtime::TypeTag;
 use crate::value::Callable;
+use crate::{BlinkHashMap, BlinkHashSet};
 use crate::{runtime::BlinkVM, ValueRef};
-use mmtk::{util::ObjectReference, Mutator};
+use mmtk::util::{Address, OpaquePointer, VMThread};
+use mmtk::MutatorContext;
+use mmtk::{util::ObjectReference, Mutator, util::VMMutatorThread, memory_manager};
+use parking_lot::Mutex;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use crate::value::HeapValue;
 
 thread_local! {
-    static MUTATOR: RefCell<Option<Mutator<BlinkVM>>> = RefCell::new(None);
+    static MUTATOR: RefCell<Option<Box<Mutator<BlinkVM>>>> = RefCell::new(None);
+    static THREAD_TLS: RefCell<Option<VMMutatorThread>> = RefCell::new(None);
 }
+static THREAD_IDS: OnceLock<Mutex<HashMap<std::thread::ThreadId, usize>>> = OnceLock::new();
+static COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 impl BlinkVM {
     pub fn with_mutator<T>(&self, f: impl FnOnce(&mut Mutator<BlinkVM>) -> T) -> T {
         MUTATOR.with(|m| {
             let mut mutator_ref = m.borrow_mut();
             if mutator_ref.is_none() {
-                let mutator = self.mmtk.get_plan().mu.get();
+                // Create VMMutatorThread using current thread as identifier
+                let tls = Self::create_vm_mutator_thread();
+                
+                // Get static reference to MMTK (required by bind_mutator)
+                let static_mmtk = self.get_static_mmtk();
+                
+                // CORRECT: Bind mutator with VMMutatorThread
+                let mutator = mmtk::memory_manager::bind_mutator(static_mmtk, tls);
                 *mutator_ref = Some(mutator);
             }
 
-            // Get mutable reference to the mutator
             let mutator = mutator_ref.as_mut().unwrap();
-            f(mutator)
+            f(mutator.as_mut())
         })
+    }
+    
+
+    fn create_vm_mutator_thread() -> VMMutatorThread {
+        let thread_id = std::thread::current().id();
+        let map = THREAD_IDS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = map.lock();
+        
+        let unique_id = *map.entry(thread_id).or_insert_with(|| {
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        });
+        
+        let address = unsafe { Address::from_usize(unique_id) };
+        let opaque = OpaquePointer::from_address(address);
+        
+        let vm_thread = VMThread(opaque);
+        VMMutatorThread(vm_thread)
+    }
+    
+    
+    // Handle the static lifetime requirement for MMTK
+    fn get_static_mmtk(&self) -> &'static mmtk::MMTK<BlinkVM> {
+        // UNSAFE: Required because bind_mutator expects 'static
+        // This is safe as long as your VM instance lives for the program duration
+        unsafe {
+            std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
+        }
+    }
+    
+    // Explicit initialization for worker threads
+    pub fn init_mutator_for_thread(&self) -> Result<(), String> {
+        MUTATOR.with(|m| {
+            let mut mutator_ref = m.borrow_mut();
+            if mutator_ref.is_some() {
+                return Err("Mutator already initialized for this thread".to_string());
+            }
+            
+            let tls = Self::create_vm_mutator_thread();
+            let static_mmtk = self.get_static_mmtk();
+            
+            let mutator = memory_manager::bind_mutator(static_mmtk, tls);
+            *mutator_ref = Some(mutator);
+            
+            println!("Initialized mutator for thread: {:?}", tls);
+            Ok(())
+        })
+    }
+    
+    pub fn destroy_mutator_for_thread(&self) {
+        MUTATOR.with(|m| {
+            let mut mutator_ref = m.borrow_mut();
+            if let Some(mutator) = mutator_ref.take() {
+                // Clean up the mutator
+                drop(mutator);
+                println!("Destroyed mutator for current thread");
+            }
+        });
+    }
+    
+    pub fn has_thread_local_mutator(&self) -> bool {
+        MUTATOR.with(|m| m.borrow().is_some())
     }
 
     pub fn alloc_vec(&self, items: Vec<ValueRef>) -> ObjectReference {
@@ -107,9 +185,14 @@ impl BlinkVM {
         })
     }
 
+    pub fn alloc_blink_hash_map(&self, map: BlinkHashMap) -> ObjectReference {
+        let pairs: Vec<(&ValueRef, &ValueRef)> = map.iter().collect();
+        self.alloc_map(pairs)
+    }
+
     
 
-    pub fn alloc_map(&self, pairs: Vec<(ValueRef, ValueRef)>) -> ObjectReference {
+    pub fn alloc_map(&self, pairs: Vec<(&ValueRef, &ValueRef)>) -> ObjectReference {
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(pairs.len());
             let item_count = pairs.len();
@@ -138,10 +221,15 @@ impl BlinkVM {
                 std::ptr::write(item_count_ptr, item_count);
                 
                 // Organize into buckets
+
+                let mut hasher = DefaultHasher::new();
                 let mut buckets: Vec<Vec<(ValueRef, ValueRef)>> = vec![Vec::new(); bucket_count];
                 for (key, val) in pairs {
-                    let bucket = &key.hash() % bucket_count;
-                    buckets[bucket].push((key, val));
+                    let mut hasher = DefaultHasher::new();
+                    key.hash(&mut hasher);
+                    let hash_value = hasher.finish();
+                    let bucket = (hash_value as usize) % bucket_count;
+                    buckets[bucket].push((*key, *val));
                 }
                 
                 // Write bucket offsets
@@ -167,8 +255,13 @@ impl BlinkVM {
             ObjectReference::from_raw_address(address).unwrap()
         })
     }
+
+    pub fn alloc_blink_hash_set(&self, set: BlinkHashSet) -> ObjectReference {
+        let items: Vec<&ValueRef> = set.iter().collect();
+        self.alloc_set(items)
+    }
     
-    pub fn alloc_set(&self, items: Vec<ValueRef>) -> ObjectReference {
+    pub fn alloc_set(&self, items: Vec<&ValueRef>) -> ObjectReference {
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(items.len());
             let item_count = items.len();
@@ -199,8 +292,11 @@ impl BlinkVM {
                 // Organize into buckets
                 let mut buckets: Vec<Vec<ValueRef>> = vec![Vec::new(); bucket_count];
                 for item in items {
-                    let bucket = &item.hash() % bucket_count;
-                    buckets[bucket].push(item);
+                    let mut hasher = DefaultHasher::new();
+                    item.hash(&mut hasher);
+                    let hash_value = hasher.finish();
+                    let bucket = (hash_value as usize) % bucket_count;
+                    buckets[bucket].push(*item);
                 }
                 
                 // Write bucket offsets
@@ -239,13 +335,11 @@ impl BlinkVM {
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
             HeapValue::List(list) => self.alloc_vec(list),
-            HeapValue::Str(str) => self.alloc_str(str),
-            HeapValue::Map(map) => self.alloc_map(map),
+            HeapValue::Str(str) => self.alloc_str(&str),
+            HeapValue::Map(map) => self.alloc_blink_hash_map(map),
             HeapValue::Vector(value_refs) => self.alloc_vec(value_refs),
-            HeapValue::Set(blink_hash_set) => self.alloc_set(blink_hash_set),
+            HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
-            HeapValue::NativeFunction(native_fn) => self.alloc_native_fn(native_fn),
-            HeapValue::Module(module_ref) => self.alloc_module(module_ref),
             HeapValue::Function(callable) => todo!(),
             HeapValue::Macro(_) => todo!(),
             HeapValue::Future(blink_future) => todo!(),
@@ -276,7 +370,7 @@ fn read_header(address: ObjectReference) -> ObjectHeader {
 }
 
 impl ValueRef {
-    pub fn read_heap_value(&self) -> Option<&HeapValue> {
+    pub fn read_heap_value(&self) -> Option<HeapValue> {
 
         match self {
             ValueRef::Immediate(_) => None,

@@ -8,7 +8,7 @@ use crate::collections::{ContextualValueRef, ValueContext};
 use crate::error::{BlinkError, BlinkErrorType};
 use crate::eval::{eval_func, EvalContext, EvalResult};
 use crate::future::BlinkFuture;
-use crate::value::{unpack_immediate, ValueRef, ImmediateValue, Macro, NativeFn};
+use crate::value::{unpack_immediate, Callable, ImmediateValue, NativeFn, ValueRef};
 use crate::env::Env;
 
 
@@ -523,7 +523,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
     let cons_expr = ctx.list_value(vec![cons_sym_val, do_sym_val, body_sym_val]);
     let when_body = vec![if_sym_val, condition_sym_val, cons_expr];
     
-    let when_macro = Macro {
+    let when_macro = Callable {
         params: vec![condition_sym],  
         is_variadic: true,       
         body: when_body,        
@@ -536,7 +536,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
     // unless - expands to (if (not condition) (do ...))
     let not_expr = ctx.list_value(vec![not_sym_val, condition_sym_val]);
     let unless_body = vec![if_sym_val, not_expr, cons_expr];
-    let unless_macro = Macro {
+    let unless_macro = Callable {
         params: vec![condition_sym],
         is_variadic: true,
         body: unless_body,
@@ -579,7 +579,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         middle_if
     ]);
 
-    let and_macro = Macro {
+    let and_macro = Callable {
         params: vec![forms_sym],
         is_variadic: true,
         body: vec![and_body], // Single expansion expression
@@ -609,7 +609,7 @@ pub fn register_builtin_macros(ctx: &mut EvalContext) {
         inner_or_if
     ]);
 
-    let or_macro = Macro {
+    let or_macro = Callable {
         params: vec![forms_sym],
         is_variadic: true,
         body: vec![or_body],
@@ -670,7 +670,7 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         inner_if
     ]);
 
-    let cond_macro = Macro {
+    let cond_macro = Callable {
         params: vec![clauses_sym],
         is_variadic: true,
         body: vec![cond_body],
@@ -705,7 +705,7 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         fn_expr
     ]);
 
-    let defn_macro = Macro {
+    let defn_macro = Callable {
         params: vec![name_sym, args_sym],
         is_variadic: true,
         body: vec![defn_body],
@@ -777,7 +777,7 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         let_body
     ]);
 
-    let thread_first_macro = Macro {
+    let thread_first_macro = Callable {
         params: vec![x_sym, forms_sym],
         is_variadic: true,
         body: vec![thread_first_body],
@@ -834,7 +834,7 @@ pub fn register_complex_macros(ctx: &mut EvalContext) {
         thread_last_let_body
     ]);
 
-    let thread_last_macro = Macro {
+    let thread_last_macro = Callable {
         params: vec![x_sym, forms_sym],
         is_variadic: true,
         body: vec![thread_last_body],

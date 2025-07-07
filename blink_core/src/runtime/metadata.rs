@@ -42,8 +42,8 @@ impl ValueMetadataStore {
 }
 
 impl GcPtr {
-    pub fn object_id(&self) -> ValueId {
-        todo!()
+    pub fn object_id(&self) -> Option<ValueId> {
+        Some(self.0.to_raw_address().as_usize() as u64)
     }
 
     
@@ -54,17 +54,16 @@ impl ValueRef {
     pub fn get_or_create_id(&self) -> Option<ValueId> {
         match self {
             ValueRef::Immediate(_) => None,
-            ValueRef::Shared(idx) => Some(idx.into_raw_parts().0 as u64),
-            ValueRef::Gc(ptr) => {
-                // Future: use GC object ID
-                Some(ptr.object_id())
-            }
+            ValueRef::Heap(ptr) => {
+                        ptr.object_id()
+                    }
+            ValueRef::Native(ptr) => Some(*ptr as u64),
         }
     }
     
     pub fn with_position(self, pos: SourceRange, ctx: &mut EvalContext) -> Self {
         if let Some(id) = self.get_or_create_id() {
-            ctx.value_metadata.write().set_position(id, pos);
+            ctx.vm.value_metadata.write().set_position(id, pos);
         }
         self
     }

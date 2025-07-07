@@ -1,7 +1,7 @@
 use crate::{
     error::BlinkError,
     eval::{EvalContext, EvalResult},
-    runtime::ContextualBoundary,
+    runtime::{ContextualBoundary, ValueBoundary},
     value::IsolatedValue,
     ValueRef,
 };
@@ -26,6 +26,7 @@ impl std::fmt::Debug for NativeFn {
 }
 
 impl NativeFn {
+
     pub fn call(&self, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         match self {
             NativeFn::Isolated(f) => {

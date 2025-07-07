@@ -1,5 +1,4 @@
 mod boundary;
-mod shared_arena;
 mod goroutine;
 mod async_context;
 mod metadata;
@@ -13,7 +12,6 @@ mod mmtk;
 
 
 pub use boundary::*;
-pub use shared_arena::*;
 pub use goroutine::*;
 pub use async_context::*;
 pub use metadata::*;

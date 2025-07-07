@@ -22,6 +22,13 @@ impl Display for BlinkHashSet {
     }
 }
 
+impl Iterator for BlinkHashSet {
+    type Item = ValueRef;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.set.iter().next().copied()
+    }
+}
+
 impl BlinkHashSet {
     pub fn new() -> Self {
         Self {

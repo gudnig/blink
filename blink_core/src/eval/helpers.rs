@@ -2,43 +2,11 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{pack_bool, unpack_immediate, ImmediateValue, Macro, ModuleRef, NativeFn, UserDefinedFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
 use crate::env::Env;
 
 impl EvalContext<'_> {
 
-    // Getters
-    pub fn get_err(&self, value: &ValueRef) -> BlinkError {
-        let arena = self.shared_arena.read();
-        match value {
-            ValueRef::Shared(idx) => {
-                if let Some(shared) = arena.get(*idx) {
-                    if let SharedValue::Error(e) = shared.as_ref() {
-                        return e.clone();
-                    }
-                    else {
-                        BlinkError::eval("Expected error")
-                    }
-                } else {
-                    BlinkError::eval("Expected error")
-                }
-            },
-            _ => {
-                BlinkError::eval("Expected error")
-            }
-        }
-    }
-    
-    pub fn get_string(&self, val: ValueRef) -> Option<String> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::Str(s) = shared.as_ref() {
-                    return Some(s.clone());
-                }
-            }
-        }
-        None
-    }
 
     pub fn get_number(&self, val: ValueRef) -> Option<f64> {
         if let ValueRef::Immediate(packed) = val {
@@ -71,117 +39,9 @@ impl EvalContext<'_> {
 
     }
 
-    pub fn get_future(&self, val: ValueRef) -> Option<BlinkFuture> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::Future(future) = shared.as_ref() {
-                    return Some(future.clone());
-                }
-            }
-        }
-        None
-    }
-
-
-
-    
-    pub fn get_vec(&self, val: ValueRef) -> Option<Vec<ValueRef>> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::Vector(items) = shared.as_ref() {
-                    return Some(items.clone());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_map(&self, val: ValueRef) -> Option<BlinkHashMap> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::Map(map) = shared.as_ref() {
-                    return Some(map.clone());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_set(&self, val: ValueRef) -> Option<BlinkHashSet> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::Set(set) = shared.as_ref() {
-                    return Some(set.clone());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_list(&self, val: ValueRef) -> Option<Vec<ValueRef>> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                if let SharedValue::List(items) = shared.as_ref() {
-                    return Some(items.clone());
-                }
-            }
-        }
-        None
-    }
-
-    pub fn get_vec_or_list_items(&self, val: ValueRef) -> Option<Vec<ValueRef>> {
-        if let ValueRef::Shared(idx) = val {
-            if let Some(shared) = self.shared_arena.read().get(idx) {
-                match shared.as_ref() {
-                    SharedValue::List(items) => Some(items.clone()),
-                    SharedValue::Vector(items) => Some(items.clone()), // Accept vectors too
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-    
-
-    pub fn with_map<T>(&self, val: ValueRef, f: impl FnOnce(&BlinkHashMap) -> T) -> Option<T> {
-        if let ValueRef::Shared(idx) = val {
-            let arena = self.shared_arena.read();
-            if let Some(shared) = arena.get(idx) {
-                if let SharedValue::Map(map) = shared.as_ref() {
-                    return Some(f(map));
-                }
-            }
-        }
-        None
-    }
-    
-    
-
-    // Checking
-    pub fn is_err(&self, value: &ValueRef) -> bool {
-        let arena = self.shared_arena.read();
-        value.is_error(&arena)
-    }
-
-    pub fn is_nil(&self, value: &ValueRef) -> bool {
-        match value {
-            ValueRef::Immediate(val) => {
-                let unpacked = unpack_immediate(*val);
-                if let ImmediateValue::Nil = unpacked {
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-    }
-
-
+    // ------------------------------------------------------------
     // Value creation
+    // ------------------------------------------------------------
     pub fn bool_value(&mut self, value: bool) -> ValueRef {
         ValueRef::boolean(value)
     }
@@ -190,7 +50,8 @@ impl EvalContext<'_> {
         ValueRef::number(value)
     }
     pub fn symbol_value(&mut self, value: &str) -> ValueRef {
-        let symbol = self.symbol_table.write().intern(value);
+        let mut symbol_table =  self.vm.symbol_table.write();
+        let symbol = symbol_table.intern(value);
         ValueRef::symbol(symbol)
     }
 
@@ -199,7 +60,8 @@ impl EvalContext<'_> {
     }
 
     pub fn string_value(&mut self, value: &str) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Str(value.to_string()))
+        let r = self.vm.alloc_str(value);
+        ValueRef::shared(r)
     }
 
     pub fn list_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
@@ -207,60 +69,78 @@ impl EvalContext<'_> {
     }
 
     pub fn vector_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Vector(values))
+        let object_ref = self.vm.alloc_vec(values);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn map_value(&mut self, pairs: Vec<(ValueRef, ValueRef)>) -> ValueRef {
         let map = BlinkHashMap::from_pairs(pairs);
-        self.shared_arena.write().alloc(SharedValue::Map(map))
+        let object_ref = self.vm.alloc_map(map);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }   
 
     pub fn set_value(&mut self, set: Vec<ValueRef>) -> ValueRef {
         let set = BlinkHashSet::from_iter(set);
-        self.shared_arena.write().alloc(SharedValue::Set(set))
+        let object_ref = self.vm.alloc_set(set);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn future_value(&mut self, future: BlinkFuture) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Future(future))
+        let object_ref = self.vm.alloc_future(future);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn native_function_value(&mut self, func: NativeFn) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::NativeFunction(func))
+        match func {
+            NativeFn::Isolated(f) => {
+                ValueRef::isolated_native_fn(f)
+            }
+            NativeFn::Contextual(f) => {
+                ValueRef::contextual_native_fn(f)
+            }
+        }
     }
 
     pub fn user_defined_function_value(&mut self, params: Vec<u32>, body: Vec<ValueRef>, env: Arc<RwLock<Env>>) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::UserDefinedFunction(UserDefinedFn { params, body, env }))
+        let object_ref = self.vm.alloc_user_defined_fn(params, body, env);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
-    pub fn macro_value(&mut self, mac: Macro) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Macro(mac))
+    pub fn macro_value(&mut self, mac: Callable) -> ValueRef {
+        let object_ref = self.vm.alloc_macro(mac);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn module_value(&mut self, module_name: u32, symbol_name: u32) -> ValueRef {
-        let val = SharedValue::Module(ModuleRef {
-            module: module_name,
-            symbol: symbol_name,
-        });
-        self.shared_arena.write().alloc(val)
+        ValueRef::module(module_name, symbol_name)
     }
 
     pub fn empty_map_value(&mut self) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Map(BlinkHashMap::new(ValueContext::new(self.shared_arena.clone()))))
+        let map = BlinkHashMap::new();
+        let object_ref = self.vm.alloc_map(map);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_set_value(&mut self) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Set(BlinkHashSet::new(ValueContext::new(self.shared_arena.clone()))))
+        let set = BlinkHashSet::new();
+        let object_ref = self.vm.alloc_set(set);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_list_value(&mut self) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::List(Vec::new()))
+        let list = Vec::new();
+        let object_ref = self.vm.alloc_list(list);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_vector_value(&mut self) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Vector(Vec::new()))
+        let vector = Vec::new();
+        let object_ref = self.vm.alloc_vec(vector);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
     pub fn error_value(&mut self, error: BlinkError) -> ValueRef {
-        self.shared_arena.write().alloc(SharedValue::Error(error))
+        let object_ref = self.vm.alloc_error(error);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     // Error creation ----------------------------
@@ -372,12 +252,18 @@ impl EvalContext<'_> {
                     ImmediateValue::Number(n) => n.to_string(),
                     ImmediateValue::Bool(b) => b.to_string(),
                     ImmediateValue::Symbol(id) => {
-                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
-                                    }
+                                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                                    }
                     ImmediateValue::Nil => "nil".to_string(),
                     ImmediateValue::Keyword(id) => {
-                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
-                    }
+                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                    }
+                    ImmediateValue::Module(module, symbol) => {
+                        let symbol_table = self.vm.symbol_table.read();
+                        let module_name = symbol_table.get_symbol(module).unwrap_or("<unknown>");
+                        let symbol_name = symbol_table.get_symbol(symbol).unwrap_or("<unknown>");
+                        format!("#<module {}/{}>", module_name, symbol_name)
+                    },
                 }
             }
             ValueRef::Shared(idx) => {
@@ -391,48 +277,46 @@ impl EvalContext<'_> {
         }
     }
     
-    fn format_shared_value(&self, val: &SharedValue) -> String {
+    fn format_heap_value(&self, val: &HeapValue) -> String {
         match val {
-            SharedValue::Str(s) => format!("\"{}\"", s),
-            SharedValue::List(items) => {
-                        let formatted: Vec<String> = items.iter()
-                            .map(|item| self.format_value(*item))
-                            .collect();
-                        format!("({})", formatted.join(" "))
-                    }
-            SharedValue::Vector(items) => {
-                        let formatted: Vec<String> = items.iter()
-                            .map(|item| self.format_value(*item))
-                            .collect();
-                        format!("[{}]", formatted.join(" "))
-                    }
-            SharedValue::Map(map) => {
-                        let formatted: Vec<String> = map.iter()
-                            .map(|(k, v)| format!("{} {}", self.format_value(*k), self.format_value(*v)))
-                            .collect();
-                        format!("{{{}}}", formatted.join(", "))
-                    }
-            SharedValue::Error(e) => format!("#<error: {}>", e),
-            SharedValue::NativeFunction(_) => "#<native-fn>".to_string(),
-            SharedValue::UserDefinedFunction(f) => format!("#<fn {:?}>", f.params),
-            SharedValue::Set(hash_set) => format!("#<set {:?}>", hash_set),
-            SharedValue::Future(blink_future) => format!("#<future {:?}>", blink_future),
-            SharedValue::Module(module_ref) => format!("#<module {:?}>", module_ref),
-            SharedValue::Macro(_) => "#<macro>".to_string(),
+            HeapValue::Str(s) => format!("\"{}\"", s),
+            HeapValue::List(items) => {
+                                let formatted: Vec<String> = items.iter()
+                                    .map(|item| self.format_value(*item))
+                                    .collect();
+                                format!("({})", formatted.join(" "))
+                            }
+            HeapValue::Vector(items) => {
+                                let formatted: Vec<String> = items.iter()
+                                    .map(|item| self.format_value(*item))
+                                    .collect();
+                                format!("[{}]", formatted.join(" "))
+                            }
+            HeapValue::Map(map) => {
+                                let formatted: Vec<String> = map.iter()
+                                    .map(|(k, v)| format!("{} {}", self.format_value(*k), self.format_value(*v)))
+                                    .collect();
+                                format!("{{{}}}", formatted.join(", "))
+                            }
+            HeapValue::Error(e) => format!("#<error: {}>", e),
+            HeapValue::Function(f) => format!("#<fn {:?}>", f.params),
+            HeapValue::Set(hash_set) => format!("#<set {:?}>", hash_set),
+            HeapValue::Future(blink_future) => format!("#<future {:?}>", blink_future),
+            HeapValue::Macro(mac) => format!("#<macro {:?}>", mac),
+            HeapValue::Env(env) => format!("#<env {:?}>", env),
         }
     }
 
 
     pub fn get_vector_elements(&self, val: ValueRef) -> Result<Vec<ValueRef>, String> {
         match val {
-            ValueRef::Shared(idx) => {
-                if let Some(shared) = self.shared_arena.read().get(idx) {
-                    match shared.as_ref() {
-                        SharedValue::Vector(items) => Ok(items.clone()),
-                        SharedValue::List(items) if !items.is_empty() => {
+            ValueRef::Heap(gc_ptr) => {
+                match gc_ptr.as_ref() {
+                        HeapValue::Vector(items) => Ok(items.clone()),
+                        HeapValue::List(items) if !items.is_empty() => {
                             // Handle (vector elem1 elem2 ...) form
                             if let Some(head_name) = self.get_symbol_name(items[0]) {
-                                if head_name == "vector" {
+                                if head_name == "vector" { // TODO this could be int comparison
                                     Ok(items[1..].to_vec())
                                 } else {
                                     Err("let expects a vector of bindings".to_string())
@@ -443,12 +327,67 @@ impl EvalContext<'_> {
                         }
                         _ => Err("let expects a vector of bindings".to_string()),
                     }
-                } else {
-                    Err("Invalid reference".to_string())
-                }
+                
             }
             _ => Err("let expects a vector of bindings".to_string()),
         }
     }
 
+}
+
+
+impl ValueRef {
+    // Type checking
+    pub fn is_module(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Module(_, _) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+    pub fn is_number(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Number(_) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+    pub fn is_symbol(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Symbol(_) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+    pub fn is_keyword(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Keyword(_) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
 }
