@@ -3,8 +3,6 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::collections::{ContextualValueRef, ValueContext};
-
 use crate::error::{BlinkError, BlinkErrorType};
 use crate::eval::{eval_func, EvalContext, EvalResult};
 use crate::future::BlinkFuture;
@@ -22,7 +20,7 @@ pub fn native_add(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         if let Some(val) = ctx.get_number(arg) {
             sum += val;
         } else {
-            return EvalResult::Value(ctx.eval_error(&format!("+ expects numbers, got {}", ctx.type_tag(arg))));
+            return EvalResult::Value(ctx.eval_error(&format!("+ expects numbers, got {}", arg.type_tag())));
         }
     }
     EvalResult::Value(ctx.number_value(sum))
@@ -37,20 +35,20 @@ pub fn native_sub(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         if let Some(val) = ctx.get_number(args[0]) {
             return EvalResult::Value(ctx.number_value(-val));
         } else {
-            return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", ctx.type_tag(args[0]))));
+            return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", args[0].type_tag())));
         }
     }
     
     // Binary/n-ary: (- a b c) => a - b - c
     let result = ctx.get_number(args[0]);
     if result.is_none() {
-        return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", ctx.type_tag(args[0]))));
+        return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", args[0].type_tag())));
     }
     let mut result = result.unwrap();
     for arg in &args[1..] {
         let val = ctx.get_number(*arg);
         if val.is_none() {
-            return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", ctx.type_tag(*arg))));
+            return EvalResult::Value(ctx.eval_error(&format!("- expects numbers, got {}", arg.type_tag())));
         }
         let val = val.unwrap();
         result -= val;
@@ -68,7 +66,7 @@ pub fn native_mul(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         if let Some(val) = ctx.get_number(arg) {
             product *= val;
         } else {
-            return EvalResult::Value(ctx.eval_error(&format!("* expects numbers, got {}", ctx.type_tag(arg))));
+            return EvalResult::Value(ctx.eval_error(&format!("* expects numbers, got {}", arg.type_tag())));
         }
     }
     EvalResult::Value(ctx.number_value(product))
@@ -97,16 +95,7 @@ pub fn native_div(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
 
 pub fn native_eq(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     let result = if let Some((first, rest)) = args.split_first() {
-        match first {
-            ValueRef::Immediate(packed_first) => {
-                rest.iter().all(|arg| matches!(arg, ValueRef::Immediate(packed) if packed == packed_first))
-            }
-            ValueRef::Shared(_) | ValueRef::Gc(_) => {
-                // Create context only if we need it for Shared or Gc comparisons
-                let context = ValueContext::new(ctx.shared_arena.clone());
-                rest.iter().all(|arg| arg.eq_with_context(first, &context))
-            }
-        }
+        rest.iter().all(|arg| arg == first)
     } else {
         true
     };
@@ -156,10 +145,8 @@ pub fn native_map_construct(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalR
 }
 
 pub fn native_print(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
-    let context = ValueContext::new(ctx.shared_arena.clone());
     for val in args {
-        let contextual_val = ContextualValueRef::new(val, context.clone());
-        print!("{} ", contextual_val);
+        print!("{} ", val);
     }
     println!();
     EvalResult::Value(ctx.nil_value())
@@ -171,7 +158,7 @@ pub fn native_type_of(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult 
     }
 
     let arg = &args[0];
-    let type_name = &ctx.type_tag(*arg);
+    let type_name = arg.type_name();
 
     EvalResult::Value(ctx.string_value(type_name))
 }
@@ -181,9 +168,9 @@ pub fn native_cons(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "cons"));
     }
     let mut new_list = vec![args[0]];
-    let old_list =  if let Some(v)  = ctx.get_list(args[1]){
+    let old_list =  if let Some(v)  = args[0].get_list(){
         v 
-    } else if let Some(v) = ctx.get_vec(args[1]){
+    } else if let Some(v) = args[1].get_vec(){
         v
     } else {
         return EvalResult::Value(ctx.eval_error("second argument to cons must be a list or vector"));
@@ -197,7 +184,7 @@ pub fn native_first(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "first"));
     }
     
-    match ctx.get_list(args[0]) {
+    match args[0].get_list() {
         Some(list) => {
             if list.is_empty() {
                 EvalResult::Value(ctx.nil_value())
@@ -205,7 +192,7 @@ pub fn native_first(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
                 EvalResult::Value(list[0])
             }
         },
-        None => match ctx.get_vec(args[0]) {
+        None => match args[0].get_vec() {
             Some(vec) => {
                 if vec.is_empty() {
                     EvalResult::Value(ctx.nil_value())
@@ -223,12 +210,12 @@ pub fn native_rest(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "rest"));
     }
     
-    match ctx.get_list(args[0]) {
+    match args[0].get_list() {
         Some(list) => {
             let rest_items: Vec<ValueRef> = list.iter().skip(1).cloned().collect();
             EvalResult::Value(ctx.list_value(rest_items))
         },
-        None => match ctx.get_vec(args[0]) {
+        None => match args[0].get_vec() {
             Some(vec) => {
                 let rest_items: Vec<ValueRef> = vec.iter().skip(1).cloned().collect();
                 EvalResult::Value(ctx.list_value(rest_items)) // Note: returns list, not vector
@@ -243,9 +230,9 @@ pub fn native_empty_q(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult 
         return EvalResult::Value(ctx.arity_error(1, args.len(), "empty?"));
     }
     
-    let is_empty = match ctx.get_list(args[0]) {
+    let is_empty = match args[0].get_list() {
         Some(list) => list.is_empty(),
-        None => match ctx.get_vec(args[0]) {
+        None => match args[0].get_vec() {
             Some(vec) => vec.is_empty(),
             None => {
                 return EvalResult::Value(ctx.eval_error("empty? expects a list or vector"));
@@ -261,9 +248,9 @@ pub fn native_count(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "count"));
     }
     
-    let count = match ctx.get_list(args[0]) {
+    let count = match args[0].get_list() {
         Some(list) => list.len(),
-        None => match ctx.get_vec(args[0]) {
+        None => match args[0].get_vec() {
             Some(vec) => vec.len(),
             None => {
                 return EvalResult::Value(ctx.eval_error("count expects a list or vector"));
@@ -286,7 +273,7 @@ pub fn native_get(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     
     let target_ref = target_val;    
 
-    if let Some(target) = ctx.get_vec(*target_val){
+    if let Some(target) = target_val.get_vec(){
         if let Some(n) = ctx.get_number(*key_val){
             let idx = n as usize;
             if let Some(val) = target.get(idx) {
@@ -299,7 +286,7 @@ pub fn native_get(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         } else {
             return EvalResult::Value(ctx.eval_error("get expects a number as second argument"));
         }
-    } else if let Some(target) = ctx.get_list(*target_val){
+    } else if let Some(target) = target_val.get_list(){
         if let Some(n) = ctx.get_number(*key_val){
             let idx = n as usize;
             if let Some(val) = target.get(idx) {
@@ -312,7 +299,7 @@ pub fn native_get(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         } else {
             return EvalResult::Value(ctx.eval_error("get expects a number as second argument"));
         }
-    } else if let Some(target) = ctx.get_map(*target_val){
+    } else if let Some(target) = target_val.get_map(){
         let res = target.get(key_val);
         if let Some(val) = res {
             return EvalResult::Value(*val);
@@ -333,9 +320,9 @@ pub fn native_map(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     
     let func = args[0];
     let collection = {
-        if let Some(list) = ctx.get_list(args[1]) {
+        if let Some(list) = args[1].get_list() {
             list
-        } else if let Some(vec) = ctx.get_vec(args[1]) {
+        } else if let Some(vec) = args[1].get_vec() {
             vec
         } else {
             return EvalResult::Value(ctx.eval_error("map expects a list or vector"));
@@ -364,7 +351,7 @@ fn map_inline(
         let result = eval_func(func, vec![items[index]], ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 results.push(val);
@@ -377,7 +364,7 @@ fn map_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |resolved_val, ctx| {
-                        if ctx.is_err(&resolved_val) {
+                        if resolved_val.is_error() {
                             return EvalResult::Value(resolved_val);
                         }
                         
@@ -403,7 +390,7 @@ fn native_complete_future(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalRes
     if args.len() != 2 {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "complete"));
     }
-    if let Some(future) = ctx.get_future(args[0]){
+    if let Some(future) = args[0].get_future(){
         future.complete(args[1]).map_err(|e| BlinkError::eval(e.to_string()));
         return EvalResult::Value(ctx.nil_value());
     } else {
@@ -416,7 +403,7 @@ fn native_error(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "error"));
     }
 
-    let message = if let Some(message) = ctx.get_string(args[0]) {
+    let message = if let Some(message) = args[0].get_string() {
         message
     } else {
         "".to_string()
@@ -441,7 +428,8 @@ fn native_error(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
 pub fn register_builtins(ctx: &mut EvalContext) {
 
     let reg = |s: &str, f: fn(Vec<ValueRef>, &mut EvalContext) -> EvalResult, ctx: &mut EvalContext| -> ValueRef {
-        let sym = ctx.symbol_table.write().intern(s);
+        let sym = ctx.intern_symbol(s);
+        let sym = ctx.get_symbol_id(sym).unwrap();
         let native_fn = NativeFn::Contextual(Box::new(f));
         let val = ctx.native_function_value(native_fn);
         ctx.set_symbol(sym, val);

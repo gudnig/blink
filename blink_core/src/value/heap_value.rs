@@ -1,4 +1,4 @@
-use std::hash::{Hash, Hasher};
+use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
     collections::{BlinkHashMap, BlinkHashSet},
@@ -21,6 +21,66 @@ pub enum HeapValue {
     Macro(Callable),
     Future(BlinkFuture),
     Env(Env),
+}
+
+impl Display for HeapValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeapValue::Str(s) => write!(f, "{}", s),
+            HeapValue::List(value_refs) => {
+                        write!(f, "(")?;
+                        for value_ref in value_refs {
+                            write!(f, "{} ", value_ref)?;
+                        }
+                        write!(f, ")")?;
+                        Ok(())
+                    },
+            HeapValue::Vector(value_refs) => {
+                        write!(f, "[")?;
+                        for value_ref in value_refs {
+                            write!(f, "{} ", value_ref)?;
+                        }
+                        write!(f, "]")?;
+                        Ok(())
+                    },
+            HeapValue::Map(blink_hash_map) => {
+                        write!(f, "{{")?;
+                        for (key, value) in blink_hash_map.iter() {
+                            write!(f, "{}: {}\n", key, value)?;
+                        }
+                        write!(f, "}}")?;
+                        Ok(())
+                    },
+            HeapValue::Set(blink_hash_set) => {
+                        write!(f, "#{{")?;
+                        for value in blink_hash_set.iter() {
+                            write!(f, "{} ", value)?;
+                        }
+                        write!(f, "}}")?;
+                        Ok(())
+                    },
+            HeapValue::Function(callable) => {
+                        write!(f, "function")?;
+                        Ok(())
+                    },
+            HeapValue::Macro(callable) => {
+                        write!(f, "macro")?;
+                        Ok(())
+                    },
+            HeapValue::Future(blink_future) => {
+                        write!(f, "future")?;
+                        Ok(())
+                    },
+            HeapValue::Env(env) => {
+                        write!(f, "env")?;
+                        Ok(())
+                    },
+            HeapValue::Error(blink_error) => {
+                        write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
+                        Ok(())
+                    },
+        }
+    }
 }
 
 impl Hash for HeapValue {

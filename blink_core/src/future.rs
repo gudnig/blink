@@ -67,6 +67,7 @@ impl Future for BlinkFuture {
             },
         }
     }
+    
 }
 
 impl BlinkFuture {
@@ -74,6 +75,15 @@ impl BlinkFuture {
         let inner = Arc::new(Mutex::new(FutureState::Pending { waker: None }));
         Self { inner }
     }
+
+    pub fn try_poll(&self) -> Option<ValueRef> {
+        let state = self.inner.lock().unwrap();
+        match &*state {
+            FutureState::Ready(value) => Some(*value),
+            _ => None,  // Still pending or needs async polling
+        }
+    }
+
     pub fn complete(&self, value: ValueRef) -> Result<(), String> {
         let mut state = self.inner.lock().unwrap();
         match &mut *state {
@@ -93,6 +103,10 @@ impl BlinkFuture {
     pub fn from_rust_future(future: Pin<Box<dyn Future<Output = ValueRef> + Send>>) -> Self {
         let inner = Arc::new(Mutex::new(FutureState::RustFuture { future }));
         Self { inner }
+    }
+
+    pub fn needs_tokio_bridge(&self) -> bool {
+        matches!(*self.inner.lock().unwrap(), FutureState::RustFuture { .. })
     }
 
     

@@ -78,8 +78,8 @@ impl ModuleRegistry {
         self.loaded_libraries.remove(path).is_some()
     }
 
-    pub fn store_native_library(&mut self, path: PathBuf, lib: Library) {
-        self.loaded_libraries.insert(path, lib);
+    pub fn store_native_library(&mut self, path: &PathBuf, lib: Library) {
+        self.loaded_libraries.insert(path.clone(), lib);
     }
     
     pub fn register_module(&mut self, module: Module) -> Arc<RwLock<Module>> {

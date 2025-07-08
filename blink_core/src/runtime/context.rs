@@ -1,9 +1,12 @@
+use std::path::PathBuf;
 use std::{sync::Arc};
 
+use libloading::Library;
 use mmtk::Mutator;
 use parking_lot::RwLock;
 
 use crate::env::Env;
+use crate::module::Module;
 use crate::value::{pack_module, FunctionHandle, FutureHandle};
 use crate::HeapValue;
 use crate::{
@@ -20,8 +23,8 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct EvalContext<'vm> {
-    pub vm: &'vm BlinkVM,
+pub struct EvalContext {
+    pub vm: Arc<BlinkVM>,
     pub env: Arc<RwLock<Env>>,
 
     pub current_file: Option<String>,
@@ -30,7 +33,7 @@ pub struct EvalContext<'vm> {
     pub tracing_enabled: bool,
 }
 
-impl<'vm> EvalContext<'vm> {
+impl EvalContext {
 
 
     pub fn alloc_parsed_value(&mut self, parsed: ParsedValueWithPos) -> ValueRef {
@@ -195,19 +198,43 @@ impl<'vm> EvalContext<'vm> {
     }
 }
 
-impl<'vm> EvalContext<'vm> {
+impl EvalContext {
     pub fn new(
         parent: Arc<RwLock<Env>>,
-        vm: &'vm BlinkVM,
+        vm: Arc<BlinkVM>,
     ) -> Self {
         EvalContext {
-            vm,
+            vm: vm.clone(),
             env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
             current_module: None,
             current_file: None,
             async_ctx: AsyncContext::default(),
             tracing_enabled: false,
         }
+    }
+
+    pub fn get_global_env(&self) -> Arc<RwLock<Env>> {
+        self.vm.global_env.clone()
+    }
+
+    pub fn get_module(&self, module_id: u32) -> Option<Arc<RwLock<Module>>> {
+        self.vm.module_registry.read().get_module(module_id)
+    }
+
+    pub fn register_module(&self, module: Module) {
+        self.vm.module_registry.write().register_module(module);
+    }
+
+    pub fn remove_module(&self, module_id: u32) {
+        self.vm.module_registry.write().remove_module(module_id);
+    }
+
+    pub fn store_native_library(&self, lib_path: &PathBuf, lib: Library) {
+        self.vm.module_registry.write().store_native_library(lib_path, lib);
+    }
+
+    pub fn remove_native_library(&self, lib_path: &PathBuf) {
+        self.vm.module_registry.write().remove_native_library(lib_path);
     }
 
     pub fn register_function(&self, handle: ValueRef) -> FunctionHandle {
@@ -224,10 +251,6 @@ impl<'vm> EvalContext<'vm> {
 
     pub fn resolve_future(&self, handle: FutureHandle) -> Option<ValueRef> {
         self.vm.handle_registry.read().resolve_future(&handle)
-    }
-
-    pub fn runtime(&self) -> &tokio::runtime::Handle {
-        &self.vm.goroutine_scheduler.runtime
     }
 
     pub fn intern_symbol(&self, name: &str) -> ValueRef {
@@ -266,7 +289,7 @@ impl<'vm> EvalContext<'vm> {
 
     pub fn with_env(&self, env: Arc<RwLock<Env>>) -> Self {
         EvalContext {
-            vm: self.vm,
+            vm: self.vm.clone(),
             env,
             async_ctx: self.async_ctx.clone(),
             current_file: self.current_file.clone(),

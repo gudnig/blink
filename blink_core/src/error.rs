@@ -1,4 +1,3 @@
-use crate::collections::{ContextualValueRef, ValueContext};
 use crate::value::{SourcePos, SourceRange, ValueRef};
 use std::fmt::{self, Display};
 use std::hash::{Hash,Hasher};
@@ -17,6 +16,18 @@ pub enum ParseErrorType {
     InvalidNumber(String),
     InvalidString(String),
     UnexpectedEof,
+}
+
+impl Display for ParseErrorType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseErrorType::UnclosedDelimiter(message) => write!(f, "Unclosed delimiter: {}", message),
+            ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
+            ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
+            ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
+            ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
+        }
+    }
 }
 
 impl Hash for ParseErrorType {  
@@ -51,6 +62,28 @@ pub enum BlinkErrorType {
     UserDefined {
         data: Option<ValueRef>,
     },
+}
+
+impl Display for BlinkErrorType {   
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlinkErrorType::Tokenizer => write!(f, "Tokenizer error"),
+            BlinkErrorType::Parse(parse_error_type) => write!(f, "Parse error: {}", parse_error_type),
+            BlinkErrorType::UndefinedSymbol { name } => {
+                write!(f, "Undefined symbol: {}", name)
+            },
+            BlinkErrorType::Eval => write!(f, "Eval error"),
+            BlinkErrorType::ArityMismatch { expected, got, form } => {
+                write!(f, "Arity mismatch in '{}': expected {}, got {}", form, expected, got)
+            },
+            BlinkErrorType::UnexpectedToken { token } => {
+                write!(f, "Unexpected token: {}", token)
+            },
+            BlinkErrorType::UserDefined { data } => {
+                write!(f, "User defined error: {}", data.unwrap_or_else(|| ValueRef::nil()))
+            },
+        }
+    }
 }
 
 impl Hash for BlinkErrorType {
@@ -92,46 +125,6 @@ impl Hash for BlinkErrorType {
     }
 }
 
-impl BlinkErrorType {
-    pub fn display_with_context(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        context: &ValueContext,
-    ) -> fmt::Result {
-        match self {
-            BlinkErrorType::Tokenizer => write!(f, "Tokenizer error"),
-            BlinkErrorType::Parse(parse_error_type) => match parse_error_type {
-                ParseErrorType::UnclosedDelimiter(message) => {
-                    write!(f, "Unclosed delimiter: {}", message)
-                }
-                ParseErrorType::UnexpectedToken(token) => write!(f, "Unexpected token: {}", token),
-                ParseErrorType::InvalidNumber(message) => write!(f, "Invalid number: {}", message),
-                ParseErrorType::InvalidString(message) => write!(f, "Invalid string: {}", message),
-                ParseErrorType::UnexpectedEof => write!(f, "Unexpected EOF"),
-            },
-            BlinkErrorType::UndefinedSymbol { name } => write!(f, "Undefined symbol: {}", name),
-            BlinkErrorType::Eval => write!(f, "Eval error"),
-            BlinkErrorType::ArityMismatch {
-                expected,
-                got,
-                form,
-            } => write!(
-                f,
-                "Arity mismatch in '{}': expected {}, got {}",
-                form, expected, got
-            ),
-            BlinkErrorType::UnexpectedToken { token } => write!(f, "Unexpected token: {}", token),
-            BlinkErrorType::UserDefined { data } => {
-                if let Some(data) = data {
-                    let contextual = ContextualValueRef::new(data.clone(), context.clone());
-                    write!(f, "User defined error: {}", contextual)
-                } else {
-                    write!(f, "User defined error")
-                }
-            }
-        }
-    }
-}
 
 impl BlinkError {
     pub fn tokenizer(message: impl Into<String>, pos: SourcePos) -> Self {

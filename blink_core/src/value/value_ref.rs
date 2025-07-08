@@ -1,6 +1,6 @@
+use core::fmt;
 use std::{
-    hash::{Hash, Hasher},
-    sync::Arc,
+    fmt::Display, hash::{Hash, Hasher}, sync::Arc
     };
 
     
@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 
 
 use crate::{
-    collections::ValueContext, env::Env, error::BlinkError, eval::{EvalContext, EvalResult}, runtime::{ContextualBoundary, TypeTag, ValueBoundary}, value::{is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_module, pack_nil, pack_number, pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, IsolatedValue, NativeFn}
+    env::Env, error::BlinkError, eval::{EvalContext, EvalResult}, future::BlinkFuture, runtime::{ContextualBoundary, TypeTag, ValueBoundary}, value::{is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_module, pack_nil, pack_number, pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, IsolatedValue, NativeFn}, BlinkHashMap, BlinkHashSet
 };
 
 
@@ -34,6 +34,16 @@ pub struct Callable {
     pub body: Vec<ValueRef>,
     pub env: Arc<RwLock<Env>>,
     pub is_variadic: bool,
+}
+
+impl Display for ValueRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ValueRef::Immediate(packed) => write!(f, "{}", unpack_immediate(*packed)),
+            ValueRef::Heap(gc_ptr) => write!(f, "{}", gc_ptr.to_heap_value()),
+            ValueRef::Native(n) => write!(f, "native-function-{}", n),
+        }
+    }
 }
 
 
@@ -134,6 +144,200 @@ impl ValueRef {
         }
     }
 
+    pub fn is_module(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Module(_, _) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_symbol(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Symbol(_) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_list(&self) -> bool {
+        match self {
+            ValueRef::Heap(gc_ptr) => {
+                gc_ptr.type_tag() == TypeTag::List
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_vec(&self) -> bool {
+        match self {
+            ValueRef::Heap(gc_ptr) => {
+                gc_ptr.type_tag() == TypeTag::Vector
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_map(&self) -> bool {
+        match self {
+            ValueRef::Heap(gc_ptr) => {
+                gc_ptr.type_tag() == TypeTag::Map
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        match self {
+            ValueRef::Heap(gc_ptr) => {
+                gc_ptr.type_tag() == TypeTag::Set
+            },
+            _ => false,
+        }
+    }
+
+    pub fn is_future(&self) -> bool {
+        match self {
+            ValueRef::Heap(gc_ptr) => {
+                gc_ptr.type_tag() == TypeTag::Future
+            },
+            _ => false,
+        }
+    }
+
+
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let val = unpack_immediate(*packed);
+                match val {
+                    ImmediateValue::Bool(b) => b,
+                    ImmediateValue::Nil => false,
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // Value extraction
+    // ------------------------------------------------------------
+
+    pub fn get_future(&self) -> Option<BlinkFuture> {
+        if self.is_future() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::Future(future) => Some(future.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
+    pub fn get_string(&self) -> Option<String> {
+        if self.is_string() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::Str(str) => Some(str.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn get_list(&self) -> Option<Vec<ValueRef>> {
+        if self.is_list() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::List(list) => Some(list.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn get_vec(&self) -> Option<Vec<ValueRef>> {
+        if self.is_vec() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::Vector(vec) => Some(vec.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn get_map(&self) -> Option<BlinkHashMap> {
+        if self.is_map() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::Map(map) => Some(map.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn get_set(&self) -> Option<BlinkHashSet> {
+        if self.is_set() {
+            match self {
+                ValueRef::Heap(gc_ptr) => {
+                    match gc_ptr.to_heap_value() {
+                        HeapValue::Set(set) => Some(set.clone()),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        }
+        else {
+            None
+        }
+    }
     pub fn get_error(&self) -> Option<BlinkError> {
         if !self.is_error() {
             return None;
@@ -150,22 +354,10 @@ impl ValueRef {
         }
     }
 
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            ValueRef::Immediate(packed) => {
-                let val = unpack_immediate(*packed);
-                match val {
-                    ImmediateValue::Bool(b) => b,
-                    ImmediateValue::Nil => false,
-                    _ => true,
-                }
-            }
-            _ => true,
-        }
-    }
+
 
     // Value extraction
-    pub fn as_number(&self) -> Option<f64> {
+    pub fn get_number(&self) -> Option<f64> {
         match self {
             ValueRef::Immediate(packed) => {
                 if is_number(*packed) {
@@ -178,7 +370,7 @@ impl ValueRef {
         }
     }
 
-    pub fn as_bool(&self) -> Option<bool> {
+    pub fn get_bool(&self) -> Option<bool> {
         match self {
             ValueRef::Immediate(packed) => {
                 if is_bool(*packed) {
@@ -207,33 +399,7 @@ impl ValueRef {
     }
 
 
-    pub fn try_get_number(&self) -> Option<f64> {
-        match self {
-            ValueRef::Immediate(packed) => {
-                if is_number(*packed) {
-                    Some(f64::from_bits(*packed))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn try_get_bool(&self) -> Option<bool> {
-        match self {
-            ValueRef::Immediate(packed) => {
-                if is_bool(*packed) {
-                    Some(((packed >> 3) & 1) != 0)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    pub fn try_get_symbol(&self) -> Option<u32> {
+    pub fn get_symbol(&self) -> Option<u32> {
         match self {
             ValueRef::Immediate(packed) => {
                 if is_symbol(*packed) {
@@ -246,7 +412,7 @@ impl ValueRef {
         }
     }
 
-    pub fn try_get_keyword(&self) -> Option<u32> {
+    pub fn get_keyword(&self) -> Option<u32> {
         match self {
             ValueRef::Immediate(packed) => {
                 let unpacked = unpack_immediate(*packed);

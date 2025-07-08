@@ -1,36 +1,37 @@
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}};
 use mmtk::{
     util::options::PlanSelector, 
     MMTK, 
     MMTKBuilder,
     
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 use crate::{
-    collections::{ContextualValueRef, ValueContext}, 
-    error::BlinkError, 
-    module::ModuleRegistry, 
-    parser::ReaderContext, 
-    runtime::{
-        AsyncContext, HandleRegistry, SymbolTable, 
-        TokioGoroutineScheduler, ValueMetadataStore
-    }, 
-    telemetry::TelemetryEvent, 
-    env::Env
+    env::Env, module::ModuleRegistry, parser::ReaderContext, runtime::{
+        GoroutineId, HandleRegistry, SymbolTable, ValueMetadataStore
+    }, telemetry::TelemetryEvent
 };
 
 pub struct BlinkVM {
     pub mmtk: Box<MMTK<BlinkVM>>,
     pub symbol_table: RwLock<SymbolTable>,
-    pub global_env: RwLock<Env>,
+    pub global_env: Arc<RwLock<Env>>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub module_registry: RwLock<ModuleRegistry>,
     pub file_to_modules: RwLock<HashMap<PathBuf, Vec<String>>>,
-    pub goroutine_scheduler: TokioGoroutineScheduler,
     pub reader_macros: RwLock<ReaderContext>,
     pub value_metadata: RwLock<ValueMetadataStore>,
+    
+    goroutines: Arc<Mutex<HashMap<GoroutineId, JoinHandle<()>>>>,
+    
+    // ID generation
+    next_id: AtomicU64,
+    
+    // Tokio runtime handle
+    pub runtime: tokio::runtime::Handle,
     pub handle_registry: RwLock<HandleRegistry>,
 }
 
@@ -58,24 +59,28 @@ impl BlinkVM {
         
         // Build the MMTK instance
         let mmtk = mmtk::memory_manager::mmtk_init(&builder);
-        mmtk::Mutator::
+        
         
         Self {
             mmtk,
             symbol_table: RwLock::new(SymbolTable::new()),
-            global_env: RwLock::new(Env::new()),
+            global_env: Arc::new(RwLock::new(Env::new())),
             telemetry_sink: None,
             module_registry: RwLock::new(ModuleRegistry::new()),
             file_to_modules: RwLock::new(HashMap::new()),
-            goroutine_scheduler: TokioGoroutineScheduler::new(),
+            goroutines: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+            runtime: tokio::runtime::Handle::current(),
             reader_macros: RwLock::new(ReaderContext::new()),
             value_metadata: RwLock::new(ValueMetadataStore::new()),
             handle_registry: RwLock::new(HandleRegistry::new()),
+
         }
+
+        
+
     }
 
-    pub fn initialize(&mut self) {
-        // If I need to do any post-initialization setup with MMTK
-        // I can do it here. For basic usage, this might be empty.
-    }
+    
+
 }

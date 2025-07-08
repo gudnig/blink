@@ -146,6 +146,14 @@ impl BlinkVM {
     }
 
 
+    pub fn alloc_user_defined_fn(&self, function: Callable) -> ObjectReference {
+        todo!()
+    }
+
+    pub fn alloc_macro(&self, mac: Callable) -> ObjectReference {
+        todo!()
+    }
+    
     
 
     pub fn alloc_str(&self, s: &str) -> ObjectReference {

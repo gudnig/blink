@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::EvalContext, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{EvalContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
 use crate::env::Env;
 
-impl EvalContext<'_> {
+impl EvalContext {
 
 
     pub fn get_number(&self, val: ValueRef) -> Option<f64> {
@@ -61,11 +61,13 @@ impl EvalContext<'_> {
 
     pub fn string_value(&mut self, value: &str) -> ValueRef {
         let r = self.vm.alloc_str(value);
-        ValueRef::shared(r)
+        ValueRef::Heap(GcPtr::new(r))
     }
 
     pub fn list_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
-        self.alloc_list(values)
+        let list = BlinkList::from_iter(values);
+        let object_ref = self.vm.alloc_vec(list);
+        ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn vector_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
@@ -101,8 +103,8 @@ impl EvalContext<'_> {
         }
     }
 
-    pub fn user_defined_function_value(&mut self, params: Vec<u32>, body: Vec<ValueRef>, env: Arc<RwLock<Env>>) -> ValueRef {
-        let object_ref = self.vm.alloc_user_defined_fn(params, body, env);
+    pub fn user_defined_function_value(&mut self, function: Callable) -> ValueRef {
+        let object_ref = self.vm.alloc_user_defined_fn(function);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
@@ -333,61 +335,4 @@ impl EvalContext<'_> {
         }
     }
 
-}
-
-
-impl ValueRef {
-    // Type checking
-    pub fn is_module(&self) -> bool {
-        match self {
-            ValueRef::Immediate(packed) => {
-                let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::Module(_, _) = unpacked {
-                    true
-                } else {
-                    false
-                }
-            },
-            _ => false,
-        }
-    }
-    pub fn is_number(&self) -> bool {
-        match self {
-            ValueRef::Immediate(packed) => {
-                let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::Number(_) = unpacked {
-                    true
-                } else {
-                    false
-                }
-            },
-            _ => false,
-        }
-    }
-    pub fn is_symbol(&self) -> bool {
-        match self {
-            ValueRef::Immediate(packed) => {
-                let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::Symbol(_) = unpacked {
-                    true
-                } else {
-                    false
-                }
-            },
-            _ => false,
-        }
-    }
-    pub fn is_keyword(&self) -> bool {
-        match self {
-            ValueRef::Immediate(packed) => {
-                let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::Keyword(_) = unpacked {
-                    true
-                } else {
-                    false
-                }
-            },
-            _ => false,
-        }
-    }
 }

@@ -1,5 +1,5 @@
 mod boundary;
-mod goroutine;
+mod goroutines;
 mod async_context;
 mod metadata;
 mod symbol_table;
@@ -9,10 +9,11 @@ mod gc;
 mod blink_vm;
 mod mmtk_bindings;
 mod mmtk;
+mod blink_runtime;
 
 
 pub use boundary::*;
-pub use goroutine::*;
+pub use goroutines::*;
 pub use async_context::*;
 pub use metadata::*;
 pub use symbol_table::*;
@@ -22,3 +23,4 @@ pub use gc::*;
 pub use blink_vm::*;
 pub use mmtk_bindings::*;
 pub use mmtk::*;
+pub use blink_runtime::*;

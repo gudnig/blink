@@ -2,8 +2,8 @@ use parking_lot::RwLock;
 
 use crate::error::{BlinkError, ParseErrorType};
 use crate::eval::EvalContext;
-use crate::runtime::SymbolTable;
-use crate::value::{ParsedValue, ParsedValueWithPos, SourcePos, SourceRange};
+use crate::runtime::{BlinkVM, SymbolTable};
+use crate::value::{Callable, ParsedValue, ParsedValueWithPos, SourcePos, SourceRange};
 use crate::env::Env;
 use crate::value::ValueRef;
 use std::collections::HashMap;
@@ -332,21 +332,31 @@ fn build_simple_macro(name: &str, ctx: &mut EvalContext) -> u32 {
     let symbol_id = ctx.get_symbol_id(symbol_id).unwrap();
     let list = ctx.list_value(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)]);
     let body = vec![list];
-    let func = ctx.user_defined_function_value(vec![symbol_id], body, Arc::new(RwLock::new(Env::new())));
+    let call = Callable {
+        
+        is_variadic: false,
+        body: body,
+        env: Arc::new(RwLock::new(Env::new())),
+        params: vec![symbol_id],
+
+    };
+    let func = ctx.user_defined_function_value(call);
     ctx.set_symbol(symbol_id, func);
     symbol_id
 
 }
 
-pub fn preload_builtin_reader_macros(ctx: &mut EvalContext) {
+pub fn preload_builtin_reader_macros(vm: Arc<BlinkVM>) {
     
-    let quote = build_simple_macro("quo", ctx);
-    let quasiquote = build_simple_macro("quasiquote", ctx);
-    let unquote = build_simple_macro("unquote", ctx);
-    let unquote_splicing = build_simple_macro("unquote-splicing", ctx);
-    let deref = build_simple_macro("deref", ctx);
+    let mut ctx  = EvalContext::new(vm.global_env.clone(), vm.clone());
+    
+    let quote = build_simple_macro("quo", &mut ctx);
+    let quasiquote = build_simple_macro("quasiquote", &mut ctx);
+    let unquote = build_simple_macro("unquote", &mut ctx);
+    let unquote_splicing = build_simple_macro("unquote-splicing", &mut ctx);
+    let deref = build_simple_macro("deref", &mut ctx);
 
-    let mut rm = ctx.reader_macros.write();
+    let mut rm = vm.reader_macros.write();
 
     // Single character reader macros
     rm.reader_macros

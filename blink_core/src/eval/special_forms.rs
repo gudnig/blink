@@ -83,7 +83,7 @@ pub fn eval_fn(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     
     
     
-    let value_ref = ctx.alloc_user_fn(user_fn);
+    let value_ref = ctx.user_defined_function_value(user_fn);
     
     EvalResult::Value(value_ref)
 }
@@ -109,7 +109,7 @@ fn eval_do_inline(
         let eval_result = trace_eval(forms[index].clone(), ctx);
         match eval_result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 result = val;
@@ -119,7 +119,7 @@ fn eval_do_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         eval_do_inline(forms, index + 1, v, ctx)
@@ -155,7 +155,7 @@ fn eval_let_bindings_inline(
         let result = trace_eval(val_expr.clone(), ctx);
         match result {
             EvalResult::Value(v) => {
-                if ctx.is_err(&v) {
+                if v.is_error() {
                     return EvalResult::Value(v);
                 }
                 env.write().set(key, v);
@@ -168,7 +168,7 @@ fn eval_let_bindings_inline(
                     resume: Box::new(move |v, ctx| {
                         
                         // Do what the deref resume would do: just use v directly
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         
@@ -235,7 +235,7 @@ fn eval_and_inline(
         let result = trace_eval(args[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 last = val;
@@ -249,7 +249,7 @@ fn eval_and_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         // Short-circuit check in resume too
@@ -284,7 +284,7 @@ fn eval_or_inline(
         let result = trace_eval(args[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 // Short-circuit on truthy values
@@ -297,7 +297,7 @@ fn eval_or_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         // Short-circuit check in resume too
@@ -317,7 +317,7 @@ pub fn eval_try(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "try"));
     }
     let res = try_eval!(trace_eval(args[0].clone(), ctx), ctx);
-    if ctx.is_err(&res) {
+    if res.is_error() {
         forward_eval!(trace_eval(args[1].clone(), ctx), ctx)
     } else {
         EvalResult::Value(res)
@@ -330,32 +330,13 @@ pub fn eval_apply(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     }
     let func = try_eval!(trace_eval(args[0].clone(), ctx), ctx);
     let evaluated_list = try_eval!(trace_eval(args[1].clone(), ctx), ctx);
-    let list_items = match &evaluated_list {
-        ValueRef::Shared(idx) => {
-            let shared_value = {
-                let shared_arena = ctx.shared_arena.read();
-                let res = shared_arena.get(*idx);
-                res.map(|v| v.clone())
-            };
-            if let Some(shared) = shared_value {
-                match shared.as_ref() {
-                    SharedValue::List(xs) => xs.clone(),
-                    _ => {
-                        return EvalResult::Value(ctx.eval_error("apply expects a list as second argument"));
-                    }
-                }
-            } else {
-                return EvalResult::Value(ctx.eval_error("apply expects a list as second argument"));
-            }
-        },
-        _ => {
-            return EvalResult::Value(ctx.eval_error("apply expects a list as second argument"));
-        }
+    let list_items = match evaluated_list.get_list() {
+        Some(list) => list,
+        None => return EvalResult::Value(ctx.eval_error("apply expects a list as second argument")),
     };
     eval_func(func, list_items, ctx)
 }
 fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
-    use std::collections::HashSet;
     use std::path::PathBuf;
     use libloading::Library;
 
@@ -363,7 +344,7 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "load-native"));
     }
 
-    let libname = match ctx.get_string(args[0]) {
+    let libname = match args[0].get_string() {
         Some(s) => s,
         None => return EvalResult::Value(ctx.eval_error("load-native expects a string")),
     };
@@ -378,9 +359,9 @@ fn load_native_library(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     let lib_symbol_id = ctx.get_symbol_id(lib_symbol_id).unwrap();
 
     // Remove existing module if it exists
-    if ctx.module_registry.read().get_module(lib_symbol_id).is_some() {
-        ctx.module_registry.write().remove_module(lib_symbol_id);
-        ctx.module_registry.write().remove_native_library(&lib_path);
+    if ctx.get_module(lib_symbol_id).is_some() {
+        ctx.remove_module(lib_symbol_id);
+        ctx.remove_native_library(&lib_path);
     }
 
     let lib = match unsafe { Library::new(&filename) } {
@@ -414,7 +395,7 @@ fn load_plugin_as_module(
     use std::collections::HashSet;
 
     // Create module environment
-    let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+    let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.get_global_env())));
     
     // Register each function in the module environment
     let mut exports_set = HashSet::new();
@@ -441,8 +422,8 @@ fn load_plugin_as_module(
         ready: true,
     };
 
-    ctx.module_registry.write().register_module(module);
-    ctx.module_registry.write().store_native_library(lib_path, lib);
+    ctx.register_module(module);
+    ctx.store_native_library(&lib_path, lib);
     
     EvalResult::Value(ctx.nil_value())
 }
@@ -453,7 +434,7 @@ fn import_symbols_into_env(
     aliases: &HashMap<u32, u32>,
     ctx: &mut EvalContext
 ) -> Result<(), BlinkError> {
-    let module = ctx.module_registry.read().get_module(module_name)
+    let module = ctx.get_module(module_name)
         .ok_or_else(|| BlinkError::eval(format!("Module '{}' not found", module_name)))?;
     
     let module_read = module.read();
@@ -509,25 +490,9 @@ fn load_native_code(
         return Err(BlinkError::arity(1, args.len(), "compile-plugin").with_pos(pos));
     }
 
-    let plugin_name =  match args[0] {
-        ValueRef::Shared(idx) => {
-            let shared_value = {
-                let shared_arena = ctx.shared_arena.read();
-                let res = shared_arena.get(idx);
-                res.map(|v| v.clone())
-            };
-            if let Some(shared) = shared_value {
-                match shared.as_ref() {
-                    SharedValue::Str(s) => s.clone(),
-                    _ => {
-                        return Err(BlinkError::eval("compile-plugin expects a string as first argument").with_pos(pos));
-                    }
-                }
-            } else {
-                return Err(BlinkError::eval("compile-plugin expects a string as first argument").with_pos(pos));
-            }
-        },
-        _ => {
+    let plugin_name =  match args[0].get_string()    {
+        Some(plugin_name) => plugin_name,
+        None => {
             return Err(BlinkError::eval("compile-plugin expects a string as first argument").with_pos(pos));
         }
     };
@@ -542,39 +507,35 @@ fn load_native_code(
     if args.len() == 2 {        
         let options_val = match trace_eval(args[1].clone(), ctx) {
             EvalResult::Value(v) => {
-                if ctx.is_err(&v) {
-                    let error = ctx.get_err(&v);
-                    return Err(error);
+                if v.is_error() {
+                    return Err(BlinkError::eval("Second argument must be a map").with_pos(pos));
                 }
         
                 v
             }
             suspended => return Ok(suspended),
         };
-        if let ValueRef::Shared(idx) = options_val {
-            if let Some(()) = ctx.with_map(options_val, |opt_map| {
-                for (key, value) in opt_map.iter() {
-                    if let Some(kw_name) = ctx.get_keyword_name(*key) {
-                        match &*kw_name {
-                            "path" => {
-                                if let Some(path) = ctx.get_string(*value) {
-                                    plugin_path = path;
-                                }
+        if let Some(opt_map) = options_val.get_map() {
+            for (key, value) in opt_map {
+                if let Some(kw_name) = ctx.get_keyword_name(key) {
+                    match &*kw_name {
+                        "path" => {
+                            if let Some(path) = value.get_string() {
+                                plugin_path = path;
                             }
-                            "import" => {
-                                if let Some(b) = ctx.get_bool(*value) {
-                                    auto_import = b;
-                                }
-                            }
-                            _ => {}
                         }
+                        "import" => {
+                            if let Some(b) = ctx.get_bool(value) {
+                                auto_import = b;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-            }) {
-                // Map was successfully processed
-            } else {
-                return Err(BlinkError::eval("Second argument must be a map").with_pos(pos));
             }
+        }
+        else {
+            return Err(BlinkError::eval("Second argument must be a map").with_pos(pos));
         }
     }
 
@@ -617,7 +578,7 @@ fn load_native_code(
     let exports = match unsafe { lib.get::<unsafe extern "C" fn(&mut Env) -> Vec<String>>(b"blink_register_with_exports") } {
         Ok(register_with_exports) => {
             // Create a new environment for the module
-            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.get_global_env())));
             let mut exports_set: HashSet<u32> = HashSet::new();
             let exported_names = unsafe {
                 register_with_exports(&mut *module_env.write())
@@ -637,7 +598,7 @@ fn load_native_code(
                 env: module_env,
                 ready: true,
             };
-            let _arc_mod = ctx.module_registry.write().register_module(module);
+            let _arc_mod = ctx.register_module(module);
             
             exports_set
         },
@@ -663,7 +624,7 @@ fn load_native_code(
                 ready: true,
             };
             // Register the module
-            let _arc_mod = ctx.module_registry.write().register_module(module);
+            let _arc_mod = ctx.register_module(module);
             if auto_import {
                 import_symbols_into_env(&exports, plugin_symbol_id, &HashMap::new(), ctx)?;
             }
@@ -673,7 +634,7 @@ fn load_native_code(
     };
     let exports = exports.iter().map(|s| ValueRef::symbol(*s)).collect::<Vec<ValueRef>>();
     // Store the library to prevent it from being unloaded
-    ctx.module_registry.write().store_native_library(PathBuf::from(&dest), lib);
+    ctx.store_native_library(&PathBuf::from(&dest), lib);
     import_symbols_into_env(&exports, plugin_symbol_id, &HashMap::new(), ctx)?;
 
     
@@ -694,7 +655,7 @@ fn eval_file_forms_inline(
         let result = trace_eval(forms[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 index += 1;
@@ -703,7 +664,7 @@ fn eval_file_forms_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         eval_file_forms_inline(forms, index + 1, ctx)

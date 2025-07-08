@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet, ValueContext}, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue, ValueRef}, HeapValue};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, eval::EvalContext, value::{  pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue, ValueRef}, HeapValue};
 
 
 
@@ -43,17 +43,17 @@ pub trait ValueBoundary {
 
 
 // Current implementation
-pub struct ContextualBoundary<'a, 'vm> {
-    pub context: &'a mut EvalContext<'vm>,
+pub struct ContextualBoundary<'a> {
+    pub context: &'a mut EvalContext,
 }
 
-impl<'a, 'vm> ContextualBoundary<'a, 'vm> {
-    pub fn new(context: &'a mut EvalContext<'vm>) -> Self {
+impl<'a> ContextualBoundary<'a> {
+    pub fn new(context: &'a mut EvalContext) -> Self {
         Self { context }
     }
 }
 
-impl<'a, 'vm> ValueBoundary for ContextualBoundary<'a, 'vm> {
+impl<'a> ValueBoundary for ContextualBoundary<'a> {
     fn extract_isolated(&self, value: ValueRef) -> Result<IsolatedValue, String> {
         match value {
             ValueRef::Immediate(packed) => {
@@ -63,7 +63,8 @@ impl<'a, 'vm> ValueBoundary for ContextualBoundary<'a, 'vm> {
                     ImmediateValue::Bool(b) => Ok(IsolatedValue::Bool(b)),
                     ImmediateValue::Nil => Ok(IsolatedValue::Nil),
                     ImmediateValue::Symbol(s) => {
-                        let symbol_name = self.context.symbol_table.read().get_symbol(s)
+                        let vm = self.context.vm.clone();
+                        let symbol_name = vm.symbol_table.read().get_symbol(s)
                             .map(|s| s.to_string())
                             .ok_or_else(|| format!("Symbol not found: {}", s))?;
                         Ok(IsolatedValue::Symbol(symbol_name))
@@ -83,20 +84,25 @@ impl<'a, 'vm> ValueBoundary for ContextualBoundary<'a, 'vm> {
                     match heap_val {
                         HeapValue::List(value_refs) => {
                             let isolated_values: Vec<IsolatedValue> = value_refs.into_iter()
-                                .map(|item| self.extract_isolated(*item))
+                                .map(|item| self.extract_isolated(item))
                                 .collect::<Result<Vec<IsolatedValue>, String>>()?;
                             Ok(IsolatedValue::List(isolated_values))
                         },
                         HeapValue::Vector(value_refs) => {
                             let isolated_values: Vec<IsolatedValue> = value_refs.into_iter()
-                                .map(|item| self.extract_isolated(*item))
+                                .map(|item| self.extract_isolated(item))
                                 .collect::<Result<Vec<IsolatedValue>, String>>()?;
                             Ok(IsolatedValue::Vector(isolated_values))
                         },
                         HeapValue::Map(blink_hash_map) => {
                             let isolated_values = blink_hash_map.into_iter()
-                                .map(|(k, v)| (self.extract_isolated(k)?, self.extract_isolated(v)?))
+                                .map(|(k, v)| {
+                                    let k = self.extract_isolated(k)?;
+                                    let v = self.extract_isolated(v)?;
+                                    Ok((k, v))
+                                })
                                 .collect::<Result<Vec<(IsolatedValue, IsolatedValue)>, String>>()?;
+
                             let map = HashMap::from_iter(isolated_values);
                             Ok(IsolatedValue::Map(map))
                         },
@@ -105,7 +111,7 @@ impl<'a, 'vm> ValueBoundary for ContextualBoundary<'a, 'vm> {
                             let isolated_values: Vec<IsolatedValue> = blink_hash_set.into_iter()
                                 .map(|item| self.extract_isolated(item))
                                 .collect::<Result<Vec<IsolatedValue>, String>>()?;
-                            Ok(IsolatedValue::Set(isolated_values))
+                            Ok(IsolatedValue::Set(HashSet::from_iter(isolated_values)))
                         },
                         HeapValue::Error(blink_error) => {
                             let error = BlinkError::eval(blink_error.to_string());
