@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::Arc};
 use libloading::Library;
 use parking_lot::RwLock;
 
-use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, ImmediateValue, Plugin, Callable, ValueRef}};
+use crate::{env::Env, error::BlinkError, eval::{eval_func, forward_eval, result::EvalResult, trace_eval, try_eval, EvalContext}, module::{ImportType, Module, ModuleSource}, runtime::AsyncContext, value::{unpack_immediate, Callable, ImmediateValue, Plugin, ValueRef}, HeapValue};
 
 fn require_arity(args: &[ValueRef], expected: usize, form_name: &str) -> Result<(), BlinkError> {
     if args.len() != expected {
@@ -609,8 +609,8 @@ fn load_native_code(
                     .map_err(|e| BlinkError::eval(format!("Failed to find blink_register or blink_register_with_exports: {}", e)).with_pos(pos))?
             };
             
-            // Create a new environment for the module
-            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+            // Create a new environment for the module°
+            let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.get_global_env())));
             unsafe { register(&mut *module_env.write()) };
             
             // We don't know the exports, so we'll have to extract them from the environment
@@ -678,7 +678,7 @@ fn eval_file_forms_inline(
 // Load and evaluate a Blink source file
 fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     // Don't evaluate if already loaded
-    if ctx.module_registry.read().is_file_evaluated(&file_path) {
+    if ctx.is_file_evaluated(&file_path) {
         return EvalResult::Value(ctx.nil_value());
     }
 
@@ -687,10 +687,9 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
         Err(e) => {
             return EvalResult::Value(ctx.eval_error(&format!("Failed to read file: {}", e)));
         }
-    };
-    let mut reader_ctx = ctx.reader_macros.clone();
+    };    
     // Parse the file
-    let parsed_forms = crate::parser::parse_all(&contents, &mut reader_ctx.write(), &mut ctx.symbol_table.write());
+    let parsed_forms = crate::parser::parse_all(&contents, &mut ctx.vm.reader_macros.write(), &mut ctx.vm.symbol_table.write());
 
 
     let parsed_forms = match   parsed_forms {
@@ -729,7 +728,7 @@ fn eval_blink_file(file_path: PathBuf, ctx: &mut EvalContext) -> EvalResult {
     ctx.current_file = old_file;
     
     // Mark file as evaluated
-    ctx.module_registry.write().mark_file_evaluated(file_path);
+    ctx.mark_file_evaluated(file_path);
     
     EvalResult::Value(ctx.nil_value())
 }
@@ -749,7 +748,10 @@ fn parse_load_args(args: &[ValueRef], ctx: &mut EvalContext) -> Result<(String, 
         return Err(BlinkError::eval(format!("load {} requires a source argument", source_type)));
     }
     
-    let source_value = ctx.get_string(args[1].clone()).ok_or_else(|| BlinkError::eval("load source must be a string"))?;
+    let source_value = match args[1].get_string() {
+        Some(s) => s,
+        None => return Err(BlinkError::eval("load source must be a string")),
+    };
 
     Ok((source_type, source_value))
 }
@@ -826,48 +828,22 @@ fn parse_import_args(args: &[ValueRef], ctx: &mut EvalContext) -> Result<(Import
     }
 
     let first_arg = args[0];
-    
-    match first_arg {
-        // Check for string (file import)
-        ValueRef::Shared(idx) => {
-            
-
-            if let Some(shared) = ctx.get_shared_value(ValueRef::Shared(idx)).map(|v| v.clone()) {
-                match shared.as_ref() {
-                    // File import: (imp "module-name")
-                    SharedValue::Str(module_name) => {
-                        Ok((ImportType::File(module_name.clone()), None))
-                    }
-                    
-                    // Vector import: (imp [sym1 sym2] :from module)
-                    SharedValue::Vector(symbols) => {
-                        let (import_type, options) = parse_symbol_import(&symbols, &args[1..],  ctx)?;
-                        Ok((import_type, Some(options)))
-                    }
-                    
-                    // List import: (imp (vector sym1 sym2) :from module) or regular list
-                    SharedValue::List(list) if !list.is_empty() => {
-                        // Check if it's a vector form (list starting with 'vector)
-                        if let Some(first_symbol_name) = ctx.get_symbol_name(list[0]) {
-                            if first_symbol_name == "vector" {
-                                let (import_type, options) = parse_symbol_import(&list[1..], &args[1..], ctx)?;
-                                return Ok((import_type, Some(options)));
-                            }
-                        }
-                        
-                        // Otherwise, treat as regular list of symbols
-                        let (import_type, options) = parse_symbol_import(&list, &args[1..], ctx)?;
-                        Ok((import_type, Some(options)))
-                    }
-                    
-                    _ => Err(BlinkError::eval("imp expects a string (file) or vector (symbols)")),
-                }
-            } else {
-                Err(BlinkError::eval("Invalid reference in imp"))
+    let heap = first_arg.read_heap_value();
+    if let Some(heap) = heap {
+        match heap {
+            // File import: (imp "module-name")
+            HeapValue::Str(s) => {
+                Ok((ImportType::File(s.clone()), None))
+            },
+            // Vector import: (imp [sym1 sym2] :from module)
+            HeapValue::Vector(symbols) => {
+                let (import_type, options) = parse_symbol_import(&symbols, &args[1..],  ctx)?;
+                Ok((import_type, Some(options)))
             }
+            _ => Err(BlinkError::eval("imp expects a string (file) or vector (symbols)")),
         }
-        
-        _ => Err(BlinkError::eval("imp expects a string (file) or vector (symbols)")),
+    } else {
+        Err(BlinkError::eval("imp expects a string (file) or vector (symbols)"))
     }
 }
 
@@ -881,7 +857,7 @@ fn parse_symbol_import(
     let mut symbols = Vec::new();
     let aliases = HashMap::new();
     
-    let mut i = 0;
+    let i = 0;
     while i < symbol_list.len() {
         match &symbol_list[i] {
             
@@ -939,19 +915,10 @@ pub fn eval_def_reader_macro(
         return EvalResult::Value(ctx.arity_error(2, args.len(), "def-reader-macro"));
     }
 
-    let char_val = match &args[0] {
-        ValueRef::Shared(idx) => {
-            let shared = ctx.get_shared_value(ValueRef::Shared(*idx));
-            if let Some(shared) = shared {
-                match shared.as_ref() {
-                    SharedValue::Str(s) => s.clone(),
-                    _ => {
-                        return EvalResult::Value(ctx.eval_error("First argument to def-reader-macro must be a string"));
-                    }
-                }
-            } else {
-                return EvalResult::Value(ctx.eval_error("First argument to def-reader-macro must be a string"));
-            }
+    let char_val = match &args[0].get_string() {
+        Some(s) => s.clone(),
+        None => {
+            return EvalResult::Value(ctx.eval_error("First argument to def-reader-macro must be a string"));
         }
         _ => {
             return EvalResult::Value(ctx.eval_error("First argument to def-reader-macro must be a string"));
@@ -964,7 +931,7 @@ pub fn eval_def_reader_macro(
     let func_symbol = ctx.intern_symbol(&ch);
     let func_symbol_id = ctx.get_symbol_id(func_symbol).unwrap();
     ctx.set_symbol(func_symbol_id, func);
-    ctx.reader_macros
+    ctx.vm.reader_macros
         .write()
         .reader_macros
         .insert(ch, func_symbol_id);
@@ -973,35 +940,27 @@ pub fn eval_def_reader_macro(
 
 /// Helper to update module exports
 fn update_module_exports(module: &mut Module, exports_val: &ValueRef, ctx: &mut EvalContext) -> Result<(), BlinkError> {
-    match &exports_val {
-        ValueRef::Shared(idx) => {
-            let list = ctx.get_shared_value(ValueRef::Shared(*idx));
-            if let Some(list) = list {
-                match list.as_ref() {
-                    SharedValue::List(items) => {
-                        for item in items {
-                            let sym  = ctx.get_symbol_id(*item);
-                            if let Some(sym) = sym {
-                                module.exports.insert(sym);
-                            }
-                        }
-                    }
-                    _ => return Err(BlinkError::eval("Exports must be a list of symbols")),
-                }
+
+    let exports = exports_val.get_vec();
+
+    if let Some(exports) = exports {
+        for export in exports {
+            let sym = ctx.get_symbol_id(export);
+            if let Some(sym) = sym {
+                module.exports.insert(sym);
             }
-        }, 
-        ValueRef::Immediate(packed) => {
-            let kw_str = ctx.get_keyword_name(ValueRef::Immediate(*packed));
-            if let Some(kw_str) = kw_str {
-                if kw_str == "all" {
-                    let all_keys = module.env.read().vars.keys().cloned().collect();
-                    module.exports = all_keys;
-                    return Ok(());
-                }
-            }            
         }
-        ValueRef::Gc(_gc_ptr) => todo!(),
+    } else if let Some(kw) = exports_val.get_keyword() {
+        let kw_str = ctx.get_keyword_name(*exports_val);
+        if kw_str == Some("all".to_string()) {
+            let all_keys = module.env.read().vars.keys().cloned().collect();
+            module.exports = all_keys;
+            return Ok(());
+        }
+    } else  {
+        return Err(BlinkError::eval("Exports must be a list of symbols"));
     }
+
     
     Ok(())
 }
@@ -1099,7 +1058,7 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     let should_declare = flags.contains("declare") || flags.is_empty();
     let should_enter = flags.contains("enter");
     
-    let mut module = ctx.module_registry.read().get_module(name);
+    let mut module = ctx.get_module(name);
     
 
     if should_declare && module.is_none() {
@@ -1109,7 +1068,7 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         } else {
             ModuleSource::BlinkFile(PathBuf::from(current_file))
         };
-        let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.global_env.clone())));
+        let module_env = Arc::new(RwLock::new(Env::with_parent(ctx.get_global_env())));
         let new_module = Module {
             name: name.clone(),
             // using the global env as parent
@@ -1118,7 +1077,7 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
             source: source,
             ready: true,
         };
-        let module_arc = ctx.module_registry.write().register_module(new_module);
+        let module_arc = ctx.register_module(new_module);
         module = Some(module_arc);        
     }
     if should_declare && options.contains_key("exports") {
@@ -1150,7 +1109,7 @@ fn find_module_file(module_name: &str, ctx: &mut EvalContext) -> Result<PathBuf,
     let module_symbol_id = ctx.intern_symbol(module_name);
     let module_symbol_id = ctx.get_symbol_id(module_symbol_id).unwrap();
 
-    if let Some(module) = ctx.module_registry.read().get_module(module_symbol_id) {
+    if let Some(module) = ctx.get_module(module_symbol_id) {
         let module_read = module.read();
         if let ModuleSource::BlinkFile(ref path) = module_read.source {
             return Ok(path.clone());
@@ -1246,7 +1205,7 @@ pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         
         ImportType::Symbols { symbols, module, aliases } => {
             // Check if module already exists
-            let module_exists = ctx.module_registry.read().get_module(module).is_some();
+            let module_exists = ctx.get_module(module).is_some();
             let module_name = match ctx.resolve_symbol_name(module) {
                 Some(name) => name,
                 None => {
@@ -1268,7 +1227,7 @@ pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
                 try_eval!(loaded, ctx);
                 
                 // Verify the module is now available
-                if ctx.module_registry.read().get_module(module).is_none() {
+                if ctx.get_module(module).is_none() {
                     return EvalResult::Value(ctx.eval_error(&format!("Module '{}' was not found in the loaded file", module)));
                 }
             }
@@ -1295,55 +1254,43 @@ pub fn eval_quasiquote(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
 }
 
 fn expand_quasiquote(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
-    match expr {
-        ValueRef::Shared(idx) => {
-            let shared = ctx.shared_arena.read().get(idx).map(|s| s.clone());
-            if let Some(shared) = shared {
-                match shared.as_ref() {
-                    SharedValue::List(items) if !items.is_empty() => {
-                        let first = items[0];
-                        
-                        // Check if first item is 'unquote or 'unquote-splicing
-                        if let Some(symbol_name) = ctx.get_symbol_name(first) {
-                            match symbol_name.as_str() {
-                                "unquote" => {
-                                    if items.len() != 2 {
-                                        return EvalResult::Value(ctx.eval_error("unquote expects exactly one argument"));
-                                    }
-                                    // Evaluate the unquoted form
-                                    forward_eval!(trace_eval(items[1], ctx), ctx)
-                                }
-                                
-                                "unquote-splicing" => {
-                                    return EvalResult::Value(ctx.eval_error("unquote-splicing not valid here"));
-                                }
-                                
-                                _ => {
-                                    // Regular list - expand recursively
-                                    expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), false, ctx)
-                                }
+
+    if let Some(heap_value) = expr.read_heap_value() {
+        match heap_value {
+            HeapValue::List(items) if !items.is_empty() => {
+                let first = items[0];
+                // Check if first item is 'unquote or 'unquote-splicing
+                if let Some(symbol_name) = ctx.get_symbol_name(first) {
+                    match symbol_name.as_str() {
+                        "unquote" => {
+                            if items.len() != 2 {
+                                return EvalResult::Value(ctx.eval_error("unquote expects exactly one argument"));
                             }
-                        } else {
-                            // First item is not a symbol - expand recursively
+                            // Evaluate the unquoted form
+                            forward_eval!(trace_eval(items[1], ctx), ctx)
+                        }
+                        
+                        "unquote-splicing" => {
+                            return EvalResult::Value(ctx.eval_error("unquote-splicing not valid here"));
+                        }
+                        
+                        _ => {
+                            // Regular list - expand recursively
                             expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), false, ctx)
                         }
                     }
-                    
-                    SharedValue::Vector(items) => {
-                        // Expand vector recursively
-                        expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), true, ctx)
-                    }
-                    
-                    // Other shared values are self-quoting
-                    _ => EvalResult::Value(expr),
+                } else {
+                    // First item is not a symbol - expand recursively
+                    expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), false, ctx)
                 }
-            } else {
-                EvalResult::Value(ctx.eval_error("Invalid reference in quasiquote"))
             }
+            HeapValue::Vector(items) => {
+                expand_quasiquote_items_inline(items.clone(), 0, Vec::new(), true, ctx)
+            }
+            _ => EvalResult::Value(expr),
         }
-        
-        // Immediate values and nil are self-quoting
-        _ => EvalResult::Value(expr),
+    } else {
+        EvalResult::Value(expr)
     }
 }
 
@@ -1357,13 +1304,11 @@ fn expand_quasiquote_items_inline(
     loop {
         if index >= items.len() {
             // Create the appropriate collection type
-            if is_vector {
-                let vector = SharedValue::Vector(expanded_items);
-                let value = ctx.shared_arena.write().alloc(vector);
+            if is_vector {                
+                let value = ctx.vector_value(expanded_items);
                 return EvalResult::Value(value);
             } else {
-                let list = SharedValue::List(expanded_items);
-                let value = ctx.shared_arena.write().alloc(list);
+                let value = ctx.list_value(expanded_items);
                 return EvalResult::Value(value);
             }
         }
@@ -1371,52 +1316,51 @@ fn expand_quasiquote_items_inline(
         let item = items[index];
 
         // Check for unquote-splicing
-        if let ValueRef::Shared(item_idx) = item {
-            let shared = ctx.shared_arena.read().get(item_idx).map(|s| s.clone());
-            if let Some(shared) = shared {
-                if let SharedValue::List(inner_items) = shared.as_ref() {
-                    if !inner_items.is_empty() {
-                        if let Some(symbol_name) = ctx.get_symbol_name(inner_items[0]) {
-                            if symbol_name == "unquote-splicing" {
-                                if inner_items.len() != 2 {
-                                    return EvalResult::Value(ctx.eval_error("unquote-splicing expects exactly one argument"));
+        if let Some(heap_value) = item.read_heap_value() {
+            if let HeapValue::List(inner_items) = heap_value {
+                if let Some(symbol_name) = ctx.get_symbol_name(inner_items[0]) {
+                    if symbol_name == "unquote-splicing" {
+                        if inner_items.len() != 2 {
+                            return EvalResult::Value(ctx.eval_error("unquote-splicing expects exactly one argument"));
+                        }
+                        let result = trace_eval(inner_items[1], ctx);
+                        match result {
+                            EvalResult::Value(spliced) => {
+                                if spliced.is_error() {
+                                    return EvalResult::Value(spliced);
                                 }
-
-                                let result = trace_eval(inner_items[1], ctx);
-                                match result {
-                                    EvalResult::Value(spliced) => {
-                                        if ctx.is_err(&spliced) {
-                                            return EvalResult::Value(spliced);
+                                
+                                // Extract list items to splice in
+                                if let Some(splice_items) = spliced.get_vec() {
+                                    expanded_items.extend(splice_items);
+                                } else if let Some(splice_items) = spliced.get_list() {
+                                    expanded_items.extend(splice_items);
+                                } else {
+                                    return EvalResult::Value(ctx.eval_error("unquote-splicing expects a list"));
+                                }
+                                
+                                index += 1;
+                                continue;
+                            }
+                            EvalResult::Suspended { future, resume: _ } => {
+                                return EvalResult::Suspended {
+                                    future,
+                                    resume: Box::new(move |v, ctx| {
+                                        if v.is_error() {
+                                            return EvalResult::Value(v);
                                         }
                                         
-                                        // Extract list items to splice in
-                                        if let Some(splice_items) = ctx.get_vec_or_list_items(spliced) {
+                                        if let Some(splice_items) = v.get_vec() {
                                             expanded_items.extend(splice_items);
+                                            expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, ctx)
+                                        } else if let Some(splice_items) = v.get_list() {
+                                            expanded_items.extend(splice_items);
+                                            expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, ctx)
                                         } else {
-                                            return EvalResult::Value(ctx.eval_error("unquote-splicing expects a list"));
+                                            EvalResult::Value(ctx.eval_error("unquote-splicing expects a list"))
                                         }
-                                        
-                                        index += 1;
-                                        continue;
-                                    }
-                                    EvalResult::Suspended { future, resume: _ } => {
-                                        return EvalResult::Suspended {
-                                            future,
-                                            resume: Box::new(move |v, ctx| {
-                                                if ctx.is_err(&v) {
-                                                    return EvalResult::Value(v);
-                                                }
-                                                
-                                                if let Some(splice_items) = ctx.get_vec_or_list_items(v) {
-                                                    expanded_items.extend(splice_items);
-                                                    expand_quasiquote_items_inline(items, index + 1, expanded_items, is_vector, ctx)
-                                                } else {
-                                                    EvalResult::Value(ctx.eval_error("unquote-splicing expects a list"))
-                                                }
-                                            }),
-                                        };
-                                    }
-                                }
+                                    }),
+                                };
                             }
                         }
                     }
@@ -1424,11 +1368,12 @@ fn expand_quasiquote_items_inline(
             }
         }
 
+
         // Regular item expansion
         let result = expand_quasiquote(item, ctx);
         match result {
             EvalResult::Value(expanded) => {
-                if ctx.is_err(&expanded) {
+                if expanded.is_error() {
                     return EvalResult::Value(expanded);
                 }
                 expanded_items.push(expanded);
@@ -1438,7 +1383,7 @@ fn expand_quasiquote_items_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         expanded_items.push(v);
@@ -1461,14 +1406,14 @@ pub fn eval_macro(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     };
 
     // Create the macro value and store in arena
-    let macro_data = Macro {
+    let macro_data = Callable {
         params,
         body: args[1..].to_vec(),
         env: ctx.env.clone(),
         is_variadic,
     };
     
-    let macro_ref = ctx.shared_arena.write().alloc(SharedValue::Macro(macro_data));
+    let macro_ref = ctx.macro_value(macro_data);
     EvalResult::Value(macro_ref)
 }
 
@@ -1520,7 +1465,7 @@ pub fn eval_deref(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
 
     match ctx.async_ctx {
         AsyncContext::Blocking => {
-            let future_opt = ctx.get_future(future_val);
+            let future_opt = future_val.get_future();
             if let Some(future) = future_opt {
                 let res = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(future.clone())
@@ -1533,7 +1478,7 @@ pub fn eval_deref(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
             
         },
         AsyncContext::Goroutine(_) => {
-            let future_opt = ctx.get_future(future_val);
+            let future_opt = future_val.get_future();
 
             if let Some(future) = future_opt {
                 let future_clone = future.clone();
@@ -1557,9 +1502,11 @@ pub fn eval_go(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     let goroutine_ctx = ctx.clone();
     let expr = args[0].clone();
 
-    ctx.goroutine_scheduler.spawn_with_context(goroutine_ctx, move |ctx| {
-        trace_eval(expr, ctx)
-    });
+    // Mediated through runtime
+    // TODO: Implement this
+    // ctx.goroutine_scheduler.spawn_with_context(goroutine_ctx, move |ctx| {
+    //     trace_eval(expr, ctx)
+    // });
 
     EvalResult::Value(ctx.nil_value())
 }
