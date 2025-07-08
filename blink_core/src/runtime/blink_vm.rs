@@ -24,14 +24,6 @@ pub struct BlinkVM {
     pub file_to_modules: RwLock<HashMap<PathBuf, Vec<String>>>,
     pub reader_macros: RwLock<ReaderContext>,
     pub value_metadata: RwLock<ValueMetadataStore>,
-    
-    goroutines: Arc<Mutex<HashMap<GoroutineId, JoinHandle<()>>>>,
-    
-    // ID generation
-    next_id: AtomicU64,
-    
-    // Tokio runtime handle
-    pub runtime: tokio::runtime::Handle,
     pub handle_registry: RwLock<HandleRegistry>,
 }
 
@@ -68,9 +60,6 @@ impl BlinkVM {
             telemetry_sink: None,
             module_registry: RwLock::new(ModuleRegistry::new()),
             file_to_modules: RwLock::new(HashMap::new()),
-            goroutines: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicU64::new(1),
-            runtime: tokio::runtime::Handle::current(),
             reader_macros: RwLock::new(ReaderContext::new()),
             value_metadata: RwLock::new(ValueMetadataStore::new()),
             handle_registry: RwLock::new(HandleRegistry::new()),

@@ -221,12 +221,20 @@ impl EvalContext {
         self.vm.module_registry.read().get_module(module_id)
     }
 
-    pub fn register_module(&self, module: Module) {
-        self.vm.module_registry.write().register_module(module);
+    pub fn register_module(&self, module: Module) -> Arc<RwLock<Module>> {
+        self.vm.module_registry.write().register_module(module)
     }
 
     pub fn remove_module(&self, module_id: u32) {
         self.vm.module_registry.write().remove_module(module_id);
+    }
+
+    pub fn is_file_evaluated(&self, file_path: &PathBuf) -> bool {
+        self.vm.module_registry.read().is_file_evaluated(file_path)
+    }
+
+    pub fn mark_file_evaluated(&self, file_path: PathBuf) {
+        self.vm.module_registry.write().mark_file_evaluated(file_path);
     }
 
     pub fn store_native_library(&self, lib_path: &PathBuf, lib: Library) {
