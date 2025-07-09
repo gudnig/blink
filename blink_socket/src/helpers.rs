@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use blink_core::{collections::{ContextualValueRef, ValueContext}, eval::EvalContext, runtime::SymbolTable, value::{unpack_immediate, ImmediateValue, ParsedValue, ParsedValueWithPos}, ValueRef};
+use blink_core::{ eval::EvalContext, runtime::SymbolTable, value::{unpack_immediate, ImmediateValue, ParsedValue, ParsedValueWithPos}, ValueRef};
 
 use crate::session::{SymbolInfo, SymbolKind, SymbolSource};
 

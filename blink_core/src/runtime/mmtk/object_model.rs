@@ -10,7 +10,7 @@ use mmtk::{
     vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}
 };
 
-use crate::{runtime::BlinkVM, ValueRef};
+use crate::{runtime::BlinkVM, value::ValueRef};
 
 #[repr(i8)]
 #[derive(PartialEq, Eq, Debug)]
@@ -92,6 +92,7 @@ impl ObjectHeader {
         &[8], // Macro
         &[9], // Future
         &[10], // Env
+        &[127], // Unknown
     ];
     
 
@@ -169,7 +170,7 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
         if type_tag < TYPE_DESCRIPTORS.len() {
             TYPE_DESCRIPTORS[type_tag]
         } else {
-            &[255] // Unknown type fallback
+            TYPE_DESCRIPTORS[TYPE_DESCRIPTORS.len() - 1]
         }
     }
     

@@ -1,17 +1,25 @@
 use core::fmt;
 use std::{
-    fmt::Display, hash::{Hash, Hasher}, sync::Arc
-    };
-
-    
-use parking_lot::RwLock;
-
-
-
-use crate::{
-    env::Env, error::BlinkError, eval::{EvalContext, EvalResult}, future::BlinkFuture, runtime::{ContextualBoundary, TypeTag, ValueBoundary}, value::{is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_module, pack_nil, pack_number, pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, IsolatedValue, NativeFn}, BlinkHashMap, BlinkHashSet
+    fmt::Display,
+    hash::{Hash, Hasher},
+    sync::Arc,
 };
 
+use parking_lot::RwLock;
+
+use crate::{
+    env::Env,
+    error::BlinkError,
+    eval::{EvalContext, EvalResult},
+    future::BlinkFuture,
+    runtime::{ContextualBoundary, TypeTag, ValueBoundary},
+    value::{
+        is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_module, pack_nil, pack_number,
+        pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue,
+        IsolatedNativeFn, IsolatedValue, NativeFn,
+    },
+    collections::{BlinkHashMap, BlinkHashSet},
+};
 
 #[derive(Debug, Copy, Clone)]
 pub enum ValueRef {
@@ -19,8 +27,6 @@ pub enum ValueRef {
     Heap(GcPtr),
     Native(usize),
 }
-
-
 
 #[derive(Debug)]
 pub struct ModuleRef {
@@ -46,7 +52,6 @@ impl Display for ValueRef {
     }
 }
 
-
 impl Hash for ValueRef {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -55,7 +60,7 @@ impl Hash for ValueRef {
             ValueRef::Native(n) => {
                 "native".hash(state);
                 n.hash(state);
-            },
+            }
         }
     }
 }
@@ -63,7 +68,9 @@ impl Hash for ValueRef {
 impl PartialEq for ValueRef {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (ValueRef::Immediate(packed), ValueRef::Immediate(other_packed)) => packed == other_packed,
+            (ValueRef::Immediate(packed), ValueRef::Immediate(other_packed)) => {
+                packed == other_packed
+            }
             (ValueRef::Heap(gc_ptr), ValueRef::Heap(other_gc_ptr)) => gc_ptr == other_gc_ptr,
             (ValueRef::Native(n), ValueRef::Native(other_n)) => n == other_n,
             _ => false,
@@ -74,11 +81,10 @@ impl PartialEq for ValueRef {
 impl Eq for ValueRef {}
 
 impl ValueRef {
-    
     // ------------------------------------------------------------
     // Constructors
     // ------------------------------------------------------------
-    
+
     pub fn number(n: f64) -> Self {
         ValueRef::Immediate(pack_number(n))
     }
@@ -104,7 +110,7 @@ impl ValueRef {
         debug_assert!(ptr & 1 == 0, "Pointer must be aligned");
         ValueRef::Native(ptr | 0) // Tag 0 for isolated
     }
-    
+
     pub fn contextual_native_fn(boxed_fn: ContextualNativeFn) -> Self {
         let ptr = Box::into_raw(Box::new(boxed_fn)) as *mut ContextualNativeFn as usize;
         debug_assert!(ptr & 1 == 0, "Pointer must be aligned");
@@ -153,7 +159,7 @@ impl ValueRef {
                 } else {
                     false
                 }
-            },
+            }
             _ => false,
         }
     }
@@ -167,57 +173,45 @@ impl ValueRef {
                 } else {
                     false
                 }
-            },
+            }
             _ => false,
         }
     }
 
     pub fn is_list(&self) -> bool {
         match self {
-            ValueRef::Heap(gc_ptr) => {
-                gc_ptr.type_tag() == TypeTag::List
-            },
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::List,
             _ => false,
         }
     }
 
     pub fn is_vec(&self) -> bool {
         match self {
-            ValueRef::Heap(gc_ptr) => {
-                gc_ptr.type_tag() == TypeTag::Vector
-            },
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Vector,
             _ => false,
         }
     }
 
     pub fn is_map(&self) -> bool {
         match self {
-            ValueRef::Heap(gc_ptr) => {
-                gc_ptr.type_tag() == TypeTag::Map
-            },
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Map,
             _ => false,
         }
     }
 
     pub fn is_set(&self) -> bool {
         match self {
-            ValueRef::Heap(gc_ptr) => {
-                gc_ptr.type_tag() == TypeTag::Set
-            },
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Set,
             _ => false,
         }
     }
 
     pub fn is_future(&self) -> bool {
         match self {
-            ValueRef::Heap(gc_ptr) => {
-                gc_ptr.type_tag() == TypeTag::Future
-            },
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Future,
             _ => false,
         }
     }
-
-
 
     pub fn is_truthy(&self) -> bool {
         match self {
@@ -233,7 +227,6 @@ impl ValueRef {
         }
     }
 
-
     // ------------------------------------------------------------
     // Value extraction
     // ------------------------------------------------------------
@@ -241,32 +234,26 @@ impl ValueRef {
     pub fn get_future(&self) -> Option<BlinkFuture> {
         if self.is_future() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::Future(future) => Some(future.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::Future(future) => Some(future.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
     pub fn get_string(&self) -> Option<String> {
         if self.is_string() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::Str(str) => Some(str.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::Str(str) => Some(str.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
@@ -274,16 +261,13 @@ impl ValueRef {
     pub fn get_list(&self) -> Option<Vec<ValueRef>> {
         if self.is_list() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::List(list) => Some(list.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::List(list) => Some(list.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
@@ -291,16 +275,13 @@ impl ValueRef {
     pub fn get_vec(&self) -> Option<Vec<ValueRef>> {
         if self.is_vec() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::Vector(vec) => Some(vec.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::Vector(vec) => Some(vec.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
@@ -308,16 +289,13 @@ impl ValueRef {
     pub fn get_map(&self) -> Option<BlinkHashMap> {
         if self.is_map() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::Map(map) => Some(map.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::Map(map) => Some(map.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
@@ -325,16 +303,13 @@ impl ValueRef {
     pub fn get_set(&self) -> Option<BlinkHashSet> {
         if self.is_set() {
             match self {
-                ValueRef::Heap(gc_ptr) => {
-                    match gc_ptr.to_heap_value() {
-                        HeapValue::Set(set) => Some(set.clone()),
-                        _ => None,
-                    }
+                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                    HeapValue::Set(set) => Some(set.clone()),
+                    _ => None,
                 },
                 _ => None,
             }
-        }
-        else {
+        } else {
             None
         }
     }
@@ -353,8 +328,6 @@ impl ValueRef {
             None
         }
     }
-
-
 
     // Value extraction
     pub fn get_number(&self) -> Option<f64> {
@@ -398,7 +371,6 @@ impl ValueRef {
         }
     }
 
-
     pub fn get_symbol(&self) -> Option<u32> {
         match self {
             ValueRef::Immediate(packed) => {
@@ -434,7 +406,7 @@ impl ValueRef {
                     let fn_ptr = raw_ptr as *const NativeFn;
                     Some(unsafe { &*fn_ptr })
                 } else {
-                    // Contextual function  
+                    // Contextual function
                     let fn_ptr = raw_ptr as *const NativeFn;
                     Some(unsafe { &*fn_ptr })
                 }
@@ -447,32 +419,31 @@ impl ValueRef {
         match self {
             ValueRef::Native(tagged_ptr) => {
                 let ptr = tagged_ptr & !1; // Clear the tag bit
-                
+
                 if tagged_ptr & 1 == 0 {
                     // Tag 0 = Isolated function
                     let boxed_fn_ptr = ptr as *const IsolatedNativeFn;
                     let boxed_fn = unsafe { &*boxed_fn_ptr };
-                    
+
                     // Convert args and call
                     let mut boundary = ContextualBoundary::new(ctx);
-                    let isolated_args: Result<Vec<_>, _> = args.iter()
+                    let isolated_args: Result<Vec<_>, _> = args
+                        .iter()
                         .map(|arg| boundary.extract_isolated(*arg))
                         .collect();
-                    
+
                     match isolated_args {
-                        Ok(isolated_args) => {
-                            match boxed_fn(isolated_args) {
-                                Ok(result) => EvalResult::Value(boundary.alloc_from_isolated(result)),
-                                Err(e) => EvalResult::Value(ctx.error_value(BlinkError::eval(e))),
-                            }
-                        }
+                        Ok(isolated_args) => match boxed_fn(isolated_args) {
+                            Ok(result) => EvalResult::Value(boundary.alloc_from_isolated(result)),
+                            Err(e) => EvalResult::Value(ctx.error_value(BlinkError::eval(e))),
+                        },
                         Err(e) => EvalResult::Value(ctx.error_value(BlinkError::eval(e))),
                     }
                 } else {
                     // Tag 1 = Contextual function
                     let boxed_fn_ptr = ptr as *const ContextualNativeFn;
                     let boxed_fn = unsafe { &*boxed_fn_ptr };
-                    
+
                     // Call directly
                     boxed_fn(args, ctx)
                 }

@@ -2,8 +2,7 @@ use crate::{
     error::BlinkError,
     eval::{EvalContext, EvalResult},
     runtime::{ContextualBoundary, ValueBoundary},
-    value::IsolatedValue,
-    ValueRef,
+    value::{IsolatedValue, ValueRef},
 };
 
 pub type IsolatedNativeFn =

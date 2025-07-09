@@ -1,16 +1,17 @@
-use crate::collections::{ContextualValueRef, ValueContext};
+
 use crate::env::Env;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 
-use crate::parser::{parse, tokenize, ReaderContext};
-use crate::runtime::SymbolTable;
+use crate::parser::{parse, tokenize};
+use crate::runtime::{BlinkVM, SymbolTable};
 use crate::value::{ParsedValue, ParsedValueWithPos, ValueRef};
-use crate::value::SharedValue;
 
 use parking_lot::RwLock;
 use rustyline::history::FileHistory;
 use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::sync::Arc;
+use std::thread::Thread;
+use std::time::Duration;
 
 use crate::eval::{eval, EvalContext, EvalResult};
 
@@ -30,22 +31,20 @@ pub async fn start_repl() {
 
     let symbol_table = Arc::new(RwLock::new(SymbolTable::new()));
 
-    let mut ctx = EvalContext::new(global_env.clone(), symbol_table.clone());
+    let vm = Arc::new(BlinkVM::new());
+
+    let mut ctx = EvalContext::new(global_env.clone(), vm.clone());
     {
         crate::native_functions::register_builtins(&mut ctx);
         crate::native_functions::register_builtin_macros(&mut ctx);
         crate::native_functions::register_complex_macros(&mut ctx);
     }
-    crate::parser::preload_builtin_reader_macros(&mut ctx);
+    crate::parser::preload_builtin_reader_macros(vm.clone());
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
     loop {
         
-        let reader_macros = ctx.reader_macros.read().reader_macros.clone();
-        let temp_reader_ctx = crate::parser::ReaderContext { reader_macros };
-        let mut temp_reader_ctx = Arc::new(RwLock::new(temp_reader_ctx));
-
         match read_multiline(&mut rl, &mut ctx) {
             
             Ok(parsed) => {
@@ -60,58 +59,25 @@ pub async fn start_repl() {
                     },
                 
                     _ => {
-                        match run_line(parsed, &mut ctx) {
-                            EvalResult::Value(val) => 
-                            {
-                                match &val {
-                                    ValueRef::Shared(idx) =>{
-                                        let shared_arena = ctx.shared_arena.clone();
-                                        let shared_arena_guard = shared_arena.read();
-                                        let value = shared_arena_guard.get(*idx).unwrap();
-                                        match value.as_ref() {
-                                            SharedValue::Error(e) =>{
-                                        
-                                                println!("Error: {e}");
-                                                if DEBUG_POS {
-                                                    if let Some(pos) = e.pos {
-                                                        println!("   [at {}]", pos);
-                                                    }
-                                                }        
-                                            }
-                                            _ => {
-                                                let value_context = ValueContext::new(ctx.shared_arena.clone());
-                                                let contextual_value = ContextualValueRef::new(val, value_context);
-                                                println!("=> {}", contextual_value);
-                                            }
-                                        
-                                    }}
-                                    _ => {
-                                        let value_context = ValueContext::new(ctx.shared_arena.clone());
-                                        let contextual_value = ContextualValueRef::new(val, value_context);
-                                        println!("=> {}", contextual_value);
-                                    }
-                                }
-                            },
-                
-                
-                            EvalResult::Suspended { mut future, mut resume } => {
-                                loop {
-                                    let val = future.await ;
-                                    match resume(val, &mut ctx) {
-                                        EvalResult::Value(v) => {
-                                            let value_context = ValueContext::new(ctx.shared_arena.clone());
-                                            let contextual_value = ContextualValueRef::new(v, value_context);
-                                            println!("=> {}", contextual_value);
-                                            break;
+                        let mut current_result = run_line(parsed, &mut ctx);
+
+                        let final_value = loop {
+                            match current_result {
+                                EvalResult::Value(value) => break value,
+                                EvalResult::Suspended { future, resume } => {
+                                    // Poll until ready
+                                    let val = loop {
+                                        if let Some(val) = future.try_poll() {
+                                            break val;
                                         }
-                                        EvalResult::Suspended { future: next_future, resume: next_resume } => {
-                                            future = next_future;
-                                            resume = next_resume;
-                                        }
-                                    }
+                                        std::thread::sleep(Duration::from_millis(100));
+                                    };
+                                    current_result = resume(val, &mut ctx);
                                 }
                             }
-                        }
+                        };
+
+                        println!("=> {}", final_value);
                     }
                 }
             },
@@ -141,7 +107,7 @@ enum ReadError {
     Blink(BlinkError),
 }
 
-pub fn read_multiline(
+fn read_multiline(
     rl: &mut Editor<(), FileHistory>,
     ctx: &mut EvalContext,
 ) -> Result<ParsedValueWithPos, ReadError> {
@@ -154,10 +120,10 @@ pub fn read_multiline(
         lines.push(line);
         let code = lines.join("\n");
 
-        let symbol_table =ctx.symbol_table.clone();
-        let mut symbol_table_guard = symbol_table.write();
-        let reader_macros = ctx.reader_macros.clone();
-        let reader_macros_guard = reader_macros.write();
+        
+        let mut symbol_table_guard = ctx.vm.symbol_table.write();
+        
+        let reader_macros_guard = ctx.vm.reader_macros.write();
 
         match tokenize(&code).and_then(|mut toks| parse(&mut toks, &reader_macros_guard, &mut *symbol_table_guard)) {
             Ok(parsed) => return Ok(parsed),

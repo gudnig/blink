@@ -19,7 +19,7 @@ macro_rules! try_eval {
     ($expr:expr, $ctx:expr) => {
         match $expr {
             EvalResult::Value(v) => {
-                if $ctx.is_err(&v) {
+                if v.is_error() {
                     return EvalResult::Value(v);
                 }
                 v
@@ -33,7 +33,7 @@ macro_rules! forward_eval {
     ($expr:expr, $ctx:expr) => {
         match $expr {
             EvalResult::Value(v) => {
-                if $ctx.is_err(&v) {
+                if v.is_error() {
                     return EvalResult::Value(v);
                 }
                 EvalResult::Value(v)
@@ -101,11 +101,11 @@ pub fn trace_eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
     if ctx.tracing_enabled {
         let start = Instant::now();
         let val = try_eval!(eval(expr, ctx), ctx);
-        if let Some(sink) = &*ctx.telemetry_sink {
+        if let Some(sink) = &ctx.vm.telemetry_sink {
             sink(TelemetryEvent {
                 form: format!("{:?}", expr),
                 duration_us: start.elapsed().as_micros(),
-                result_type: ctx.type_tag(val),
+                result_type: val.type_tag().to_string(),
                 result_size: None,
                 source: ctx.get_pos(expr),
             });
@@ -123,7 +123,7 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     if let ValueRef::Immediate(packed) = head {
         if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(*packed) {
             let symbol_name = {
-                let symbol_table = ctx.symbol_table.read();
+                let symbol_table = ctx.vm.symbol_table.read();
                 match symbol_table.get_symbol(symbol_id) {
                     Some(name) => Some(name.to_string()), // Clone to avoid holding lock
                     None => None,
@@ -201,7 +201,7 @@ fn eval_function_call_inline(
         let result = trace_eval(list[0].clone(), ctx);
         match result {
             EvalResult::Value(f) => {
-                if ctx.is_err(&f) {
+                if f.is_error() {
                     return EvalResult::Value(f);
                 }
                 return eval_function_call_inline(list, 1, evaluated_args, Some(f), ctx);
@@ -210,7 +210,7 @@ fn eval_function_call_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         eval_function_call_inline(list, 1, evaluated_args, Some(v), ctx)
@@ -230,7 +230,7 @@ fn eval_function_call_inline(
         let result = trace_eval(list[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 evaluated_args.push(val);
@@ -240,7 +240,7 @@ fn eval_function_call_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         evaluated_args.push(v);
@@ -269,7 +269,7 @@ fn eval_macro_body_inline(
         let result = trace_eval(body[index].clone(), &mut ctx);
         match result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 expansion = val;
@@ -279,7 +279,7 @@ fn eval_macro_body_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         eval_macro_body_inline(body, index + 1, v, original_env, ctx.clone())
@@ -307,7 +307,7 @@ fn eval_function_body_inline(
         let eval_result = trace_eval(body[index].clone(), &mut ctx);
         match eval_result {
             EvalResult::Value(val) => {
-                if ctx.is_err(&val) {
+                if val.is_error() {
                     return EvalResult::Value(val);
                 }
                 result = val;
@@ -317,7 +317,7 @@ fn eval_function_body_inline(
                 return EvalResult::Suspended {
                     future,
                     resume: Box::new(move |v, ctx| {
-                        if ctx.is_err(&v) {
+                        if v.is_error() {
                             return EvalResult::Value(v);
                         }
                         eval_function_body_inline(body, index + 1, v, original_env, ctx.clone())
@@ -330,7 +330,7 @@ fn eval_function_body_inline(
 
 pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     match &func {
-        ValueRef::Gc(gc_ptr) => {
+        ValueRef::Heap(gc_ptr) => {
             let func = gc_ptr.to_heap_value();
 
             match func {
@@ -343,7 +343,7 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     is_variadic,
                 }) => {
                     // Arity check...
-                    if *is_variadic {
+                    if is_variadic {
                         if args.len() < params.len() - 1 {
                             return EvalResult::Value(ctx.arity_error(
                                 params.len() - 1,
@@ -363,7 +363,7 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
                     {
                         let mut env_guard = macro_env.write();
-                        if *is_variadic {
+                        if is_variadic {
                             for (i, param) in params.iter().take(params.len() - 1).enumerate() {
                                 env_guard.set(*param, args[i].clone());
                             }

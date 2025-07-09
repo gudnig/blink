@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use crate::env::Env;
 use crate::module::Module;
 use crate::value::{pack_module, FunctionHandle, FutureHandle};
-use crate::HeapValue;
+use crate::value::HeapValue;
 use crate::{
     
     error::BlinkError,

@@ -1,5 +1,5 @@
 use crate::module::ModuleRegistry;
-use crate::{ValueRef};
+use crate::value::ValueRef;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;

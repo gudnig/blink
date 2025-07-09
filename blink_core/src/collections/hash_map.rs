@@ -18,12 +18,12 @@ impl Display for BlinkHashMap {
         }
         write!(f, "}}")
     }
-}
+} 
 
 impl Iterator for BlinkHashMap {
     type Item = (ValueRef, ValueRef);
     fn next(&mut self) -> Option<Self::Item> {
-        self.map.iter().next()
+        self.map.iter().next().map(|(k, v)| (*k, *v))
     }
 }
 
@@ -90,26 +90,6 @@ impl BlinkHashMap {
     // Language runtime specific methods
     pub fn get_or_nil(&self, key: &ValueRef) -> ValueRef {
         self.get(key).cloned().unwrap_or_else(|| ValueRef::nil())
-    }
-
-    pub fn try_get_string(&self, key: &ValueRef) -> Option<String> {
-        self.get(key).and_then(|v| {
-            // Extract string from ValueRef using context
-            match v {
-                ValueRef::Shared(idx) => {
-                    self.context.arena().read().get(*idx)
-                        .and_then(|shared_val| {
-                            // Assuming SharedValue has a string variant
-                            // match shared_val.as_ref() {
-                            //     SharedValue::Str(s) => Some(s.clone()),
-                            //     _ => None,
-                            // }
-                            None // Placeholder
-                        })
-                }
-                _ => None,
-            }
-        })
     }
 
     // Convenient constructors for common operations

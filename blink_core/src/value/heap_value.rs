@@ -6,7 +6,7 @@ use crate::{
     eval::{EvalContext, EvalResult},
     future::BlinkFuture,
     value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef},
-    Env,
+    env::Env,
 };
 
 #[derive(Debug)]
@@ -171,20 +171,20 @@ impl PartialEq for HeapValue {
             (HeapValue::Set(blink_hash_set), HeapValue::Set(other_blink_hash_set)) => {
                 blink_hash_set.len() == other_blink_hash_set.len() && blink_hash_set.iter().zip(other_blink_hash_set.iter()).all(|(a, b)| a == b)
             },
-            (HeapValue::Error(blink_error), HeapValue::Error(other_blink_error)) => {
+            (HeapValue::Error(_arc_mod), HeapValue::Error(_)) => {
                 panic!("Should have happened already")
             },
-            (HeapValue::Function(user_defined_fn), HeapValue::Function(other_user_defined_fn)) => {
+            (HeapValue::Function(_), HeapValue::Function(_)) => {
                 panic!("Should have happened already")
                 
             },
-            (HeapValue::Macro(mac), HeapValue::Macro(other_mac)) => {
+            (HeapValue::Macro(_), HeapValue::Macro(_)) => {
                 panic!("Should have happened already")
             },
-            (HeapValue::Future(blink_future), HeapValue::Future(other_blink_future)) => {
+            (HeapValue::Future(_), HeapValue::Future(_)) => {
                 panic!("Should have happened already")
             }
-            (HeapValue::Env(env), HeapValue::Env(other_env)) => {
+            (HeapValue::Env(_), HeapValue::Env(_)) => {
                 panic!("Should have happened already")
             }
             _ => false,

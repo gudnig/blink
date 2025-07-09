@@ -1,9 +1,10 @@
 use crate::error::BlinkError;
+use crate::future::BlinkFuture;
 use crate::runtime::mmtk::ObjectHeader;
 use crate::runtime::TypeTag;
 use crate::value::Callable;
-use crate::{BlinkHashMap, BlinkHashSet};
-use crate::{runtime::BlinkVM, ValueRef};
+use crate::collections::{BlinkHashMap, BlinkHashSet};
+use crate::{runtime::BlinkVM, value::ValueRef};
 use mmtk::util::{Address, OpaquePointer, VMThread};
 use mmtk::MutatorContext;
 use mmtk::{util::ObjectReference, Mutator, util::VMMutatorThread, memory_manager};
@@ -104,7 +105,7 @@ impl BlinkVM {
         MUTATOR.with(|m| m.borrow().is_some())
     }
 
-    pub fn alloc_vec(&self, items: Vec<ValueRef>) -> ObjectReference {
+    pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
         self.with_mutator(|mutator| {
             let vec_header_size = std::mem::size_of::<usize>() * 2; // len + capacity
             let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
@@ -121,7 +122,7 @@ impl BlinkVM {
                 let header_ptr = base_ptr as *mut ObjectHeader;
                 std::ptr::write(
                     header_ptr,
-                    ObjectHeader::new(TypeTag::List, total_data_size),
+                    ObjectHeader::new(if is_list { TypeTag::List } else { TypeTag::Vector }, total_data_size),
                 );
 
                 // Write vector metadata (length and capacity)
@@ -340,12 +341,16 @@ impl BlinkVM {
         todo!()
     }
 
+    pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {
+        todo!()
+    }
+
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
-            HeapValue::List(list) => self.alloc_vec(list),
+            HeapValue::List(list) => self.alloc_vec_or_list(list, true),
             HeapValue::Str(str) => self.alloc_str(&str),
             HeapValue::Map(map) => self.alloc_blink_hash_map(map),
-            HeapValue::Vector(value_refs) => self.alloc_vec(value_refs),
+            HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false),
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => todo!(),

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use mmtk::util::ObjectReference;
 use crate::error::BlinkError;
 use crate::value::Callable;
-use crate::{BlinkHashMap, BlinkHashSet, ValueRef};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
 use crate::{runtime::{ObjectHeader, TypeTag}, value::HeapValue};
 
 

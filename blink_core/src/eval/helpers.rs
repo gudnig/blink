@@ -65,25 +65,25 @@ impl EvalContext {
     }
 
     pub fn list_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
-        let list = BlinkList::from_iter(values);
-        let object_ref = self.vm.alloc_vec(list);
+        
+        let object_ref = self.vm.alloc_vec_or_list(values, true);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn vector_value(&mut self, values: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.vm.alloc_vec(values);
+        let object_ref = self.vm.alloc_vec_or_list(values, false);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn map_value(&mut self, pairs: Vec<(ValueRef, ValueRef)>) -> ValueRef {
         let map = BlinkHashMap::from_pairs(pairs);
-        let object_ref = self.vm.alloc_map(map);
+        let object_ref = self.vm.alloc_blink_hash_map(map);
         ValueRef::Heap(GcPtr::new(object_ref))
     }   
 
     pub fn set_value(&mut self, set: Vec<ValueRef>) -> ValueRef {
         let set = BlinkHashSet::from_iter(set);
-        let object_ref = self.vm.alloc_set(set);
+        let object_ref = self.vm.alloc_blink_hash_set(set);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
@@ -119,25 +119,25 @@ impl EvalContext {
 
     pub fn empty_map_value(&mut self) -> ValueRef {
         let map = BlinkHashMap::new();
-        let object_ref = self.vm.alloc_map(map);
+        let object_ref = self.vm.alloc_blink_hash_map(map);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_set_value(&mut self) -> ValueRef {
         let set = BlinkHashSet::new();
-        let object_ref = self.vm.alloc_set(set);
+        let object_ref = self.vm.alloc_blink_hash_set(set);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_list_value(&mut self) -> ValueRef {
         let list = Vec::new();
-        let object_ref = self.vm.alloc_list(list);
+        let object_ref = self.vm.alloc_vec_or_list(list, true);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_vector_value(&mut self) -> ValueRef {
         let vector = Vec::new();
-        let object_ref = self.vm.alloc_vec(vector);
+        let object_ref = self.vm.alloc_vec_or_list(vector, false);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     pub fn error_value(&mut self, error: BlinkError) -> ValueRef {
@@ -169,7 +169,7 @@ impl EvalContext {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
         
-        args[index].try_get_number()
+        args[index].get_number()
             .ok_or_else(|| BlinkError::eval(format!("{} expects number at position {}", fn_name, index)))
     }
     
@@ -179,7 +179,7 @@ impl EvalContext {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
         
-        self.get_string(args[index])    
+        args[index].get_string()    
             .ok_or_else(|| BlinkError::eval(format!("{} expects string at position {}", fn_name, index)))
     }
     
@@ -189,7 +189,7 @@ impl EvalContext {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
         
-        args[index].try_get_bool()
+        args[index].get_bool()
             .ok_or_else(|| BlinkError::eval(format!("{} expects boolean at position {}", fn_name, index)))
     }
     
@@ -218,9 +218,12 @@ impl EvalContext {
         if index >= args.len() {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
-        
-        self.get_vec_or_list_items(args[index])
-            .ok_or_else(|| BlinkError::eval(format!("{} expects list/vector at position {}", fn_name, index)))
+        if let Some(vec) = args[index].get_vec() {
+            return Ok(vec);
+        } else if let Some(list) = args[index].get_list() {
+            return Ok(list);
+        }
+        Err(BlinkError::eval(format!("{} expects list/vector at position {}", fn_name, index)))
     }
 
     pub fn require_list(&self, args: &[ValueRef], index: usize, fn_name: &str) -> Result<Vec<ValueRef>, BlinkError> {
@@ -228,8 +231,10 @@ impl EvalContext {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
         
-        self.get_list(args[index])
-            .ok_or_else(|| BlinkError::eval(format!("{} expects list at position {}", fn_name, index)))
+        if let Some(list) = args[index].get_list() {
+            return Ok(list);
+        }
+        Err(BlinkError::eval(format!("{} expects list at position {}", fn_name, index)))
     }
 
 
@@ -239,8 +244,10 @@ impl EvalContext {
             return Err(BlinkError::arity(index + 1, args.len(), fn_name));
         }
         
-        self.get_vec(args[index])
-            .ok_or_else(|| BlinkError::eval(format!("{} expects vector at position {}", fn_name, index)))
+        if let Some(vec) = args[index].get_vec() {
+            return Ok(vec);
+        }
+        Err(BlinkError::eval(format!("{} expects vector at position {}", fn_name, index)))
     }
 
     // ============================================================================
@@ -254,11 +261,11 @@ impl EvalContext {
                     ImmediateValue::Number(n) => n.to_string(),
                     ImmediateValue::Bool(b) => b.to_string(),
                     ImmediateValue::Symbol(id) => {
-                                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
                                                     }
                     ImmediateValue::Nil => "nil".to_string(),
                     ImmediateValue::Keyword(id) => {
-                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
                                     }
                     ImmediateValue::Module(module, symbol) => {
                         let symbol_table = self.vm.symbol_table.read();
@@ -268,14 +275,12 @@ impl EvalContext {
                     },
                 }
             }
-            ValueRef::Shared(idx) => {
-                if let Some(shared) = self.shared_arena.read().get(idx) {
-                    self.format_shared_value(shared)
-                } else {
-                    "<invalid-ref>".to_string()
-                }
-            }            
-            ValueRef::Gc(_) => "<gc-object>".to_string(),
+            ValueRef::Heap(gc_ptr) => {
+                self.format_heap_value(&gc_ptr.to_heap_value())
+            }
+            ValueRef::Native(native) => {
+                format!("#<native fn {:?}>", native)
+            }
         }
     }
     
@@ -313,7 +318,7 @@ impl EvalContext {
     pub fn get_vector_elements(&self, val: ValueRef) -> Result<Vec<ValueRef>, String> {
         match val {
             ValueRef::Heap(gc_ptr) => {
-                match gc_ptr.as_ref() {
+                match gc_ptr.to_heap_value() {
                         HeapValue::Vector(items) => Ok(items.clone()),
                         HeapValue::List(items) if !items.is_empty() => {
                             // Handle (vector elem1 elem2 ...) form
