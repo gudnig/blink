@@ -67,7 +67,8 @@ impl BlinkVM {
         // UNSAFE: Required because bind_mutator expects 'static
         // This is safe as long as your VM instance lives for the program duration
         unsafe {
-            std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
+            //std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
+            todo!()
         }
     }
     
@@ -105,7 +106,17 @@ impl BlinkVM {
         MUTATOR.with(|m| m.borrow().is_some())
     }
 
+    fn fake_object_reference(id: usize) -> ObjectReference {
+        // Use a base address that's definitely non-zero
+        let base_addr = 0x10000; // 64KB base
+        let addr = base_addr + id;
+        ObjectReference::from_raw_address(unsafe { Address::from_usize(addr) })
+            .expect("Failed to create fake ObjectReference")
+    }
+
     pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
+        Self::fake_object_reference(0x10000)
+        /*
         self.with_mutator(|mutator| {
             let vec_header_size = std::mem::size_of::<usize>() * 2; // len + capacity
             let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
@@ -144,21 +155,26 @@ impl BlinkVM {
 
             ObjectReference::from_raw_address(address).unwrap()
         })
+        */
+        
     }
 
 
     pub fn alloc_user_defined_fn(&self, function: Callable) -> ObjectReference {
-        todo!()
+        Self::fake_object_reference(0x90000)
+        //todo!()
     }
 
     pub fn alloc_macro(&self, mac: Callable) -> ObjectReference {
-        todo!()
+        Self::fake_object_reference(0x80000)
+        //todo!()
     }
     
     
 
     pub fn alloc_str(&self, s: &str) -> ObjectReference {
-
+        Self::fake_object_reference(0x20000)
+        /*
         //TODO String interning
         self.with_mutator(|mutator| {
             // For strings, we might want to store the string data inline
@@ -192,6 +208,7 @@ impl BlinkVM {
 
             ObjectReference::from_raw_address(address).unwrap()
         })
+        */
     }
 
     pub fn alloc_blink_hash_map(&self, map: BlinkHashMap) -> ObjectReference {
@@ -202,6 +219,8 @@ impl BlinkVM {
     
 
     pub fn alloc_map(&self, pairs: Vec<(&ValueRef, &ValueRef)>) -> ObjectReference {
+        Self::fake_object_reference(0x30000)
+        /*
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(pairs.len());
             let item_count = pairs.len();
@@ -263,6 +282,8 @@ impl BlinkVM {
             
             ObjectReference::from_raw_address(address).unwrap()
         })
+        */
+    
     }
 
     pub fn alloc_blink_hash_set(&self, set: BlinkHashSet) -> ObjectReference {
@@ -271,6 +292,8 @@ impl BlinkVM {
     }
     
     pub fn alloc_set(&self, items: Vec<&ValueRef>) -> ObjectReference {
+        Self::fake_object_reference(0x40000)
+        /*
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(items.len());
             let item_count = items.len();
@@ -329,20 +352,22 @@ impl BlinkVM {
             
             ObjectReference::from_raw_address(address).unwrap()
         })
+        */
     }
 
     
 
     pub fn alloc_error(&self, error: BlinkError) -> ObjectReference {
-        todo!()
+        Self::fake_object_reference(0x50000)
+        
     }
 
     pub fn alloc_callable(&self, function: Callable) -> ObjectReference {
-        todo!()
+        Self::fake_object_reference(0x60000)
     }
 
     pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {
-        todo!()
+        Self::fake_object_reference(0x70000)
     }
 
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
@@ -353,9 +378,9 @@ impl BlinkVM {
             HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false),
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
-            HeapValue::Function(callable) => todo!(),
-            HeapValue::Macro(_) => todo!(),
-            HeapValue::Future(blink_future) => todo!(),
+            HeapValue::Function(callable) => self.alloc_callable(callable),
+            HeapValue::Macro(mac) => self.alloc_macro(mac),
+            HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => todo!(),
         }
     }

@@ -7,7 +7,6 @@ mod handle_registry;
 mod context;
 mod gc;
 mod blink_vm;
-mod mmtk_bindings;
 mod mmtk;
 mod blink_runtime;
 
@@ -21,6 +20,5 @@ pub use handle_registry::*;
 pub use context::*;
 pub use gc::*;
 pub use blink_vm::*;
-pub use mmtk_bindings::*;
 pub use mmtk::*;
 pub use blink_runtime::*;
