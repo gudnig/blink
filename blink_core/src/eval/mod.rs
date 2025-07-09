@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use crate::{
     env::Env, eval::special_forms::{
             eval_and, eval_apply, eval_def, eval_def_reader_macro, eval_deref, eval_do, eval_fn, eval_go, eval_if, eval_imp, eval_let, eval_load, eval_macro, eval_mod, eval_or, eval_quasiquote, eval_quote, eval_try
-        }, telemetry::TelemetryEvent, value::{unpack_immediate, Callable, ImmediateValue, ValueRef}, HeapValue
+        }, telemetry::TelemetryEvent, value::{unpack_immediate, Callable, ImmediateValue, ValueRef}, value::HeapValue
 };
 
 macro_rules! try_eval {

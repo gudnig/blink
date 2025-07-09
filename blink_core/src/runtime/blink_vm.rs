@@ -45,12 +45,7 @@ impl Default for BlinkVM {
 
 impl BlinkVM {
     pub fn new() -> Self {
-        if Self::is_apple_silicon() {
-            println!("Apple Silicon detected - applying mmap workarounds");
-            Self::new_with_apple_silicon_mmap_fix()
-        } else {
-            Self::new_standard()
-        }
+        Self::new_standard()
     }
     
     fn is_apple_silicon() -> bool {

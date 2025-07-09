@@ -1,11 +1,14 @@
 // blink_core/src/runtime/mmtk/object_model.rs
+// Updated implementation that switches from side metadata to header metadata
+// while preserving your type tag system
 
 use mmtk::{
     util::{
-        metadata::{side_metadata::SideMetadataSpec, MetadataSpec},
-        Address, ObjectReference
+        Address, ObjectReference,
+        copy::{CopySemantics, GCWorkerCopyContext},
     },
-    vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}
+    vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, 
+        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}
 };
 use crate::{runtime::BlinkVM, value::ValueRef};
 
@@ -41,19 +44,26 @@ impl TypeTag {
     }
 }
 
+// Updated header structure to include GC metadata
 #[repr(C)]
 pub struct ObjectHeader {
+    // First word: GC metadata
+    pub gc_metadata: usize,  // Contains mark bit, forwarding bit, etc.
+    // Second word: Type tag and size
     pub type_tag: i8,
+    pub _padding1: [u8; 3],
     pub total_size: u32,
-    pub _padding: [u8; 3],
 }
 
 impl ObjectHeader {
+    pub const SIZE: usize = std::mem::size_of::<ObjectHeader>();
+    
     pub fn new(type_tag: TypeTag, data_size: usize) -> Self {
         Self {
+            gc_metadata: 0,  // Initially zero - GC will manage this
             type_tag: type_tag as i8,
-            total_size: (std::mem::size_of::<Self>() + data_size) as u32,
-            _padding: [0; 3],
+            _padding1: [0; 3],
+            total_size: (Self::SIZE + data_size) as u32,
         }
     }
     
@@ -65,44 +75,75 @@ impl ObjectHeader {
 pub struct BlinkObjectModel;
 
 impl ObjectModel<BlinkVM> for BlinkObjectModel {
-    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = 0;
+    // CRITICAL CHANGE: This must be header size to skip over header
+    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = ObjectHeader::SIZE as isize;
     
-    const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
-    const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec = VMLocalForwardingPointerSpec::side_first();
-    const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec = VMLocalForwardingBitsSpec::side_after(&Self::LOCAL_FORWARDING_POINTER_SPEC.as_spec());
-    const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::side_after(&Self::LOCAL_FORWARDING_BITS_SPEC.as_spec());
-    const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec = VMLocalLOSMarkNurserySpec::side_after(&Self::LOCAL_MARK_BIT_SPEC.as_spec());
+    // CRITICAL CHANGE: All metadata specs now point to header locations
+    const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::in_header(0);
+    const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::in_header(1);
+    const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec = VMLocalForwardingBitsSpec::in_header(2);
+    const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec = VMLocalForwardingPointerSpec::in_header(8);
+    const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec = VMLocalLOSMarkNurserySpec::in_header(3);
     
     fn copy(
         from: ObjectReference,
-        _semantics: mmtk::util::copy::CopySemantics,
-        _copy_context: &mut mmtk::util::copy::GCWorkerCopyContext<BlinkVM>,
+        semantics: CopySemantics,
+        copy_context: &mut GCWorkerCopyContext<BlinkVM>,
     ) -> ObjectReference {
-        // For NoGC, we don't actually copy - just return the original
-        from
+        let total_size = Self::get_current_size(from);
+        
+        // Allocate space for the copy
+        let to_obj = copy_context.alloc_copy(from, total_size, 8, 0, semantics);
+        let obj_ref = ObjectReference::from_raw_address(to_obj).unwrap();
+        
+        // Copy the entire object including header
+        let from_start = Self::ref_to_header(from);
+        let to_start = Self::ref_to_header(obj_ref);
+        
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                from_start.to_ptr::<u8>(),
+                to_start.to_mut_ptr::<u8>(),
+                total_size
+            );
+        }
+        
+        obj_ref
     }
     
     fn copy_to(
-        _from: ObjectReference,
-        _to: ObjectReference,
+        from: ObjectReference,
+        to: ObjectReference,
         _region: Address,
     ) -> Address {
-        // For NoGC, not needed
-        panic!("copy_to called on NoGC plan")
+        let total_size = Self::get_current_size(from);
+        let from_start = Self::ref_to_header(from);
+        let to_start = Self::ref_to_header(to);
+        
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                from_start.to_ptr::<u8>(),
+                to_start.to_mut_ptr::<u8>(),
+                total_size
+            );
+        }
+        
+        to_start + total_size
     }
     
     fn get_reference_when_copied_to(
         _from: ObjectReference,
         to: Address,
     ) -> ObjectReference {
-        ObjectReference::from_raw_address(to).unwrap()
+        // 'to' points to the start of allocation, we need to skip header
+        ObjectReference::from_raw_address(to + ObjectHeader::SIZE).unwrap()
     }
     
     fn get_current_size(object: ObjectReference) -> usize {
         unsafe {
-            let header_ptr = object.to_raw_address().as_usize() as *const ObjectHeader;
-            let header = std::ptr::read(header_ptr);
-            header.total_size as usize
+            // Go back to header start
+            let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
+            (*header_ptr).total_size as usize
         }
     }
     
@@ -118,12 +159,12 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
         0
     }
     
-    fn get_type_descriptor(_reference: ObjectReference) -> &'static [i8] {
-        let header_ptr = _reference.to_raw_address().as_usize() as *const ObjectHeader;
-        let header = unsafe { std::ptr::read(header_ptr) };
-        let type_tag = header.type_tag as usize;
-         // Return the appropriate type descriptor based on the object's type
-         match type_tag {
+    fn get_type_descriptor(reference: ObjectReference) -> &'static [i8] {
+        let header_ptr = Self::ref_to_header(reference).to_ptr::<ObjectHeader>();
+        let type_tag = unsafe { (*header_ptr).type_tag };
+        
+        // Return the appropriate type descriptor based on the object's type
+        match type_tag {
             0 => &[0], // List
             1 => &[1], // Vector
             2 => &[2], // Map
@@ -139,14 +180,74 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
     }
     
     fn ref_to_object_start(object: ObjectReference) -> Address {
+        // Object data starts after header
         object.to_raw_address()
     }
     
     fn ref_to_header(object: ObjectReference) -> Address {
-        object.to_raw_address()
+        // Go back from object data to header
+        object.to_raw_address() - ObjectHeader::SIZE
     }
     
     fn dump_object(object: ObjectReference) {
-        println!("Blink object at {:?}", object.to_raw_address());
+        unsafe {
+            let header = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
+            let type_tag = (*header).get_type();
+            let size = (*header).total_size;
+            println!(
+                "Blink {} object at {:?}, total size: {} bytes", 
+                type_tag.to_str(),
+                object.to_raw_address(),
+                size
+            );
+        }
+    }
+}
+
+// Helper functions for allocation
+impl BlinkObjectModel {
+    /// Allocate a new object with the given type and size
+    pub fn alloc_with_type(
+        mutator: &mut mmtk::Mutator<BlinkVM>,
+        type_tag: TypeTag,
+        data_size: usize,
+    ) -> ObjectReference {
+
+        let total_size = (ObjectHeader::SIZE + data_size + 7) & !7;
+
+        
+        // Allocate memory
+        let start = mmtk::memory_manager::alloc(
+            mutator,
+            total_size,
+            8,
+            0,
+            mmtk::AllocationSemantics::Default,
+        );
+
+        
+        println!("Allocated object with type {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
+        
+        // Initialize header
+        unsafe {
+            let header_ptr = start.to_mut_ptr::<ObjectHeader>();
+            std::ptr::write(header_ptr, ObjectHeader::new(type_tag, data_size));
+        }
+        
+        // Return reference pointing after header
+        ObjectReference::from_raw_address(start + ObjectHeader::SIZE).unwrap()
+    }
+    
+    /// Get the type tag of an object
+    pub fn get_type_tag(object: ObjectReference) -> TypeTag {
+        unsafe {
+            let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
+            (*header_ptr).get_type()
+        }
+    }
+    
+    /// Get just the data size (excluding header)
+    pub fn get_data_size(object: ObjectReference) -> usize {
+        Self::get_current_size(object) - ObjectHeader::SIZE
     }
 }

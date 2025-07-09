@@ -1,7 +1,7 @@
 use crate::error::BlinkError;
 use crate::future::BlinkFuture;
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::TypeTag;
+use crate::runtime::{BlinkObjectModel, TypeTag};
 use crate::value::Callable;
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::{runtime::BlinkVM, value::ValueRef};
@@ -67,8 +67,8 @@ impl BlinkVM {
         // UNSAFE: Required because bind_mutator expects 'static
         // This is safe as long as your VM instance lives for the program duration
         unsafe {
-            //std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
-            todo!()
+            std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
+            
         }
     }
     
@@ -115,47 +115,24 @@ impl BlinkVM {
     }
 
     pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
-        Self::fake_object_reference(0x10000)
-        /*
+        
+        
         self.with_mutator(|mutator| {
-            let vec_header_size = std::mem::size_of::<usize>() * 2; // len + capacity
             let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
-            let total_data_size = vec_header_size + vec_data_size;
-            let total_size = std::mem::size_of::<ObjectHeader>() + total_data_size;
+            let total_data_size = vec_data_size;
+            let total_size = total_data_size;
 
-            let address = mutator.alloc(total_size, 8, 0, mmtk::AllocationSemantics::Default);
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::List, total_size);
 
             unsafe {
-                // Convert Address to raw pointer
-                let base_ptr = address.as_usize() as *mut u8;
-
-                // Write header
-                let header_ptr = base_ptr as *mut ObjectHeader;
-                std::ptr::write(
-                    header_ptr,
-                    ObjectHeader::new(if is_list { TypeTag::List } else { TypeTag::Vector }, total_data_size),
-                );
-
-                // Write vector metadata (length and capacity)
-                let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
-                let len_ptr = data_start as *mut usize;
-                std::ptr::write(len_ptr, items.len());
-
-                let cap_ptr = data_start.add(std::mem::size_of::<usize>()) as *mut usize;
-                std::ptr::write(cap_ptr, items.len()); // capacity = length for now
-
-                // Write vector data
-                let vec_data_ptr =
-                    data_start.add(std::mem::size_of::<usize>() * 2) as *mut ValueRef;
-
-                for (i, item) in items.into_iter().enumerate() {
-                    std::ptr::write(vec_data_ptr.add(i), item);
-                }
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
+                std::ptr::copy_nonoverlapping(items.as_ptr(), data_ptr, items.len());
+            
             }
 
-            ObjectReference::from_raw_address(address).unwrap()
+            data_start
         })
-        */
+        
         
     }
 
@@ -173,42 +150,26 @@ impl BlinkVM {
     
 
     pub fn alloc_str(&self, s: &str) -> ObjectReference {
-        Self::fake_object_reference(0x20000)
-        /*
+        
         //TODO String interning
         self.with_mutator(|mutator| {
             // For strings, we might want to store the string data inline
             let string_bytes = s.as_bytes();
-            let data_size = string_bytes.len() + std::mem::size_of::<u32>(); // length + data
-            let total_size = std::mem::size_of::<ObjectHeader>() + data_size;
+            let data_size = string_bytes.len();
+            let total_size =  data_size;
 
-            let address = mutator.alloc(total_size, 8, 0, mmtk::AllocationSemantics::Default);
-
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Str, total_size);
+            
             unsafe {
-                // Convert Address to raw pointer
-                let base_ptr = address.as_usize() as *mut u8;
-
-                // Write header
-                let header_ptr = base_ptr as *mut ObjectHeader;
-                std::ptr::write(header_ptr, ObjectHeader::new(TypeTag::Str, data_size));
-
-                // Write string length
-                let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
-                let len_ptr = data_start as *mut u32;
-                std::ptr::write(len_ptr, string_bytes.len() as u32);
-
-                // Write string data
-                let str_data_ptr = data_start.add(std::mem::size_of::<u32>()) as *mut u8;
-                std::ptr::copy_nonoverlapping(
-                    string_bytes.as_ptr(),
-                    str_data_ptr,
-                    string_bytes.len(),
-                );
+                let  base_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                
+                std::ptr::copy_nonoverlapping(string_bytes.as_ptr(), base_ptr, data_size);
             }
 
-            ObjectReference::from_raw_address(address).unwrap()
+            data_start
+
         })
-        */
+        
     }
 
     pub fn alloc_blink_hash_map(&self, map: BlinkHashMap) -> ObjectReference {
@@ -219,33 +180,23 @@ impl BlinkVM {
     
 
     pub fn alloc_map(&self, pairs: Vec<(&ValueRef, &ValueRef)>) -> ObjectReference {
-        Self::fake_object_reference(0x30000)
-        /*
+        
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(pairs.len());
             let item_count = pairs.len();
             
-            let header_size = std::mem::size_of::<usize>() * 2; // bucket_count + item_count
             let buckets_size = bucket_count * std::mem::size_of::<u32>(); // bucket start indices
             let pairs_size = item_count * 2 * std::mem::size_of::<ValueRef>();
-            let total_data_size = header_size + buckets_size + pairs_size;
+            let total_data_size = buckets_size + pairs_size;
             
-            let address = mutator.alloc(
-                std::mem::size_of::<ObjectHeader>() + total_data_size,
-                8, 0, mmtk::AllocationSemantics::Default
-            );
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Map, total_data_size);
             
             unsafe {
-                let base_ptr = address.as_usize() as *mut u8;
-                let header_ptr = base_ptr as *mut ObjectHeader;
-                std::ptr::write(header_ptr, ObjectHeader::new(TypeTag::Map, total_data_size));
-                
-                let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
                 
                 // Write metadata
-                let bucket_count_ptr = data_start as *mut usize;
+                let bucket_count_ptr = data_start.to_raw_address().as_usize() as *mut usize;
                 std::ptr::write(bucket_count_ptr, bucket_count);
-                let item_count_ptr = data_start.add(std::mem::size_of::<usize>()) as *mut usize;
+                let item_count_ptr = data_start.to_raw_address().as_usize() as *mut usize;
                 std::ptr::write(item_count_ptr, item_count);
                 
                 // Organize into buckets
@@ -261,7 +212,7 @@ impl BlinkVM {
                 }
                 
                 // Write bucket offsets
-                let bucket_offsets_ptr = data_start.add(header_size) as *mut u32;
+                let bucket_offsets_ptr = data_start.to_raw_address().as_usize() as *mut u32;
                 let mut current_offset = 0u32;
                 for (i, bucket) in buckets.iter().enumerate() {
                     std::ptr::write(bucket_offsets_ptr.add(i), current_offset);
@@ -269,7 +220,7 @@ impl BlinkVM {
                 }
                 
                 // Write pairs
-                let pairs_ptr = data_start.add(header_size + buckets_size) as *mut ValueRef;
+                let pairs_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
                 let mut pair_index = 0;
                 for bucket in buckets {
                     for (key, val) in bucket {
@@ -280,9 +231,9 @@ impl BlinkVM {
                 }
             }
             
-            ObjectReference::from_raw_address(address).unwrap()
+            data_start
         })
-        */
+        
     
     }
 
@@ -292,8 +243,7 @@ impl BlinkVM {
     }
     
     pub fn alloc_set(&self, items: Vec<&ValueRef>) -> ObjectReference {
-        Self::fake_object_reference(0x40000)
-        /*
+        
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(items.len());
             let item_count = items.len();
@@ -352,7 +302,7 @@ impl BlinkVM {
             
             ObjectReference::from_raw_address(address).unwrap()
         })
-        */
+        
     }
 
     
