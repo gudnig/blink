@@ -124,7 +124,7 @@ impl BlinkVM {
         };
 
         let mut global_env = GcPtr::new(self.global_env.unwrap()).read_env();
-        let global_module = GcPtr::new(self.global_module.unwrap()).read_module();
+        
         let macro_ref = self.alloc_macro(call);
 
         global_env.set(symbol_id, ValueRef::Heap(GcPtr::new(macro_ref)));

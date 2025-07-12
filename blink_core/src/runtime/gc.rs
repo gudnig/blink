@@ -1,9 +1,9 @@
-use crate::error::BlinkError;
+use crate::error::{BlinkError, BlinkErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
 use crate::runtime::{BlinkObjectModel, TypeTag};
-use crate::value::{Callable, GcPtr};
+use crate::value::{Callable, GcPtr, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
 use crate::{runtime::BlinkVM, value::ValueRef};
@@ -165,34 +165,35 @@ impl BlinkVM {
             );
             
             unsafe {
-                let mut ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
                 
                 // Write params count
-                *(ptr as *mut u32) = params_count as u32;
-                ptr = ptr.add(std::mem::size_of::<u32>());
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, params_count as u32);
+                offset += std::mem::size_of::<u32>();
                 
                 // Write parameter IDs
                 for param_id in &function.params {
-                    *(ptr as *mut u32) = *param_id;
-                    ptr = ptr.add(std::mem::size_of::<u32>());
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *param_id);
+                    offset += std::mem::size_of::<u32>();
                 }
                 
                 // Write body count
-                *(ptr as *mut u32) = body_count as u32;
-                ptr = ptr.add(std::mem::size_of::<u32>());
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, body_count as u32);
+                offset += std::mem::size_of::<u32>();
                 
                 // Write body expressions
                 for expr in &function.body {
-                    *(ptr as *mut ValueRef) = *expr;
-                    ptr = ptr.add(std::mem::size_of::<ValueRef>());
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut ValueRef, *expr);
+                    offset += std::mem::size_of::<ValueRef>();
                 }
                 
                 // Write environment reference
-                *(ptr as *mut ObjectReference) = function.env;
-                ptr = ptr.add(std::mem::size_of::<ObjectReference>());
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, function.env);
+                offset += std::mem::size_of::<ObjectReference>();
                 
                 // Write variadic flag
-                *(ptr as *mut bool) = function.is_variadic;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut bool, function.is_variadic);
             }
             
             data_start
@@ -208,50 +209,48 @@ impl BlinkVM {
             let name_size = std::mem::size_of::<u32>();
             let env_size = std::mem::size_of::<ObjectReference>();
             let exports_size = std::mem::size_of::<u32>() + // count
-                              (exports_count * std::mem::size_of::<u32>()); // export symbol IDs
-            let source_size = self.calculate_serialized_source_size(&module.source);
+                              (exports_count * std::mem::size_of::<u32>()); // exports
+            let source_size = std::mem::size_of::<SerializedModuleSource>();
             let ready_size = std::mem::size_of::<bool>();
             
             let total_size = name_size + env_size + exports_size + source_size + ready_size;
             
-            let data_start = BlinkObjectModel::alloc_with_type(
-                mutator, 
-                TypeTag::Module, 
-                total_size
-            );
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Module, total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
                 let mut offset = 0;
                 
-                // Write module name
-                *(data_ptr.add(offset) as *mut u32) = module.name;
+                // Write name
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, module.name);
                 offset += std::mem::size_of::<u32>();
                 
-                // Write environment reference
-                *(data_ptr.add(offset) as *mut ObjectReference) = module.env;
+                // Write env reference
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, module.env);
                 offset += std::mem::size_of::<ObjectReference>();
                 
                 // Write exports count
-                *(data_ptr.add(offset) as *mut u32) = exports_count as u32;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, exports_count as u32);
                 offset += std::mem::size_of::<u32>();
                 
-                // Write exports (should already be sorted)
-                for export_id in &module.exports {
-                    *(data_ptr.add(offset) as *mut u32) = *export_id;
+                // Write exports
+                for export in &module.exports {
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *export);
                     offset += std::mem::size_of::<u32>();
                 }
                 
-                // Write module source
-                offset += self.write_serialized_source(data_ptr.add(offset), &module.source);
+                // Write source data
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut SerializedModuleSource, module.source.clone());
+                offset += std::mem::size_of::<SerializedModuleSource>();
                 
                 // Write ready flag
-                *(data_ptr.add(offset) as *mut bool) = module.ready;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut bool, module.ready);
             }
             
             data_start
         })
     }
+    
     
     // Helper function to calculate SerializedModuleSource size
     fn calculate_serialized_source_size(&self, source: &SerializedModuleSource) -> usize {
@@ -353,10 +352,8 @@ impl BlinkVM {
 
     pub fn alloc_env(&self, env: Env) -> ObjectReference {
         self.with_mutator(|mutator| {
-            
-            
             let vars_count = env.vars.len();
-            let modules_count = env.available_modules.len();
+            let modules_count = env.symbol_aliases.len();
             
             // Layout: [vars_count][var_pairs...][modules_count][module_pairs...][parent_ref]
             let vars_size = std::mem::size_of::<u32>() + // count
@@ -375,7 +372,7 @@ impl BlinkVM {
                 let mut offset = 0;
                 
                 // Write vars count
-                *(data_ptr.add(offset) as *mut u32) = vars_count as u32;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, vars_count as u32);
                 offset += std::mem::size_of::<u32>();
                 
                 // Write vars in sorted order for faster lookup
@@ -383,29 +380,29 @@ impl BlinkVM {
                 sorted_vars.sort_by_key(|(k, _)| *k);
                 
                 for (key, value) in sorted_vars {
-                    *(data_ptr.add(offset) as *mut u32) = *key;
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *key);
                     offset += std::mem::size_of::<u32>();
-                    *(data_ptr.add(offset) as *mut ValueRef) = *value;
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut ValueRef, *value);
                     offset += std::mem::size_of::<ValueRef>();
                 }
                 
                 // Write modules count
-                *(data_ptr.add(offset) as *mut u32) = modules_count as u32;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, modules_count as u32);
                 offset += std::mem::size_of::<u32>();
                 
                 // Write modules in sorted order for faster lookup
-                let mut sorted_modules: Vec<_> = env.available_modules.iter().collect();
+                let mut sorted_modules: Vec<_> = env.symbol_aliases.iter().collect();
                 sorted_modules.sort_by_key(|(k, _)| *k);
                 
                 for (alias, module) in sorted_modules {
-                    *(data_ptr.add(offset) as *mut u32) = *alias;
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *alias);
                     offset += std::mem::size_of::<u32>();
-                    *(data_ptr.add(offset) as *mut u32) = *module;
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module);
                     offset += std::mem::size_of::<u32>();
                 }
                 
                 // Write parent reference
-                *(data_ptr.add(offset) as *mut Option<ObjectReference>) = env.parent;
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut Option<ObjectReference>, env.parent);
             }
             
             data_start
@@ -573,8 +570,53 @@ impl BlinkVM {
     
 
     pub fn alloc_error(&self, error: BlinkError) -> ObjectReference {
-        Self::fake_object_reference(0x50000)
-        
+        self.with_mutator(|mutator| {
+            // Serialize the error message as a string (we'll intern it)
+            let message_id = self.symbol_table.write().intern(&error.message);
+            
+            // Calculate sizes for each component
+            let message_size = std::mem::size_of::<u32>(); // interned string ID
+            let pos_size = std::mem::size_of::<Option<SourceRange>>();
+            let error_type_size = std::mem::size_of::<u8>() + // discriminant
+                                  std::mem::size_of::<u32>(); // enough space for the largest variant data
+            
+            let total_size = message_size + pos_size + error_type_size;
+            
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Error, total_size);
+            
+            unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
+                
+                // Write message (as interned string ID)
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, message_id);
+                offset += std::mem::size_of::<u32>();
+                
+                // Write position
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut Option<SourceRange>, error.pos);
+                offset += std::mem::size_of::<Option<SourceRange>>();
+                
+                // Write error type (simplified - just store discriminant for now)
+                let error_type_discriminant = match error.error_type {
+                    BlinkErrorType::Tokenizer => 0u8,
+                    BlinkErrorType::Parse(_) => 1u8,
+                    BlinkErrorType::UndefinedSymbol { .. } => 2u8,
+                    BlinkErrorType::Eval => 3u8,
+                    BlinkErrorType::ArityMismatch { .. } => 4u8,
+                    BlinkErrorType::UnexpectedToken { .. } => 5u8,
+                    BlinkErrorType::UserDefined { .. } => 6u8,
+                };
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, error_type_discriminant);
+                offset += std::mem::size_of::<u8>();
+                
+                // For now, just write a placeholder for the variant data
+                // In a full implementation, you'd serialize the specific error type data
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, 0u32);
+            }
+            
+            data_start
+        })
     }
 
     pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {

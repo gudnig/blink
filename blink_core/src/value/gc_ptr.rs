@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
-use crate::error::BlinkError;
+use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::BlinkObjectModel;
-use crate::value::Callable;
+use crate::value::{Callable, SourceRange};
 use crate::env::Env;
 use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
 use crate::{runtime::{ObjectHeader, TypeTag}, value::HeapValue};
@@ -118,58 +118,110 @@ impl GcPtr {
     }
 
 
-    pub fn read_error(&self) -> BlinkError {
-        unsafe {
-            let base_ptr = self.0.to_raw_address().as_usize() as *const u8;
-            let header_ptr = base_ptr as *const ObjectHeader;
-            let header = std::ptr::read(header_ptr);
-        }
-        todo!()
-    }
-
     pub fn read_blink_hash_map(&self) -> BlinkHashMap {
         let pairs = self.read_map();
         BlinkHashMap::from_pairs(pairs)
     }
 
 
-pub fn read_env(&self) -> Env {
-
-        //TODO this is not correct, need to match how env is allocated
+    pub fn read_env(&self) -> Env {
         unsafe {
             let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
+            println!("Reading env from ptr: {:p}", data_ptr);
+            
             // Read vars count
-            let vars_count = *(data_ptr.add(offset) as *const u32) as usize;
+            let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            println!("Vars count: {}", vars_count);
             offset += std::mem::size_of::<u32>();
             
-            // Variables are stored sorted by symbol ID
-            let vars_ptr = data_ptr.add(offset) as *const (u32, ValueRef);
-            let vars_slice = std::slice::from_raw_parts(vars_ptr, vars_count);
-            
-            // Convert to HashMap for current interface
-            let vars = vars_slice.to_vec();
-            offset += vars_count * (std::mem::size_of::<u32>() + std::mem::size_of::<ValueRef>());
+            // Read variables
+            let mut vars = Vec::new();
+            for i in 0..vars_count {
+                println!("Reading var {} at offset {}", i, offset);
+                let key = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                println!("  Key: {}", key);
+                offset += std::mem::size_of::<u32>();
+                
+                println!("  Reading value at offset {}", offset);
+                let value = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
+                println!("  Value read successfully");
+                offset += std::mem::size_of::<ValueRef>();
+                vars.push((key, value));
+            }
+            println!("Finished reading {} vars", vars.len());
             
             // Read modules count
-            let modules_count = *(data_ptr.add(offset) as *const u32) as usize;
+            println!("Reading modules count at offset {}", offset);
+            let modules_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            println!("Modules count: {}", modules_count);
             offset += std::mem::size_of::<u32>();
             
-            // Read module aliases (also stored as pairs)
-            let modules_ptr = data_ptr.add(offset) as *const (u32, u32);
-            let modules_slice = std::slice::from_raw_parts(modules_ptr, modules_count);
-            
-            let available_modules = modules_slice.to_vec();
-            offset += modules_count * (std::mem::size_of::<u32>() + std::mem::size_of::<u32>());
+            // Read module aliases
+            let mut available_modules = Vec::new();
+            for i in 0..modules_count {
+                println!("Reading module {} at offset {}", i, offset);
+                let alias = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                offset += std::mem::size_of::<u32>();
+                let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                offset += std::mem::size_of::<u32>();
+                available_modules.push((alias, module));
+            }
+            println!("Finished reading {} modules", available_modules.len());
             
             // Read parent reference
-            let parent_ref_ptr = data_ptr.add(offset) as *const Option<ObjectReference>;
-            let parent = std::ptr::read(parent_ref_ptr);
+            println!("Reading parent at offset {}", offset);
+            let parent = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<ObjectReference>);
+            println!("Parent read successfully");
             
+            println!("Successfully created Env with {} vars, {} modules", vars.len(), available_modules.len());
+            Env { vars, parent, symbol_aliases: available_modules }
+        }
+    }
+
+    pub fn read_error(&self) -> BlinkError {
+        unsafe {
+            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
             
+            // Read message ID
+            let message_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            offset += std::mem::size_of::<u32>();
             
-            Env { vars, parent, available_modules }
+            // Read position
+            let pos = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<SourceRange>);
+            offset += std::mem::size_of::<Option<SourceRange>>();
+            
+            // Read error type discriminant
+            let error_type_discriminant = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+            
+            // Read placeholder data (in full implementation, read actual variant data)
+            let _variant_data = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            
+            // Reconstruct the message from symbol table
+            // Note: You'll need access to the VM's symbol table here
+            // For now, create a placeholder message
+            let message = format!("Error type {}", error_type_discriminant);
+            
+            // Reconstruct error type (simplified)
+            let error_type = match error_type_discriminant {
+                0 => BlinkErrorType::Tokenizer,
+                1 => BlinkErrorType::Parse(ParseErrorType::UnexpectedEof), // placeholder
+                2 => BlinkErrorType::UndefinedSymbol { name: "unknown".to_string() },
+                3 => BlinkErrorType::Eval,
+                4 => BlinkErrorType::ArityMismatch { expected: 0, got: 0, form: "unknown".to_string() },
+                5 => BlinkErrorType::UnexpectedToken { token: "unknown".to_string() },
+                6 => BlinkErrorType::UserDefined { data: None },
+                _ => BlinkErrorType::Eval, // fallback
+            };
+            
+            BlinkError {
+                message,
+                pos,
+                error_type,
+            }
         }
     }
 
@@ -255,45 +307,35 @@ pub fn read_env(&self) -> Env {
 
     pub fn read_module(&self) -> Module {
         unsafe {
-            let mut ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
             
-            // Read module name
-            let name = *(ptr as *const u32);
-            ptr = ptr.add(std::mem::size_of::<u32>());
+            // Read name
+            let name = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            offset += std::mem::size_of::<u32>();
             
-            // Read environment reference
-            let env = *(ptr as *const ObjectReference);
-            ptr = ptr.add(std::mem::size_of::<ObjectReference>());
+            // Read env reference
+            let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
+            offset += std::mem::size_of::<ObjectReference>();
             
             // Read exports count
-            let exports_count = *(ptr as *const u32) as usize;
-            ptr = ptr.add(std::mem::size_of::<u32>());
+            let exports_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
             
             // Read exports
             let mut exports = Vec::with_capacity(exports_count);
             for _ in 0..exports_count {
-                let export_id = *(ptr as *const u32);
-                exports.push(export_id);
-                ptr = ptr.add(std::mem::size_of::<u32>());
+                let export = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                exports.push(export);
+                offset += std::mem::size_of::<u32>();
             }
             
-            // Read module source
-            let source_variant = *(ptr as *const u8);
-            ptr = ptr.add(std::mem::size_of::<u8>());
-            
-            let source = match source_variant {
-                0 => SerializedModuleSource::Repl,
-                1 => {
-                    let symbol_id = *(ptr as *const u32);
-                    ptr = ptr.add(std::mem::size_of::<u32>());
-                    SerializedModuleSource::BlinkFile(symbol_id)
-                }
-                // ... other variants
-                _ => SerializedModuleSource::Repl,
-            };
+            // Read source data
+            let source = std::ptr::read_unaligned(data_ptr.add(offset) as *const SerializedModuleSource);
+            offset += std::mem::size_of::<SerializedModuleSource>();
             
             // Read ready flag
-            let ready = *(ptr as *const bool);
+            let ready = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
             
             Module { name, env, exports, source, ready }
         }
@@ -301,38 +343,39 @@ pub fn read_env(&self) -> Env {
 
     pub fn read_callable(&self) -> Callable {
         unsafe {
-            let mut ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
             
             // Read params count
-            let params_count = *(ptr as *const u32) as usize;
-            ptr = ptr.add(std::mem::size_of::<u32>());
+            let params_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
             
             // Read parameter IDs
             let mut params = Vec::with_capacity(params_count);
             for _ in 0..params_count {
-                let param_id = *(ptr as *const u32);
+                let param_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
                 params.push(param_id);
-                ptr = ptr.add(std::mem::size_of::<u32>());
+                offset += std::mem::size_of::<u32>();
             }
             
             // Read body count
-            let body_count = *(ptr as *const u32) as usize;
-            ptr = ptr.add(std::mem::size_of::<u32>());
+            let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
             
             // Read body expressions
             let mut body = Vec::with_capacity(body_count);
             for _ in 0..body_count {
-                let expr = *(ptr as *const ValueRef);
+                let expr = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
                 body.push(expr);
-                ptr = ptr.add(std::mem::size_of::<ValueRef>());
+                offset += std::mem::size_of::<ValueRef>();
             }
             
             // Read environment reference
-            let env = *(ptr as *const ObjectReference);
-            ptr = ptr.add(std::mem::size_of::<ObjectReference>());
+            let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
+            offset += std::mem::size_of::<ObjectReference>();
             
             // Read variadic flag
-            let is_variadic = *(ptr as *const bool);
+            let is_variadic = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
             
             Callable {
                 params,

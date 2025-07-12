@@ -134,22 +134,31 @@ impl EvalContext {
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32) -> Result<ValueRef, BlinkError> {
-        // Check if this is a qualified symbol (interned during parsing)
+        println!("Resolving symbol: {}", symbol_id);
+        
         if self.vm.symbol_table.read().is_qualified(symbol_id) {
-            if let Some((module_id, symbol_id)) = self.vm.symbol_table.read().get_qualified(symbol_id)
-            {
+            if let Some((module_id, symbol_id)) = self.vm.symbol_table.read().get_qualified(symbol_id) {
                 self.resolve_module_symbol(module_id, symbol_id)
             } else {
                 Err(BlinkError::eval("Invalid qualified symbol"))
             }
         } else {
-            // Simple symbol lookup
+            // Use get_with_registry instead of get_local
             let env = GcPtr::new(self.env).read_env();
-            env.get_local(symbol_id).ok_or_else(|| {
-                let symbol_table = self.vm.symbol_table.read();
-                let name = symbol_table.get_symbol(symbol_id).unwrap_or("?");
-                BlinkError::undefined_symbol(name)
-            })
+            let module_registry = self.vm.module_registry.read();
+            
+            println!("Checking symbol {} in env with registry", symbol_id);
+            match env.get_with_registry(symbol_id, &module_registry) {
+                Some(value) => {
+                    println!("Found symbol {} with value", symbol_id);
+                    Ok(value)
+                }
+                None => {
+                    println!("Symbol {} not found anywhere", symbol_id);
+                    // Try to avoid complex error creation for now
+                    Err(BlinkError::eval("Symbol not found"))
+                }
+            }
         }
     }
 

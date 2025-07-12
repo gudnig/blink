@@ -1,3 +1,4 @@
+use crate::error::BlinkError;
 use crate::module::ModuleRegistry;
 use crate::value::{pack_module, GcPtr, ValueRef};
 use mmtk::util::ObjectReference;
@@ -7,7 +8,8 @@ use std::collections::HashMap;
 pub struct Env {
     pub vars: Vec<(u32, ValueRef)>,
     pub parent: Option<ObjectReference>,
-    pub available_modules: Vec<(u32, u32)>,
+    pub symbol_aliases: Vec<(u32, (u32, u32))>,
+    pub module_aliases: Vec<(u32, u32)>,           // alias -> module_id
 }
 
 impl Env {
@@ -15,7 +17,8 @@ impl Env {
         Env {
             vars: Vec::new(),
             parent: None,
-            available_modules: Vec::new(),
+            symbol_aliases: Vec::new(),
+            module_aliases: Vec::new(),
         }
     }
 
@@ -23,7 +26,8 @@ impl Env {
         Env {
             vars: Vec::new(),
             parent: Some(parent),
-            available_modules: Vec::new(),
+            symbol_aliases: Vec::new(),
+            module_aliases: Vec::new(),
         }
     }
 
@@ -35,87 +39,89 @@ impl Env {
         }
     }
 
-    // FIXED: Use binary search and proper ObjectReference handling
-    pub fn get_with_registry(&self, key: u32, registry: &ModuleRegistry) -> Option<ValueRef> {
-        // Check local vars using binary search
-        if let Some(val) = self.get_var(key) {
+    pub fn resolve_simple_symbol(&self, symbol_id: u32, module_registry: &ModuleRegistry) -> Option<ValueRef> {
+        // 1. Local vars
+        if let Some(val) = self.get_var(symbol_id) {
             return Some(val);
         }
-
-        // Check if key is a module alias
-        if let Some(module_id) = self.get_module_alias(key) {
-
-            if let Some(module_obj_ref) = registry.get_module(module_id) {
-                let module = GcPtr::new(module_obj_ref);
-                let env_ref = module.read_module().env;
-                let env = GcPtr::new(env_ref).read_env();
-                return env.get_with_registry(key, registry);
-            }
+        
+        // 2. Imported symbol aliases (two-stage)
+        if let Some((mod_id, sym)) = self.resolve_symbol_alias(symbol_id) {
+            return self.resolve_qualified_symbol(mod_id, sym, module_registry);
         }
-
-        // Check parent
+        
+        // 3. Move to parent and try again
         if let Some(parent_ref) = self.parent {
             let parent_env = GcPtr::new(parent_ref).read_env();
-            return parent_env.get_with_registry(key, registry);
+            return parent_env.resolve_simple_symbol(symbol_id, module_registry);
         }
-
+        
         None
     }
 
-    // FIXED: Use binary search and proper ObjectReference handling
-    pub fn get_local(&self, key: u32) -> Option<ValueRef> {
-        // Check local variables using binary search
-        if let Some(val) = self.get_var(key) {
-            return Some(val);
+    pub fn resolve_qualified_symbol(&self, module_part: u32, symbol: u32, module_registry: &ModuleRegistry) -> Option<ValueRef> {
+        
+        // Try alias first
+        if let Some(actual_module_id) = self.resolve_module_alias(module_part) {
+            return self.resolve_module_symbol(actual_module_id, symbol, module_registry);
         }
-
-        // Check parent environment
-        if let Some(parent_ref) = self.parent {
-            let parent_env = GcPtr::new(parent_ref).read_env();
-            return parent_env.get_local(key);
+        
+        // Fall back to direct module name lookup
+        if module_registry.get_module(module_part).is_some() {
+            return self.resolve_module_symbol(module_part, symbol, module_registry);
         }
-
+        
         None
     }
 
-    pub fn get_qualified(&self, module_alias: u32, symbol: u32, registry: &ModuleRegistry) -> Option<ValueRef> {
-        // Look up the actual module name from alias using binary search
-        if let Some(actual_module) = self.get_module_alias(module_alias) {
-            if let Some(module_ref) = registry.get_module(actual_module) {
-                // Get the module's environment and look up the symbol
-                let module = GcPtr::new(module_ref).read_module();
-                let module_env = GcPtr::new(module.env).read_env();
-                return module_env.get_local(symbol);
-            }
-        }
+    pub fn resolve_symbol_alias(&self, symbol_id: u32) -> Option<(u32, u32)> {
+        self.symbol_aliases.binary_search_by_key(&symbol_id, |(k, _)| *k)
+            .map(|idx| self.symbol_aliases[idx].1)
+            .ok()
+    }
 
-        // Check parent environments
-        if let Some(parent_ref) = self.parent {
-            let parent_env = GcPtr::new(parent_ref).read_env();
-            return parent_env.get_qualified(module_alias, symbol, registry);
-        }
+    pub fn resolve_module_alias(&self, alias: u32) -> Option<u32> {
+        self.module_aliases.binary_search_by_key(&alias, |(k, _)| *k)
+            .map(|idx| self.module_aliases[idx].1)
+            .ok()
+    }
 
-        None
+    pub fn resolve_module_symbol(&self, module_id: u32, symbol_id: u32, module_registry: &ModuleRegistry) -> Option<ValueRef> {
+        let module_ref = module_registry.get_module(module_id)?;
+        
+        let module = GcPtr::new(module_ref).read_module();
+        let module_env = GcPtr::new(module.env).read_env();
+        module_env.get_var(symbol_id)
     }
 
     // Helper methods for binary search access
+    
     pub fn get_var(&self, symbol: u32) -> Option<ValueRef> {
-        self.vars.binary_search_by_key(&symbol, |(k, _)| *k)
-            .map(|idx| self.vars[idx].1)
-            .ok()
-    }
-
-    pub fn get_module_alias(&self, alias: u32) -> Option<u32> {
-        self.available_modules.binary_search_by_key(&alias, |(k, _)| *k)
-            .map(|idx| self.available_modules[idx].1)
-            .ok()
-    }
-
-    // Helper to add module alias while maintaining sorted order
-    pub fn add_module_alias(&mut self, alias: u32, module_id: u32) {
-        match self.available_modules.binary_search_by_key(&alias, |(k, _)| *k) {
-            Ok(idx) => self.available_modules[idx].1 = module_id,  // Update existing
-            Err(idx) => self.available_modules.insert(idx, (alias, module_id)), // Insert at correct position
+        
+        for (i, (key, _)) in self.vars.iter().enumerate() {
+            
         }
+        
+        let result = self.vars.binary_search_by_key(&symbol, |(k, _)| *k)
+            .map(|idx| self.vars[idx].1)
+            .ok();
+        
+        
+        result
+    }
+
+    pub fn add_module_alias(&mut self, alias: u32, module_id: u32, symbol_id: u32) {
+        let target = (module_id, symbol_id);
+        match self.symbol_aliases.binary_search_by_key(&alias, |(k, _)| *k) {
+            Ok(idx) => self.symbol_aliases[idx].1 = target,
+            Err(idx) => self.symbol_aliases.insert(idx, (alias, target)),
+        }
+    }
+    
+    // Get the full target: (module, symbol)
+    pub fn get_module_alias(&self, alias: u32) -> Option<(u32, u32)> {
+        self.symbol_aliases.binary_search_by_key(&alias, |(k, _)| *k)
+            .map(|idx| self.symbol_aliases[idx].1)
+            .ok()
     }
 }

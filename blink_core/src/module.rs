@@ -6,7 +6,7 @@ use crate::{env::Env, runtime::BlinkVM};
 
 /// Module source specification
 /// // For heap storage, serialize to a simpler enum
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum SerializedModuleSource {
     Repl,
     Global,
