@@ -1,43 +1,32 @@
 use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use libloading::Library;
+use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
-use crate::env::Env;
+use crate::{env::Env, runtime::BlinkVM};
 
 /// Module source specification
+/// // For heap storage, serialize to a simpler enum
 #[derive(Clone, Debug)]
-pub enum ModuleSource {
+pub enum SerializedModuleSource {
     Repl,
-    // Local sources
-    BlinkFile(PathBuf),           // lib/math/utils.blink
-    NativeDylib(PathBuf),         // target/release/libmath.so
-    
-    // External sources (via load)
-    BlinkPackage(String),         // From package manager
-    Cargo(String),                // Rust crate to compile
-    Git { repo: String, reference: Option<String> }, // Git repository
-    Url(String),                  // Direct URL
-    
-    // Future
-    BlinkDll(PathBuf),           // Compiled Blink module
-    Wasm(PathBuf),               // WebAssembly module
+    Global,
+    BlinkFile(u32),
+    NativeDylib(u32),       
+    BlinkPackage(u32),   
+    Cargo(u32),
+    //Git { repo: u32, reference: Option<u32> }, Leave this for now 
+    Url(u32),
+    BlinkDll(u32),
+    Wasm(u32),
 }
 
-/// A module in any supported format
+
 #[derive(Clone, Debug)]
 pub struct Module {
-    /// Module name ID (e.g., symbol ID for "math/utils", "serde-json")
     pub name: u32,
-    
-    /// Module environment containing definitions
-    pub env: Arc<RwLock<Env>>,
-    
-    /// Exported symbol IDs
-    pub exports: HashSet<u32>,
-    
-    /// How this module was loaded
-    pub source: ModuleSource,
-    
-    /// Whether this module has been fully loaded/compiled
+    pub env: ObjectReference,
+    pub exports: Vec<u32>,              // Sorted
+    pub source: SerializedModuleSource, // Simplified for heap storage
     pub ready: bool,
 }
 
@@ -45,17 +34,17 @@ pub struct Module {
 #[derive(Debug)]
 pub struct ModuleRegistry {
     /// All modules by ID
-    modules: HashMap<u32, Arc<RwLock<Module>>>,
+    pub modules: HashMap<u32, ObjectReference>,
     
     /// Files that have been evaluated (for Blink modules)
-    evaluated_files: HashSet<PathBuf>,
+    evaluated_files: HashSet<u32>,
     
     /// File -> module IDs mapping (for multi-module .blink files)
-    file_modules: HashMap<PathBuf, Vec<u32>>,
-    module_files: HashMap<u32, PathBuf>,
+    file_modules: HashMap<u32, Vec<u32>>,
+    module_files: HashMap<u32, u32>,
     
     /// Native libraries that have been loaded
-    loaded_libraries: HashMap<PathBuf, libloading::Library>,
+    loaded_libraries: HashMap<u32, libloading::Library>,
 }
 
 impl ModuleRegistry {
@@ -74,64 +63,43 @@ impl ModuleRegistry {
     }
     
     /// Remove a native library from storage
-    pub fn remove_native_library(&mut self, path: &PathBuf) -> bool {
-        self.loaded_libraries.remove(path).is_some()
+    pub fn remove_native_library(&mut self, path: u32) -> bool {
+        self.loaded_libraries.remove(&path).is_some()
     }
 
-    pub fn store_native_library(&mut self, path: &PathBuf, lib: Library) {
+    pub fn store_native_library(&mut self, path: u32, lib: Library) {
         self.loaded_libraries.insert(path.clone(), lib);
     }
     
-    pub fn register_module(&mut self, module: Module) -> Arc<RwLock<Module>> {
+    pub fn register_module(&mut self, module: &Module, vm: Arc<BlinkVM>) -> ObjectReference {
         let name = module.name; // Get name before moving module
         
-        // Build file_modules mapping for file-based modules
-        match &module.source {
-            ModuleSource::BlinkFile(path) => {
-                self.file_modules
-                    .entry(path.clone())
-                    .or_insert_with(Vec::new)
-                    .push(module.name);
-                
-                // Also build reverse mapping for fast lookup
-                self.module_files.insert(module.name, path.clone());
-            },
-            ModuleSource::BlinkDll(path) | 
-            ModuleSource::Wasm(path) | 
-            ModuleSource::NativeDylib(path) => {
-                // For native modules, still track the reverse mapping
-                self.module_files.insert(module.name, path.clone());
-            },
-            _ => (),
-        }
-        
-        let module_arc = Arc::new(RwLock::new(module));
-        self.modules.insert(name, module_arc.clone());
-        module_arc
+        let module_ref = vm.alloc_module(module);
+        self.modules.insert(name, module_ref);
+        module_ref
     }
  
-    pub fn find_module_file(&self, module_name: u32) -> Option<PathBuf> {
-        self.module_files.get(&module_name).cloned()
+    pub fn find_module_file(&self, module_name: u32) -> Option<u32> {
+        self.module_files.get(&module_name).copied()
     }
     
     /// Get module by ID
-    pub fn get_module(&self, name: u32) -> Option<Arc<RwLock<Module>>> {
-        self.modules.get(&name).cloned()
+    pub fn get_module(&self, name: u32) -> Option<ObjectReference> {
+        self.modules.get(&name).copied()
     }
     
-    /// Mark file as evaluated
-    pub fn mark_file_evaluated(&mut self, file: PathBuf) {
-        self.evaluated_files.insert(file);
+    pub fn mark_file_evaluated(&mut self, path: u32) {
+        
+        self.evaluated_files.insert(path);
     }
     
-    /// Check if file has been evaluated
-    pub fn is_file_evaluated(&self, file: &PathBuf) -> bool {
-        self.evaluated_files.contains(file)
+    pub fn is_file_evaluated(&self, path: u32) -> bool {
+        self.evaluated_files.contains(&path)
     }
     
     /// Get all modules defined in a file
-    pub fn modules_in_file(&self, file: &PathBuf) -> Vec<u32> {
-        self.file_modules.get(file).cloned().unwrap_or_default()
+    pub fn modules_in_file(&self, file: u32) -> Vec<u32> {
+        self.file_modules.get(&file).cloned().unwrap_or_default()
     }
 }
 

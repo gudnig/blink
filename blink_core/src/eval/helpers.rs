@@ -267,7 +267,7 @@ impl EvalContext {
                     ImmediateValue::Keyword(id) => {
                                         self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
                                     }
-                    ImmediateValue::Module(module, symbol) => {
+                    ImmediateValue::ModuleRef(module, symbol) => {
                         let symbol_table = self.vm.symbol_table.read();
                         let module_name = symbol_table.get_symbol(module).unwrap_or("<unknown>");
                         let symbol_name = symbol_table.get_symbol(symbol).unwrap_or("<unknown>");
@@ -288,29 +288,34 @@ impl EvalContext {
         match val {
             HeapValue::Str(s) => format!("\"{}\"", s),
             HeapValue::List(items) => {
-                                let formatted: Vec<String> = items.iter()
-                                    .map(|item| self.format_value(*item))
-                                    .collect();
-                                format!("({})", formatted.join(" "))
-                            }
+                                        let formatted: Vec<String> = items.iter()
+                                            .map(|item| self.format_value(*item))
+                                            .collect();
+                                        format!("({})", formatted.join(" "))
+                                    }
             HeapValue::Vector(items) => {
-                                let formatted: Vec<String> = items.iter()
-                                    .map(|item| self.format_value(*item))
-                                    .collect();
-                                format!("[{}]", formatted.join(" "))
-                            }
+                                        let formatted: Vec<String> = items.iter()
+                                            .map(|item| self.format_value(*item))
+                                            .collect();
+                                        format!("[{}]", formatted.join(" "))
+                                    }
             HeapValue::Map(map) => {
-                                let formatted: Vec<String> = map.iter()
-                                    .map(|(k, v)| format!("{} {}", self.format_value(*k), self.format_value(*v)))
-                                    .collect();
-                                format!("{{{}}}", formatted.join(", "))
-                            }
+                                        let formatted: Vec<String> = map.iter()
+                                            .map(|(k, v)| format!("{} {}", self.format_value(*k), self.format_value(*v)))
+                                            .collect();
+                                        format!("{{{}}}", formatted.join(", "))
+                                    }
             HeapValue::Error(e) => format!("#<error: {}>", e),
             HeapValue::Function(f) => format!("#<fn {:?}>", f.params),
             HeapValue::Set(hash_set) => format!("#<set {:?}>", hash_set),
             HeapValue::Future(blink_future) => format!("#<future {:?}>", blink_future),
             HeapValue::Macro(mac) => format!("#<macro {:?}>", mac),
             HeapValue::Env(env) => format!("#<env {:?}>", env),
+            HeapValue::Module(module) => {
+                let symbol_table = self.vm.symbol_table.read();
+                let module_name = symbol_table.get_symbol(module.name).unwrap_or("<unknown>");
+                format!("#<module {}>", module_name)
+            }
         }
     }
 

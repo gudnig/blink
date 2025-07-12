@@ -46,7 +46,7 @@ pub enum ImmediateValue {
     Bool(bool),
     Symbol(u32),
     Keyword(u32),
-    Module(u32, u32),
+    ModuleRef(u32, u32), // module id and symbol id for lookup in the module registry
     Nil,
 }
 
@@ -57,7 +57,7 @@ impl Display for ImmediateValue {
             ImmediateValue::Bool(b) => write!(f, "{}", b),
             ImmediateValue::Symbol(s) => write!(f, "{}", s),
             ImmediateValue::Keyword(k) => write!(f, "{}", k),
-            ImmediateValue::Module(m, s) => write!(f, "{}:{}", m, s),
+            ImmediateValue::ModuleRef(m, s) => write!(f, "{}:{}", m, s),
             ImmediateValue::Nil => write!(f, "nil"),
         }
     }
@@ -70,7 +70,7 @@ impl ImmediateValue {
             ImmediateValue::Bool(_) => "bool",
             ImmediateValue::Symbol(_) => "symbol",
             ImmediateValue::Keyword(_) => "keyword",
-            ImmediateValue::Module(_, _) => "module",
+            ImmediateValue::ModuleRef(_, _) => "module",
             ImmediateValue::Nil => "nil",
         }
     }

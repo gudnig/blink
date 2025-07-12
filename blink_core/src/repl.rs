@@ -17,6 +17,26 @@ use crate::eval::{eval, EvalContext, EvalResult};
 
 const DEBUG_POS: bool = true;
 
+fn get_final_value(mut result: EvalResult, ctx: &mut EvalContext) -> ValueRef {
+    let final_value = loop {
+        match result {
+            EvalResult::Value(value) => break value,
+            EvalResult::Suspended { future, resume } => {
+                // Poll until ready
+                let val = loop {
+                    if let Some(val) = future.try_poll() {
+                        break val;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                };
+                result = resume(val,  ctx);
+            }
+        }
+    };
+
+    final_value
+}
+
 pub async fn start_repl() {
     let config = Config::builder()
         .completion_type(CompletionType::List)
@@ -27,19 +47,12 @@ pub async fn start_repl() {
     let mut rl = Editor::<(), FileHistory>::with_config(config).expect("failed to start editor");
     rl.load_history("history.txt").ok();
 
-    let global_env = Arc::new(RwLock::new(Env::new()));
-
-    let symbol_table = Arc::new(RwLock::new(SymbolTable::new()));
-
     let vm = Arc::new(BlinkVM::new());
 
-    let mut ctx = EvalContext::new(global_env.clone(), vm.clone());
+    let mut ctx = EvalContext::new(vm.global_env(), vm.clone());
     {
-        crate::native_functions::register_builtins(&mut ctx);
-        crate::native_functions::register_builtin_macros(&mut ctx);
-        crate::native_functions::register_complex_macros(&mut ctx);
     }
-    crate::parser::preload_builtin_reader_macros(vm.clone());
+    
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
@@ -56,26 +69,15 @@ pub async fn start_repl() {
                                 break;
                             }
                         }
+                        let current_result = run_line(parsed, &mut ctx);
+                        let final_value = get_final_value(current_result, &mut ctx);
+                        println!("=> {}", final_value);
                     },
                 
                     _ => {
-                        let mut current_result = run_line(parsed, &mut ctx);
-
-                        let final_value = loop {
-                            match current_result {
-                                EvalResult::Value(value) => break value,
-                                EvalResult::Suspended { future, resume } => {
-                                    // Poll until ready
-                                    let val = loop {
-                                        if let Some(val) = future.try_poll() {
-                                            break val;
-                                        }
-                                        std::thread::sleep(Duration::from_millis(100));
-                                    };
-                                    current_result = resume(val, &mut ctx);
-                                }
-                            }
-                        };
+                        let current_result = run_line(parsed, &mut ctx);
+                        let final_value = get_final_value(current_result, &mut ctx);
+                        
 
                         println!("=> {}", final_value);
                     }

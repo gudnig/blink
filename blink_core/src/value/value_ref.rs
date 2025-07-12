@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 
 use crate::{
@@ -38,7 +39,7 @@ pub struct ModuleRef {
 pub struct Callable {
     pub params: Vec<u32>,
     pub body: Vec<ValueRef>,
-    pub env: Arc<RwLock<Env>>,
+    pub env: ObjectReference,
     pub is_variadic: bool,
 }
 
@@ -154,7 +155,7 @@ impl ValueRef {
         match self {
             ValueRef::Immediate(packed) => {
                 let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::Module(_, _) = unpacked {
+                if let ImmediateValue::ModuleRef(_, _) = unpacked {
                     true
                 } else {
                     false
@@ -364,7 +365,7 @@ impl ValueRef {
                 ImmediateValue::Symbol(_) => "symbol",
                 ImmediateValue::Nil => "nil",
                 ImmediateValue::Keyword(_) => "keyword",
-                ImmediateValue::Module(_, _) => "module",
+                ImmediateValue::ModuleRef(_, _) => "module",
             },
             ValueRef::Heap(gc_ptr) => gc_ptr.type_tag().to_str(),
             ValueRef::Native(_) => "native-function",

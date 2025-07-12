@@ -2,12 +2,13 @@ use std::path::PathBuf;
 use std::{sync::Arc};
 
 use libloading::Library;
+use mmtk::util::ObjectReference;
 use mmtk::Mutator;
 use parking_lot::RwLock;
 
 use crate::env::Env;
 use crate::module::Module;
-use crate::value::{pack_module, FunctionHandle, FutureHandle};
+use crate::value::{pack_module, FunctionHandle, FutureHandle, GcPtr};
 use crate::value::HeapValue;
 use crate::{
     
@@ -25,10 +26,10 @@ use crate::{
 #[derive(Clone)]
 pub struct EvalContext {
     pub vm: Arc<BlinkVM>,
-    pub env: Arc<RwLock<Env>>,
+    pub env: ObjectReference,
 
-    pub current_file: Option<String>,
-    pub current_module: Option<u32>,
+    pub current_file: Option<u32>,
+    pub current_module: u32,
     pub async_ctx: AsyncContext,
     pub tracing_enabled: bool,
 }
@@ -94,8 +95,8 @@ impl EvalContext {
     ) -> Result<ValueRef, BlinkError> {
         // Step 1: Look up module alias -> full module name (acquire and release lock)
         let module_name = {
-            let env = self.env.read();
-            env.available_modules.get(&module_alias).cloned()
+            let env = GcPtr::new(self.env).read_env();
+            env.get_module_alias(module_alias)
         }
         .ok_or_else(|| {
             let symbol_table = self.vm.symbol_table.read();
@@ -116,9 +117,9 @@ impl EvalContext {
 
         // Step 3: Look up symbol in module environment (new lock scope)
         let result = {
-            let module_guard = module.read();
-            let env_guard = module_guard.env.read();
-            env_guard.get_local(symbol)
+            let module = GcPtr::new(module).read_module();
+            let env = GcPtr::new(module.env).read_env();
+            env.get_local(symbol)
         };
 
         result.ok_or_else(|| {
@@ -143,7 +144,7 @@ impl EvalContext {
             }
         } else {
             // Simple symbol lookup
-            let env = self.env.read();
+            let env = GcPtr::new(self.env).read_env();
             env.get_local(symbol_id).ok_or_else(|| {
                 let symbol_table = self.vm.symbol_table.read();
                 let name = symbol_table.get_symbol(symbol_id).unwrap_or("?");
@@ -166,30 +167,30 @@ impl EvalContext {
         }
     }
 
-    // Update the old string-based methods to use the new u32-based ones
+    
     pub fn get(&self, key: &str) -> Option<ValueRef> {
         let symbol_id = self.vm.symbol_table.write().intern(key);
         let module_registry = self.vm.module_registry.read();
-        self.env
-            .read()
+        GcPtr::new(self.env)
+            .read_env()
             .get_with_registry(symbol_id, &module_registry)
     }
 
     pub fn set(&self, key: &str, val: ValueRef) {
         let symbol_id = self.vm.symbol_table.write().intern(key);
-        self.env.write().set(symbol_id, val)
+        GcPtr::new(self.env).read_env().set(symbol_id, val)
     }
 
     // New preferred methods that work with symbol IDs directly
     pub fn get_symbol(&self, symbol_id: u32) -> Option<ValueRef> {
         let module_registry = self.vm.module_registry.read();
-        self.env
-            .read()
+        GcPtr::new(self.env)
+            .read_env()
             .get_with_registry(symbol_id, &module_registry)
     }
 
     pub fn set_symbol(&self, symbol_id: u32, value: ValueRef) {
-        self.env.write().set(symbol_id, value);
+        GcPtr::new(self.env).read_env().set(symbol_id, value);
     }
 
     // Helper for creating module references during import
@@ -200,48 +201,50 @@ impl EvalContext {
 
 impl EvalContext {
     pub fn new(
-        parent: Arc<RwLock<Env>>,
+        parent: ObjectReference,
         vm: Arc<BlinkVM>,
     ) -> Self {
+        let env = vm.alloc_env(Env::with_parent(parent));
+        let current_module = vm.symbol_table.write().intern("global");
         EvalContext {
             vm: vm.clone(),
-            env: Arc::new(RwLock::new(Env::with_parent(parent.clone()))),
-            current_module: None,
+            env: env,
+            current_module: current_module,
             current_file: None,
             async_ctx: AsyncContext::default(),
             tracing_enabled: false,
         }
     }
 
-    pub fn get_global_env(&self) -> Arc<RwLock<Env>> {
-        self.vm.global_env.clone()
+    pub fn get_global_env(&self) -> ObjectReference {
+        self.vm.global_env()
     }
 
-    pub fn get_module(&self, module_id: u32) -> Option<Arc<RwLock<Module>>> {
+    pub fn get_module(&self, module_id: u32) -> Option<ObjectReference> {
         self.vm.module_registry.read().get_module(module_id)
     }
 
-    pub fn register_module(&self, module: Module) -> Arc<RwLock<Module>> {
-        self.vm.module_registry.write().register_module(module)
+    pub fn register_module(&self, module: &Module) -> ObjectReference {
+        self.vm.module_registry.write().register_module(module, self.vm.clone())
     }
 
     pub fn remove_module(&self, module_id: u32) {
         self.vm.module_registry.write().remove_module(module_id);
     }
 
-    pub fn is_file_evaluated(&self, file_path: &PathBuf) -> bool {
+    pub fn is_file_evaluated(&self, file_path: u32) -> bool {
         self.vm.module_registry.read().is_file_evaluated(file_path)
     }
 
-    pub fn mark_file_evaluated(&self, file_path: PathBuf) {
+    pub fn mark_file_evaluated(&self, file_path: u32) {
         self.vm.module_registry.write().mark_file_evaluated(file_path);
     }
 
-    pub fn store_native_library(&self, lib_path: &PathBuf, lib: Library) {
+    pub fn store_native_library(&self, lib_path: u32, lib: Library) {
         self.vm.module_registry.write().store_native_library(lib_path, lib);
     }
 
-    pub fn remove_native_library(&self, lib_path: &PathBuf) {
+    pub fn remove_native_library(&self, lib_path: u32) {
         self.vm.module_registry.write().remove_native_library(lib_path);
     }
 
@@ -264,6 +267,10 @@ impl EvalContext {
     pub fn intern_symbol(&self, name: &str) -> ValueRef {
         let symbol_id = self.vm.symbol_table.write().intern(name);
         ValueRef::symbol(symbol_id)
+    }
+
+    pub fn intern_symbol_id(&self, name: &str) -> u32 {
+        self.vm.symbol_table.write().intern(name)
     }
 
     pub fn resolve_symbol_name(&self, symbol_id: u32) -> Option<String> {
@@ -295,7 +302,7 @@ impl EvalContext {
         }
     }
 
-    pub fn with_env(&self, env: Arc<RwLock<Env>>) -> Self {
+    pub fn with_env(&self, env: ObjectReference) -> Self {
         EvalContext {
             vm: self.vm.clone(),
             env,

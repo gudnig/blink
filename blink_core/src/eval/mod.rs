@@ -6,6 +6,7 @@ mod special_forms;
 use std::{sync::Arc, time::Instant};
 
 pub use crate::runtime::EvalContext;
+use mmtk::util::ObjectReference;
 pub use result::EvalResult;
 use parking_lot::RwLock;
 
@@ -73,12 +74,13 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                                 EvalResult::Value(expr)
                             }
                 ImmediateValue::Symbol(symbol_id) => {
+                                println!("Resolving symbol: {:?}", symbol_id);
                                 match ctx.resolve_symbol(symbol_id) {
                                     Ok(val) => EvalResult::Value(val),
                                     Err(err) => EvalResult::Value(ctx.error_value(err)),
                                 }
                             }
-                ImmediateValue::Module(module_alias , symbol) => {
+                ImmediateValue::ModuleRef(module_alias , symbol) => {
                     match ctx.resolve_module_symbol(module_alias, symbol) {
                         Ok(val) => EvalResult::Value(val),
                         Err(err) => EvalResult::Value(ctx.error_value(err)),
@@ -256,7 +258,7 @@ fn eval_macro_body_inline(
     body: Vec<ValueRef>,
     mut index: usize,
     mut expansion: ValueRef,
-    original_env: Arc<RwLock<Env>>,
+    original_env: ObjectReference,
     mut ctx: EvalContext,
 ) -> EvalResult {
     loop {
@@ -294,7 +296,7 @@ fn eval_function_body_inline(
     body: Vec<ValueRef>,
     mut index: usize,
     mut result: ValueRef,
-    original_env: Arc<RwLock<Env>>,
+    original_env: ObjectReference,
     mut ctx: EvalContext,
 ) -> EvalResult {
     loop {
@@ -360,25 +362,25 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     }
 
                     // Create macro environment and bind parameters
-                    let macro_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-                    {
-                        let mut env_guard = macro_env.write();
-                        if is_variadic {
-                            for (i, param) in params.iter().take(params.len() - 1).enumerate() {
-                                env_guard.set(*param, args[i].clone());
-                            }
-                            let rest_param = &params[params.len() - 1];
-                            let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
-                            env_guard.set(*rest_param, ctx.list_value(rest_args));
-                        } else {
-                            for (param, arg) in params.iter().zip(args.iter()) {
-                                env_guard.set(*param, arg.clone());
-                            }
+                    let mut macro_env = Env::with_parent(env);
+                    
+                    if is_variadic {
+                        for (i, param) in params.iter().take(params.len() - 1).enumerate() {
+                            macro_env.set(*param, args[i].clone());
+                        }
+                        let rest_param = &params[params.len() - 1];
+                        let rest_args = args.iter().skip(params.len() - 1).cloned().collect();
+                        macro_env.set(*rest_param, ctx.list_value(rest_args));
+                    } else {
+                        for (param, arg) in params.iter().zip(args.iter()) {
+                            macro_env.set(*param, arg.clone());
                         }
                     }
+                    let macro_env_ref = ctx.vm.alloc_env(macro_env);
+                
 
-                    let old_env = ctx.env.clone();
-                    let macro_ctx = ctx.with_env(macro_env);
+                    let old_env = ctx.env;
+                    let macro_ctx = ctx.with_env(macro_env_ref);
 
                     // Evaluate macro body with proper suspension handling
                     eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, macro_ctx)
@@ -389,16 +391,15 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                         return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "fn"));
                     }
 
-                    let local_env = Arc::new(RwLock::new(Env::with_parent(env.clone())));
-                    {
-                        let mut env_guard = local_env.write();
-                        for (param, val) in params.iter().zip(args) {
-                            env_guard.set(*param, val);
-                        }
+                    let mut local_env = Env::with_parent(env);
+                    
+                    for (param, val) in params.iter().zip(args) {
+                        local_env.set(*param, val);
                     }
+                    let local_env_ref = ctx.vm.alloc_env(local_env);
 
-                    let old_env = ctx.env.clone();
-                    let local_ctx = ctx.with_env(local_env);
+                    let old_env = ctx.env;
+                    let local_ctx = ctx.with_env(local_env_ref);
 
                     eval_function_body_inline(body.clone(), 0, ctx.nil_value(), old_env, local_ctx)
                 }

@@ -9,6 +9,7 @@ mod gc;
 mod blink_vm;
 mod mmtk;
 mod blink_runtime;
+mod builtins;
 
 
 pub use boundary::*;

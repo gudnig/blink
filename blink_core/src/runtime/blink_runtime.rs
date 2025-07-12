@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 
 use crate::{
@@ -24,9 +25,9 @@ pub struct BlinkRuntime<S: GoroutineScheduler> {
 
 impl<S: GoroutineScheduler> BlinkRuntime<S> {
     pub fn create_context(&self) -> EvalContext {
-        EvalContext::new(self.vm.global_env.clone(), self.vm.clone())
+        EvalContext::new(self.vm.global_env.unwrap(), self.vm.clone())
     }
-    pub fn create_context_with_env(&self, env: Arc<RwLock<Env>>) -> EvalContext {
+    pub fn create_context_with_env(&self, env: ObjectReference) -> EvalContext {
         EvalContext::new(env, self.vm.clone())
     }
 
@@ -46,7 +47,7 @@ impl<S: GoroutineScheduler> BlinkRuntime<S> {
         F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static,
     {
         let vm = self.vm.clone();
-        let ctx = EvalContext::new(self.vm.global_env.clone(), vm);
+        let ctx = EvalContext::new(self.vm.global_env.unwrap(), vm);
 
         // Pass the task directly - the scheduler will call it with &mut EvalContext
         self.scheduler.spawn(ctx, task)

@@ -1,9 +1,11 @@
 use crate::error::BlinkError;
 use crate::future::BlinkFuture;
+use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
 use crate::runtime::{BlinkObjectModel, TypeTag};
-use crate::value::Callable;
+use crate::value::{Callable, GcPtr};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
+use crate::env::Env;
 use crate::{runtime::BlinkVM, value::ValueRef};
 use mmtk::util::{Address, OpaquePointer, VMThread};
 use mmtk::MutatorContext;
@@ -115,36 +117,299 @@ impl BlinkVM {
     }
 
     pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
-        
-        
         self.with_mutator(|mutator| {
             let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
             let total_data_size = vec_data_size;
             let total_size = total_data_size;
-
-            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::List, total_size);
-
+            let type_tag = if is_list { TypeTag::List } else { TypeTag::Vector };
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, type_tag, total_size);
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
                 std::ptr::copy_nonoverlapping(items.as_ptr(), data_ptr, items.len());
-            
             }
-
             data_start
         })
-        
-        
-    }
-
-
-    pub fn alloc_user_defined_fn(&self, function: Callable) -> ObjectReference {
-        Self::fake_object_reference(0x90000)
-        //todo!()
     }
 
     pub fn alloc_macro(&self, mac: Callable) -> ObjectReference {
-        Self::fake_object_reference(0x80000)
-        //todo!()
+        self.alloc_callable(mac, true)
+    }
+
+    pub fn alloc_user_defined_fn(&self, function: Callable) -> ObjectReference {
+        self.alloc_callable(function, false)
+    }
+
+
+    pub fn alloc_callable(&self, function: Callable, is_macro: bool) -> ObjectReference {
+        //[params_count][param1][param2]...[body_count][expr1][expr2]...[env_ref][is_variadic]
+        self.with_mutator(|mutator| {
+            let params_count = function.params.len();
+            let body_count = function.body.len();
+            
+            // Layout: [params_count][params...][body_count][body...][env_ref][is_variadic]
+            let params_size = std::mem::size_of::<u32>() + // count
+                             (params_count * std::mem::size_of::<u32>()); // param symbol IDs
+            
+            let body_size = std::mem::size_of::<u32>() + // count
+                           (body_count * std::mem::size_of::<ValueRef>()); // body expressions
+            
+            let env_size = std::mem::size_of::<ObjectReference>(); // env reference
+            let variadic_size = std::mem::size_of::<bool>(); // is_variadic flag
+            
+            let total_size = params_size + body_size + env_size + variadic_size;
+            
+            let data_start = BlinkObjectModel::alloc_with_type(
+                mutator, 
+                if is_macro { TypeTag::Macro } else { TypeTag::UserDefinedFunction }, 
+                total_size
+            );
+            
+            unsafe {
+                let mut ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                
+                // Write params count
+                *(ptr as *mut u32) = params_count as u32;
+                ptr = ptr.add(std::mem::size_of::<u32>());
+                
+                // Write parameter IDs
+                for param_id in &function.params {
+                    *(ptr as *mut u32) = *param_id;
+                    ptr = ptr.add(std::mem::size_of::<u32>());
+                }
+                
+                // Write body count
+                *(ptr as *mut u32) = body_count as u32;
+                ptr = ptr.add(std::mem::size_of::<u32>());
+                
+                // Write body expressions
+                for expr in &function.body {
+                    *(ptr as *mut ValueRef) = *expr;
+                    ptr = ptr.add(std::mem::size_of::<ValueRef>());
+                }
+                
+                // Write environment reference
+                *(ptr as *mut ObjectReference) = function.env;
+                ptr = ptr.add(std::mem::size_of::<ObjectReference>());
+                
+                // Write variadic flag
+                *(ptr as *mut bool) = function.is_variadic;
+            }
+            
+            data_start
+        })
+    }
+    
+
+    pub fn alloc_module(&self, module: &Module) -> ObjectReference {
+        self.with_mutator(|mutator| {
+            let exports_count = module.exports.len();
+            
+            // Layout: [name][env_ref][exports_count][exports...][source_data][ready]
+            let name_size = std::mem::size_of::<u32>();
+            let env_size = std::mem::size_of::<ObjectReference>();
+            let exports_size = std::mem::size_of::<u32>() + // count
+                              (exports_count * std::mem::size_of::<u32>()); // export symbol IDs
+            let source_size = self.calculate_serialized_source_size(&module.source);
+            let ready_size = std::mem::size_of::<bool>();
+            
+            let total_size = name_size + env_size + exports_size + source_size + ready_size;
+            
+            let data_start = BlinkObjectModel::alloc_with_type(
+                mutator, 
+                TypeTag::Module, 
+                total_size
+            );
+            
+            unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
+                
+                // Write module name
+                *(data_ptr.add(offset) as *mut u32) = module.name;
+                offset += std::mem::size_of::<u32>();
+                
+                // Write environment reference
+                *(data_ptr.add(offset) as *mut ObjectReference) = module.env;
+                offset += std::mem::size_of::<ObjectReference>();
+                
+                // Write exports count
+                *(data_ptr.add(offset) as *mut u32) = exports_count as u32;
+                offset += std::mem::size_of::<u32>();
+                
+                // Write exports (should already be sorted)
+                for export_id in &module.exports {
+                    *(data_ptr.add(offset) as *mut u32) = *export_id;
+                    offset += std::mem::size_of::<u32>();
+                }
+                
+                // Write module source
+                offset += self.write_serialized_source(data_ptr.add(offset), &module.source);
+                
+                // Write ready flag
+                *(data_ptr.add(offset) as *mut bool) = module.ready;
+            }
+            
+            data_start
+        })
+    }
+    
+    // Helper function to calculate SerializedModuleSource size
+    fn calculate_serialized_source_size(&self, source: &SerializedModuleSource) -> usize {
+        match source {
+            SerializedModuleSource::Global => std::mem::size_of::<u8>(), // Just the variant tag
+            SerializedModuleSource::Repl => std::mem::size_of::<u8>(), // Just the variant tag
+            SerializedModuleSource::BlinkFile(_) => {
+                std::mem::size_of::<u8>() + // variant tag
+                std::mem::size_of::<u32>()  // symbol ID
+            }
+            SerializedModuleSource::NativeDylib(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+            SerializedModuleSource::BlinkPackage(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+            SerializedModuleSource::Cargo(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+            // SerializedModuleSource::Git { repo, reference } => {
+            //     std::mem::size_of::<u8>() + // variant tag
+            //     std::mem::size_of::<u32>() + // repo symbol ID
+            //     std::mem::size_of::<u8>() + // has_reference flag
+            //     if reference.is_some() { std::mem::size_of::<u32>() } else { 0 } // optional reference symbol ID
+            // }
+            SerializedModuleSource::Url(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+            SerializedModuleSource::BlinkDll(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+            SerializedModuleSource::Wasm(_) => {
+                std::mem::size_of::<u8>() + std::mem::size_of::<u32>()
+            }
+        }
+    }
+    
+    // Helper function to write SerializedModuleSource to memory
+    unsafe fn write_serialized_source(&self, ptr: *mut u8, source: &SerializedModuleSource) -> usize {
+        let mut offset = 0;
+        
+        match source {
+            SerializedModuleSource::Global => {
+                *(ptr.add(offset) as *mut u8) = 0;
+                offset += std::mem::size_of::<u8>();
+            }
+            SerializedModuleSource::Repl => {
+                        *(ptr.add(offset) as *mut u8) = 1; // variant tag
+                        offset += std::mem::size_of::<u8>();
+                    }
+            SerializedModuleSource::BlinkFile(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 2;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::NativeDylib(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 3;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::BlinkPackage(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 4;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::Cargo(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 5;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::Url(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 7;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::BlinkDll(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 8;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            SerializedModuleSource::Wasm(symbol_id) => {
+                        *(ptr.add(offset) as *mut u8) = 9;
+                        offset += std::mem::size_of::<u8>();
+                        *(ptr.add(offset) as *mut u32) = *symbol_id;
+                        offset += std::mem::size_of::<u32>();
+                    }
+            
+                    }
+        
+        offset
+    }
+
+
+    pub fn alloc_env(&self, env: Env) -> ObjectReference {
+        self.with_mutator(|mutator| {
+            
+            
+            let vars_count = env.vars.len();
+            let modules_count = env.available_modules.len();
+            
+            // Layout: [vars_count][var_pairs...][modules_count][module_pairs...][parent_ref]
+            let vars_size = std::mem::size_of::<u32>() + // count
+                           (vars_count * (std::mem::size_of::<u32>() + std::mem::size_of::<ValueRef>()));
+            
+            let modules_size = std::mem::size_of::<u32>() + // count  
+                              (modules_count * std::mem::size_of::<u32>() * 2); // pairs
+            
+            let parent_size = std::mem::size_of::<Option<ObjectReference>>();
+            let total_size = vars_size + modules_size + parent_size;
+            
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Env, total_size);
+            
+            unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
+                
+                // Write vars count
+                *(data_ptr.add(offset) as *mut u32) = vars_count as u32;
+                offset += std::mem::size_of::<u32>();
+                
+                // Write vars in sorted order for faster lookup
+                let mut sorted_vars: Vec<_> = env.vars.iter().collect();
+                sorted_vars.sort_by_key(|(k, _)| *k);
+                
+                for (key, value) in sorted_vars {
+                    *(data_ptr.add(offset) as *mut u32) = *key;
+                    offset += std::mem::size_of::<u32>();
+                    *(data_ptr.add(offset) as *mut ValueRef) = *value;
+                    offset += std::mem::size_of::<ValueRef>();
+                }
+                
+                // Write modules count
+                *(data_ptr.add(offset) as *mut u32) = modules_count as u32;
+                offset += std::mem::size_of::<u32>();
+                
+                // Write modules in sorted order for faster lookup
+                let mut sorted_modules: Vec<_> = env.available_modules.iter().collect();
+                sorted_modules.sort_by_key(|(k, _)| *k);
+                
+                for (alias, module) in sorted_modules {
+                    *(data_ptr.add(offset) as *mut u32) = *alias;
+                    offset += std::mem::size_of::<u32>();
+                    *(data_ptr.add(offset) as *mut u32) = *module;
+                    offset += std::mem::size_of::<u32>();
+                }
+                
+                // Write parent reference
+                *(data_ptr.add(offset) as *mut Option<ObjectReference>) = env.parent;
+            }
+            
+            data_start
+        })
     }
     
     
@@ -312,10 +577,6 @@ impl BlinkVM {
         
     }
 
-    pub fn alloc_callable(&self, function: Callable) -> ObjectReference {
-        Self::fake_object_reference(0x60000)
-    }
-
     pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {
         Self::fake_object_reference(0x70000)
     }
@@ -328,10 +589,11 @@ impl BlinkVM {
             HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false),
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
-            HeapValue::Function(callable) => self.alloc_callable(callable),
+            HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
             HeapValue::Macro(mac) => self.alloc_macro(mac),
             HeapValue::Future(blink_future) => self.alloc_future(blink_future),
-            HeapValue::Env(env) => todo!(),
+            HeapValue::Env(env) => self.alloc_env(env),
+            HeapValue::Module(module) => self.alloc_module(&module),
         }
     }
     

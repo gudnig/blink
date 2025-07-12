@@ -91,14 +91,19 @@ pub fn tokenize_at(
 }
 
 pub fn parse_symbol_token(token: &str, symbol_table: &mut SymbolTable) -> u32 {
+    
     if let Some((module_part, symbol_part)) = token.split_once('/') {
         // Qualified symbol like "math/add"
         let module_id = symbol_table.intern(module_part);
         let symbol_id = symbol_table.intern(symbol_part);
-        symbol_table.intern_qualified(module_id, symbol_id)
+        let id = symbol_table.intern_qualified(module_id, symbol_id);
+    
+        id  
     } else {
         // Simple symbol like "add"
-        symbol_table.intern(token)
+        let id = symbol_table.intern(token);
+    
+        id
     }
 }
 
@@ -304,7 +309,7 @@ fn atom_with_pos(token: &str, start_pos: SourcePos, symbol_table: &mut SymbolTab
         let id = symbol_table.intern(&token[1..]);
         ParsedValue::Keyword(id)
     } else {
-        let id = symbol_table.intern(token);
+        let id = parse_symbol_token(token, symbol_table);
         ParsedValue::Symbol(id)
     };
 
@@ -325,52 +330,4 @@ pub fn parse_all(
     }
 
     Ok(forms)
-}
-
-fn build_simple_macro(name: &str, ctx: &mut EvalContext) -> u32 {
-    let symbol_id = ctx.intern_symbol(name);
-    let symbol_id = ctx.get_symbol_id(symbol_id).unwrap();
-    let list = ctx.list_value(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)]);
-    let body = vec![list];
-    let call = Callable {
-        
-        is_variadic: false,
-        body: body,
-        env: Arc::new(RwLock::new(Env::new())),
-        params: vec![symbol_id],
-
-    };
-    let func = ctx.user_defined_function_value(call);
-    ctx.set_symbol(symbol_id, func);
-    symbol_id
-
-}
-
-pub fn preload_builtin_reader_macros(vm: Arc<BlinkVM>) {
-    
-    let mut ctx  = EvalContext::new(vm.global_env.clone(), vm.clone());
-    
-    let quote = build_simple_macro("quo", &mut ctx);
-    let quasiquote = build_simple_macro("quasiquote", &mut ctx);
-    let unquote = build_simple_macro("unquote", &mut ctx);
-    let unquote_splicing = build_simple_macro("unquote-splicing", &mut ctx);
-    let deref = build_simple_macro("deref", &mut ctx);
-
-    let mut rm = vm.reader_macros.write();
-
-    // Single character reader macros
-    rm.reader_macros
-        .insert("\'".into(), quote);
-    rm.reader_macros
-        .insert("`".into(), quasiquote);
-    rm.reader_macros
-        .insert("~".into(), unquote);
-
-    rm.reader_macros
-    .insert("~@".into(), unquote_splicing);
-
-    rm.reader_macros
-    .insert("@".into(), deref);
-
-    
 }

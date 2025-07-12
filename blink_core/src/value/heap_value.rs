@@ -1,12 +1,7 @@
 use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet},
-    error::BlinkError,
-    eval::{EvalContext, EvalResult},
-    future::BlinkFuture,
-    value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef},
-    env::Env,
+    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, eval::{EvalContext, EvalResult}, future::BlinkFuture, module::Module, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
 };
 
 #[derive(Debug)]
@@ -21,6 +16,7 @@ pub enum HeapValue {
     Macro(Callable),
     Future(BlinkFuture),
     Env(Env),
+    Module(Module),
 }
 
 impl Display for HeapValue {
@@ -28,57 +24,61 @@ impl Display for HeapValue {
         match self {
             HeapValue::Str(s) => write!(f, "{}", s),
             HeapValue::List(value_refs) => {
-                        write!(f, "(")?;
-                        for value_ref in value_refs {
-                            write!(f, "{} ", value_ref)?;
-                        }
-                        write!(f, ")")?;
-                        Ok(())
-                    },
+                                write!(f, "(")?;
+                                for value_ref in value_refs {
+                                    write!(f, "{} ", value_ref)?;
+                                }
+                                write!(f, ")")?;
+                                Ok(())
+                            },
             HeapValue::Vector(value_refs) => {
-                        write!(f, "[")?;
-                        for value_ref in value_refs {
-                            write!(f, "{} ", value_ref)?;
-                        }
-                        write!(f, "]")?;
-                        Ok(())
-                    },
+                                write!(f, "[")?;
+                                for value_ref in value_refs {
+                                    write!(f, "{} ", value_ref)?;
+                                }
+                                write!(f, "]")?;
+                                Ok(())
+                            },
             HeapValue::Map(blink_hash_map) => {
-                        write!(f, "{{")?;
-                        for (key, value) in blink_hash_map.iter() {
-                            write!(f, "{}: {}\n", key, value)?;
-                        }
-                        write!(f, "}}")?;
-                        Ok(())
-                    },
+                                write!(f, "{{")?;
+                                for (key, value) in blink_hash_map.iter() {
+                                    write!(f, "{}: {}\n", key, value)?;
+                                }
+                                write!(f, "}}")?;
+                                Ok(())
+                            },
             HeapValue::Set(blink_hash_set) => {
-                        write!(f, "#{{")?;
-                        for value in blink_hash_set.iter() {
-                            write!(f, "{} ", value)?;
-                        }
-                        write!(f, "}}")?;
-                        Ok(())
-                    },
+                                write!(f, "#{{")?;
+                                for value in blink_hash_set.iter() {
+                                    write!(f, "{} ", value)?;
+                                }
+                                write!(f, "}}")?;
+                                Ok(())
+                            },
             HeapValue::Function(callable) => {
-                        write!(f, "function")?;
-                        Ok(())
-                    },
+                                write!(f, "function")?;
+                                Ok(())
+                            },
             HeapValue::Macro(callable) => {
-                        write!(f, "macro")?;
-                        Ok(())
-                    },
+                                write!(f, "macro")?;
+                                Ok(())
+                            },
             HeapValue::Future(blink_future) => {
-                        write!(f, "future")?;
-                        Ok(())
-                    },
+                                write!(f, "future")?;
+                                Ok(())
+                            },
             HeapValue::Env(env) => {
-                        write!(f, "env")?;
-                        Ok(())
-                    },
+                                write!(f, "env")?;
+                                Ok(())
+                            },
             HeapValue::Error(blink_error) => {
-                        write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
-                        Ok(())
-                    },
+                                write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
+                                Ok(())
+                            },
+            HeapValue::Module(_module) => {
+                write!(f, "module")?;
+                Ok(())
+            },
         }
     }
 }
@@ -87,72 +87,76 @@ impl Hash for HeapValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             HeapValue::Str(s) => {
-                "string".hash(state);
-                s.hash(state);
-            }
+                        "string".hash(state);
+                        s.hash(state);
+                    }
             HeapValue::List(value_refs) => {
-                "list".hash(state);
-                value_refs.len().hash(state);
-                for item in value_refs {
-                    item.hash(state);
-                }
-            }
+                        "list".hash(state);
+                        value_refs.len().hash(state);
+                        for item in value_refs {
+                            item.hash(state);
+                        }
+                    }
             HeapValue::Vector(value_refs) => {
-                "vector".hash(state);
-                value_refs.len().hash(state);
-                for item in value_refs {
-                    item.hash(state);
-                }
-            }
+                        "vector".hash(state);
+                        value_refs.len().hash(state);
+                        for item in value_refs {
+                            item.hash(state);
+                        }
+                    }
             HeapValue::Map(blink_hash_map) => {
-                "map".hash(state);
-                blink_hash_map.len().hash(state);
-                for (key, value) in blink_hash_map.iter() {
-                    key.hash(state);
-                    value.hash(state);
-                }
-            }
+                        "map".hash(state);
+                        blink_hash_map.len().hash(state);
+                        for (key, value) in blink_hash_map.iter() {
+                            key.hash(state);
+                            value.hash(state);
+                        }
+                    }
             HeapValue::Set(blink_hash_set) => {
-                "set".hash(state);
-                blink_hash_set.len().hash(state);
-                for item in blink_hash_set.iter() {
-                    item.hash(state);
-                }
-            }
+                        "set".hash(state);
+                        blink_hash_set.len().hash(state);
+                        for item in blink_hash_set.iter() {
+                            item.hash(state);
+                        }
+                    }
             HeapValue::Error(blink_error) => {
-                "error".hash(state);
-                blink_error.error_type.hash(state);
-                blink_error.message.hash(state);
-            }
-
+                        "error".hash(state);
+                        blink_error.error_type.hash(state);
+                        blink_error.message.hash(state);
+                    }
             HeapValue::Function(user_defined_fn) => {
-                "user-defined-function".hash(state);
-                user_defined_fn.params.hash(state);
-                user_defined_fn.body.len().hash(state);
-                for expr in &user_defined_fn.body {
-                    expr.hash(state);
-                }
-            }
+                        "user-defined-function".hash(state);
+                        user_defined_fn.params.hash(state);
+                        user_defined_fn.body.len().hash(state);
+                        for expr in &user_defined_fn.body {
+                            expr.hash(state);
+                        }
+                    }
             HeapValue::Macro(mac) => {
-                "macro".hash(state);
-                mac.params.hash(state);
-                mac.is_variadic.hash(state);
-                mac.body.len().hash(state);
-                for expr in &mac.body {
-                    expr.hash(state);
-                }
-            }
+                        "macro".hash(state);
+                        mac.params.hash(state);
+                        mac.is_variadic.hash(state);
+                        mac.body.len().hash(state);
+                        for expr in &mac.body {
+                            expr.hash(state);
+                        }
+                    }
             HeapValue::Future(blink_future) => {
-                todo!()
-            }
+                        todo!()
+                    }
             HeapValue::Env(env) => {
-                "env".hash(state);
-                env.vars.len().hash(state);
-                for (key, value) in env.vars.iter() {
-                    key.hash(state);
-                    value.hash(state);
-                }
-            }
+                        "env".hash(state);
+                        env.vars.len().hash(state);
+                        for (key, value) in env.vars.iter() {
+                            key.hash(state);
+                            value.hash(state);
+                        }
+                    }
+            HeapValue::Module(module) => {
+                "module".hash(state);
+                module.name.hash(state);
+                // TODO should the entire module be hashed?
+            },
         }
     }
 }
@@ -207,6 +211,7 @@ impl HeapValue {
             HeapValue::Macro(_) => "macro",
             HeapValue::Future(_) => "future",
             HeapValue::Env(_) => "env",
+            HeapValue::Module(_) => "module",
         }
     }
 

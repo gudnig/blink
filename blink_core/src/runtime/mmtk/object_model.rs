@@ -25,6 +25,7 @@ pub enum TypeTag {
     Macro = 7,
     Future = 8,
     Env = 9,
+    Module = 10,
 }
 
 impl TypeTag {
@@ -40,6 +41,7 @@ impl TypeTag {
             TypeTag::Macro => "macro",
             TypeTag::Future => "future",
             TypeTag::Env => "env",
+            TypeTag::Module => "module",
         }
     }
 }
@@ -226,7 +228,7 @@ impl BlinkObjectModel {
         );
 
         
-        println!("Allocated object with type {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
+        println!("Allocated {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
         
         // Initialize header
         unsafe {
@@ -242,7 +244,17 @@ impl BlinkObjectModel {
     pub fn get_type_tag(object: ObjectReference) -> TypeTag {
         unsafe {
             let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
+            println!("Reading header pointer: {:?}", header_ptr);
             (*header_ptr).get_type()
+        }
+    }
+
+    pub fn get_header(object: ObjectReference) ->  (ObjectHeader, TypeTag) {
+        unsafe {
+            let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
+            let header = std::ptr::read(header_ptr);
+            let type_tag = std::mem::transmute::<i8, TypeTag>(header.type_tag);
+            (header, type_tag)
         }
     }
     
