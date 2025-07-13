@@ -185,43 +185,94 @@ impl GcPtr {
             let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Read message ID
-            let message_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            // Read message length
+            let message_len = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
+            
+            // Read message bytes
+            let message_bytes = std::slice::from_raw_parts(data_ptr.add(offset), message_len);
+            let message = String::from_utf8_lossy(message_bytes).into_owned();
+            offset += message_len;
             
             // Read position
             let pos = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<SourceRange>);
             offset += std::mem::size_of::<Option<SourceRange>>();
             
-            // Read error type discriminant
-            let error_type_discriminant = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
-            offset += std::mem::size_of::<u8>();
-            
-            // Read placeholder data (in full implementation, read actual variant data)
-            let _variant_data = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-            
-            // Reconstruct the message from symbol table
-            // Note: You'll need access to the VM's symbol table here
-            // For now, create a placeholder message
-            let message = format!("Error type {}", error_type_discriminant);
-            
-            // Reconstruct error type (simplified)
-            let error_type = match error_type_discriminant {
-                0 => BlinkErrorType::Tokenizer,
-                1 => BlinkErrorType::Parse(ParseErrorType::UnexpectedEof), // placeholder
-                2 => BlinkErrorType::UndefinedSymbol { name: "unknown".to_string() },
-                3 => BlinkErrorType::Eval,
-                4 => BlinkErrorType::ArityMismatch { expected: 0, got: 0, form: "unknown".to_string() },
-                5 => BlinkErrorType::UnexpectedToken { token: "unknown".to_string() },
-                6 => BlinkErrorType::UserDefined { data: None },
-                _ => BlinkErrorType::Eval, // fallback
-            };
+            // Read error type
+            let error_type = Self::read_error_type_data(data_ptr.add(offset));
             
             BlinkError {
                 message,
                 pos,
                 error_type,
             }
+        }
+    }
+
+    unsafe fn read_error_type_data(ptr: *const u8) -> BlinkErrorType {
+        let mut offset = 0;
+        
+        // Read discriminant
+        let discriminant = std::ptr::read_unaligned(ptr.add(offset) as *const u8);
+        offset += std::mem::size_of::<u8>();
+        
+        match discriminant {
+            0 => BlinkErrorType::Tokenizer,
+            1 => {
+                let parse_discriminant = std::ptr::read_unaligned(ptr.add(offset) as *const u8);
+                let parse_type = match parse_discriminant {
+                    0 => ParseErrorType::UnexpectedEof,
+                    _ => ParseErrorType::UnexpectedEof, // fallback
+                };
+                BlinkErrorType::Parse(parse_type)
+            },
+            2 => {
+                let name_len = std::ptr::read_unaligned(ptr.add(offset) as *const u32) as usize;
+                offset += std::mem::size_of::<u32>();
+                
+                let name_bytes = std::slice::from_raw_parts(ptr.add(offset), name_len);
+                let name = String::from_utf8_lossy(name_bytes).into_owned();
+                
+                BlinkErrorType::UndefinedSymbol { name }
+            },
+            3 => BlinkErrorType::Eval,
+            4 => {
+                let expected = std::ptr::read_unaligned(ptr.add(offset) as *const usize);
+                offset += std::mem::size_of::<usize>();
+                
+                let got = std::ptr::read_unaligned(ptr.add(offset) as *const usize);
+                offset += std::mem::size_of::<usize>();
+                
+                let form_len = std::ptr::read_unaligned(ptr.add(offset) as *const u32) as usize;
+                offset += std::mem::size_of::<u32>();
+                
+                let form_bytes = std::slice::from_raw_parts(ptr.add(offset), form_len);
+                let form = String::from_utf8_lossy(form_bytes).into_owned();
+                
+                BlinkErrorType::ArityMismatch { expected, got, form }
+            },
+            5 => {
+                let token_len = std::ptr::read_unaligned(ptr.add(offset) as *const u32) as usize;
+                offset += std::mem::size_of::<u32>();
+                
+                let token_bytes = std::slice::from_raw_parts(ptr.add(offset), token_len);
+                let token = String::from_utf8_lossy(token_bytes).into_owned();
+                
+                BlinkErrorType::UnexpectedToken { token }
+            },
+            6 => {
+                let has_data = std::ptr::read_unaligned(ptr.add(offset) as *const u8);
+                offset += std::mem::size_of::<u8>();
+                
+                let data = if has_data == 1 {
+                    Some(std::ptr::read_unaligned(ptr.add(offset) as *const ValueRef))
+                } else {
+                    None
+                };
+                
+                BlinkErrorType::UserDefined { data }
+            },
+            _ => BlinkErrorType::Eval, // fallback
         }
     }
 

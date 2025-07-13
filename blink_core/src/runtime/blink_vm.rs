@@ -27,7 +27,6 @@ pub struct BlinkVM {
     pub mmtk: Box<MMTK<BlinkVM>>,
     pub symbol_table: RwLock<SymbolTable>,
     pub global_env: Option<ObjectReference>,
-    pub global_module: Option<ObjectReference>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub module_registry: RwLock<ModuleRegistry>,
     pub file_to_modules: RwLock<HashMap<PathBuf, Vec<String>>>,
@@ -57,7 +56,6 @@ impl BlinkVM {
             mmtk,
             symbol_table: RwLock::new(SymbolTable::new()),
             global_env: None,
-            global_module: None,
             telemetry_sink: None,
             module_registry: RwLock::new(ModuleRegistry::new()),
             file_to_modules: RwLock::new(HashMap::new()),
@@ -73,15 +71,6 @@ impl BlinkVM {
         self.global_env = Some(global_env);
         
 
-        let global_module_name = self.symbol_table.write().intern("global");
-        let global_module = Module {
-            name: global_module_name,
-            env: global_env,
-            exports: vec![],
-            source: SerializedModuleSource::Global,
-            ready: true,
-        };
-
         // Register as GC root
         self.add_gc_root(global_env);
         
@@ -96,9 +85,14 @@ impl BlinkVM {
         let mmtk = mmtk::memory_manager::mmtk_init(&builder);
         
         let mut vm = Self::construct_vm(mmtk);
+        vm.register_special_forms();
         vm.init_global_env();
         vm.preload_builtin_reader_macros();
         vm.register_builtins();
+
+        
+
+        
         
         vm
         
@@ -108,10 +102,30 @@ impl BlinkVM {
         self.gc_roots.write().push(obj_ref);
     }
 
+    fn register_special_forms(&mut self) {
+        let mut st = self.symbol_table.write();
+        st.intern("if");
+        st.intern("def");
+        st.intern("mac");
+        st.intern("rmac");
+        st.intern("quasiquote");
+        st.intern("unquote");
+        st.intern("unquote-splicing");
+        st.intern("deref");
+        st.intern("go");
+        st.intern("imp");
+        st.intern("mod");
+        st.intern("load");
+        st.intern("try");
+        st.intern("imp");
+        st.intern("mod");
+        st.intern("load");
+        st.intern("macro");
+    }
+
 
     fn build_simple_macro(&mut self,name: &str) -> u32 {
         let symbol_id = self.symbol_table.write().intern(name);
-        let global_module_name = self.symbol_table.write().intern("global");
         let list = self.alloc_vec_or_list(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)], true);
         let body = vec![ValueRef::Heap(GcPtr::new(list))];
         let call = Callable {
@@ -131,19 +145,7 @@ impl BlinkVM {
 
         // realloc global env TODO optimize
         let global_env_ref = self.alloc_env(global_env);
-        
-        let global_module = Module {
-            name: global_module_name,
-            env: global_env_ref,
-            exports: vec![],
-            source: SerializedModuleSource::Global,
-            ready: true,
-        };
 
-        let global_module_ref = self.alloc_module(&global_module);
-        
-        self.module_registry.write().modules.insert(global_module_name, global_module_ref);
-        self.global_module = Some(global_module_ref);
         self.global_env = Some(global_env_ref);
         
         symbol_id

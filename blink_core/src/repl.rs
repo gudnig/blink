@@ -2,9 +2,10 @@
 use crate::env::Env;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 
+use crate::module::{Module, SerializedModuleSource};
 use crate::parser::{parse, tokenize};
 use crate::runtime::{BlinkVM, SymbolTable};
-use crate::value::{ParsedValue, ParsedValueWithPos, ValueRef};
+use crate::value::{GcPtr, ParsedValue, ParsedValueWithPos, ValueRef};
 
 use parking_lot::RwLock;
 use rustyline::history::FileHistory;
@@ -48,11 +49,29 @@ pub async fn start_repl() {
     rl.load_history("history.txt").ok();
 
     let vm = Arc::new(BlinkVM::new());
+    vm.symbol_table.read().print_all();
+    let env = vm.global_env();
+    let env_read = GcPtr::new(env).read_env();
+    
 
     let mut ctx = EvalContext::new(vm.global_env(), vm.clone());
-    {
-    }
-    
+    let user_module_name = ctx.vm.symbol_table.write().intern("user");
+    let user_module_env = ctx.vm.alloc_env(Env::with_parent(vm.global_env()));
+
+    let user_module = Module {
+        name: user_module_name,
+        env: user_module_env,
+        exports: vec![],
+        source: SerializedModuleSource::Repl,
+        ready: true,
+    };
+    let _user_module_ref = ctx.register_module(&user_module);
+    ctx.current_module = user_module_name;
+    ctx.env = user_module_env;
+
+    println!("Global env: {}", vm.global_env());
+    println!("User module env: {}", user_module_env);
+
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 

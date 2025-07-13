@@ -39,6 +39,7 @@ impl Env {
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32, symbol_table: &SymbolTable, module_registry: &ModuleRegistry) -> Option<ValueRef> {
+        println!("Resolving symbol {} in env", symbol_id);
         if symbol_table.is_qualified(symbol_id) {
             let (module_id, symbol_id) = symbol_table.get_qualified(symbol_id)?;
             self.resolve_qualified_symbol(module_id, symbol_id, module_registry) 
@@ -60,6 +61,7 @@ impl Env {
         
         // 3. Move to parent and try again
         if let Some(parent_ref) = self.parent {
+            println!("Going down to {} parent env", symbol_id);
             let parent_env = GcPtr::new(parent_ref).read_env();
             return parent_env.resolve_simple_symbol(symbol_id, module_registry);
         }

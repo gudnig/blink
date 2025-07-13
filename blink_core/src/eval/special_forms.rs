@@ -87,6 +87,10 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         // This allocates a new module and registers it in the module registry
         // Gc should then clean up the old module
         ctx.register_module(&new_module);
+
+        // Update the current module and env
+        ctx.current_module = module.name;
+        ctx.env = new_module_env_ref;
         
 
     } else {

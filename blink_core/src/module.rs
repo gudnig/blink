@@ -9,7 +9,6 @@ use crate::{env::Env, runtime::BlinkVM};
 #[derive(Copy, Clone, Debug)]
 pub enum SerializedModuleSource {
     Repl,
-    Global,
     BlinkFile(u32),
     NativeDylib(u32),       
     BlinkPackage(u32),   

@@ -56,7 +56,9 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                 HeapValue::List(list) if list.is_empty() => {
                         EvalResult::Value(ValueRef::nil())
                     }
-                    HeapValue::List(list) => eval_list(&list, ctx),
+                    HeapValue::List(list) => {
+                        eval_list(&list, ctx)
+                    },
                     _ => {
                         // Everything else is self-evaluating
                         EvalResult::Value(expr)
@@ -74,7 +76,6 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                                 EvalResult::Value(expr)
                             }
                 ImmediateValue::Symbol(symbol_id) => {
-                                println!("Resolving symbol: {:?}", symbol_id);
                                 match ctx.resolve_symbol(symbol_id) {
                                     Ok(val) => EvalResult::Value(val),
                                     Err(err) => EvalResult::Value(ctx.error_value(err)),
@@ -114,12 +115,13 @@ pub fn trace_eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
 
 pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     let head = &list[0];
-
+    
     // Check if head is a symbol (immediate value)
     if let ValueRef::Immediate(packed) = head {
         if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(*packed) {
             let symbol_name = {
                 let symbol_table = ctx.vm.symbol_table.read();
+                
                 match symbol_table.get_symbol(symbol_id) {
                     Some(name) => Some(name.to_string()), // Clone to avoid holding lock
                     None => None,

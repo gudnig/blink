@@ -1,4 +1,4 @@
-use crate::error::{BlinkError, BlinkErrorType};
+use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
@@ -255,7 +255,6 @@ impl BlinkVM {
     // Helper function to calculate SerializedModuleSource size
     fn calculate_serialized_source_size(&self, source: &SerializedModuleSource) -> usize {
         match source {
-            SerializedModuleSource::Global => std::mem::size_of::<u8>(), // Just the variant tag
             SerializedModuleSource::Repl => std::mem::size_of::<u8>(), // Just the variant tag
             SerializedModuleSource::BlinkFile(_) => {
                 std::mem::size_of::<u8>() + // variant tag
@@ -293,52 +292,49 @@ impl BlinkVM {
         let mut offset = 0;
         
         match source {
-            SerializedModuleSource::Global => {
-                *(ptr.add(offset) as *mut u8) = 0;
-                offset += std::mem::size_of::<u8>();
-            }
+            
             SerializedModuleSource::Repl => {
-                        *(ptr.add(offset) as *mut u8) = 1; // variant tag
+                        *(ptr.add(offset) as *mut u8) = 0; // variant tag
                         offset += std::mem::size_of::<u8>();
                     }
             SerializedModuleSource::BlinkFile(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 2;
+                        *(ptr.add(offset) as *mut u8) = 1;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::NativeDylib(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 3;
+                        *(ptr.add(offset) as *mut u8) = 2;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::BlinkPackage(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 4;
+                        *(ptr.add(offset) as *mut u8) = 3;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::Cargo(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 5;
+                        *(ptr.add(offset) as *mut u8) = 4;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::Url(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 7;
+                        *(ptr.add(offset) as *mut u8) = 5;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::BlinkDll(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 8;
+                        *(ptr.add(offset) as *mut u8) = 6;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
                     }
             SerializedModuleSource::Wasm(symbol_id) => {
-                        *(ptr.add(offset) as *mut u8) = 9;
+                        *(ptr.add(offset) as *mut u8) = 7;
                         offset += std::mem::size_of::<u8>();
                         *(ptr.add(offset) as *mut u32) = *symbol_id;
                         offset += std::mem::size_of::<u32>();
@@ -588,56 +584,164 @@ impl BlinkVM {
         
     }
 
-    
-
     pub fn alloc_error(&self, error: BlinkError) -> ObjectReference {
         self.with_mutator(|mutator| {
-            // Serialize the error message as a string (we'll intern it)
-            let message_id = self.symbol_table.write().intern(&error.message);
+            let message_bytes = error.message.as_bytes();
+            let message_len = message_bytes.len() as u32;
             
-            // Calculate sizes for each component
-            let message_size = std::mem::size_of::<u32>(); // interned string ID
+            // Calculate sizes
+            let message_size = std::mem::size_of::<u32>() + message_bytes.len();
             let pos_size = std::mem::size_of::<Option<SourceRange>>();
-            let error_type_size = std::mem::size_of::<u8>() + // discriminant
-                                  std::mem::size_of::<u32>(); // enough space for the largest variant data
+            let error_type_size = Self::calculate_error_type_size(&error.error_type);
             
             let total_size = message_size + pos_size + error_type_size;
-            
             let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Error, total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
                 let mut offset = 0;
                 
-                // Write message (as interned string ID)
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, message_id);
+                // Write message length
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, message_len);
                 offset += std::mem::size_of::<u32>();
                 
+                // Write message bytes
+                std::ptr::copy_nonoverlapping(
+                    message_bytes.as_ptr(),
+                    data_ptr.add(offset),
+                    message_bytes.len()
+                );
+                offset += message_bytes.len();
+                
                 // Write position
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut Option<SourceRange>, error.pos);
+                std::ptr::write_unaligned(
+                    data_ptr.add(offset) as *mut Option<SourceRange>,
+                    error.pos
+                );
                 offset += std::mem::size_of::<Option<SourceRange>>();
                 
-                // Write error type (simplified - just store discriminant for now)
-                let error_type_discriminant = match error.error_type {
-                    BlinkErrorType::Tokenizer => 0u8,
-                    BlinkErrorType::Parse(_) => 1u8,
-                    BlinkErrorType::UndefinedSymbol { .. } => 2u8,
-                    BlinkErrorType::Eval => 3u8,
-                    BlinkErrorType::ArityMismatch { .. } => 4u8,
-                    BlinkErrorType::UnexpectedToken { .. } => 5u8,
-                    BlinkErrorType::UserDefined { .. } => 6u8,
-                };
-                
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, error_type_discriminant);
-                offset += std::mem::size_of::<u8>();
-                
-                // For now, just write a placeholder for the variant data
-                // In a full implementation, you'd serialize the specific error type data
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, 0u32);
+                // Write error type data
+                Self::write_error_type_data(data_ptr.add(offset), &error.error_type);
             }
             
             data_start
         })
+    }
+
+    fn calculate_error_type_size(error_type: &BlinkErrorType) -> usize {
+        let discriminant_size = std::mem::size_of::<u8>();
+        
+        let variant_size = match error_type {
+            BlinkErrorType::Tokenizer => 0,
+            BlinkErrorType::Parse(parse_type) => {
+                // Store ParseErrorType discriminant
+                std::mem::size_of::<u8>()
+            },
+            BlinkErrorType::UndefinedSymbol { name } => {
+                // Store name length + name bytes
+                std::mem::size_of::<u32>() + name.as_bytes().len()
+            },
+            BlinkErrorType::Eval => 0,
+            BlinkErrorType::ArityMismatch { expected, got, form } => {
+                // Store expected, got, form_len, form_bytes
+                std::mem::size_of::<usize>() + 
+                std::mem::size_of::<usize>() + 
+                std::mem::size_of::<u32>() + 
+                form.as_bytes().len()
+            },
+            BlinkErrorType::UnexpectedToken { token } => {
+                // Store token length + token bytes
+                std::mem::size_of::<u32>() + token.as_bytes().len()
+            },
+            BlinkErrorType::UserDefined { data } => {
+                // Store option discriminant + potential ObjectReference
+                std::mem::size_of::<u8>() + 
+                if data.is_some() { std::mem::size_of::<ObjectReference>() } else { 0 }
+            },
+        };
+        
+        discriminant_size + variant_size
+    }
+    
+
+    unsafe fn write_error_type_data(ptr: *mut u8, error_type: &BlinkErrorType) {
+        let mut offset = 0;
+        
+        // Write discriminant
+        let discriminant = match error_type {
+            BlinkErrorType::Tokenizer => 0u8,
+            BlinkErrorType::Parse(_) => 1u8,
+            BlinkErrorType::UndefinedSymbol { .. } => 2u8,
+            BlinkErrorType::Eval => 3u8,
+            BlinkErrorType::ArityMismatch { .. } => 4u8,
+            BlinkErrorType::UnexpectedToken { .. } => 5u8,
+            BlinkErrorType::UserDefined { .. } => 6u8,
+        };
+        
+        std::ptr::write_unaligned(ptr.add(offset) as *mut u8, discriminant);
+        offset += std::mem::size_of::<u8>();
+        
+        // Write variant data
+        match error_type {
+            BlinkErrorType::Tokenizer | BlinkErrorType::Eval => {
+                // No additional data
+            },
+            BlinkErrorType::Parse(parse_type) => {
+                let parse_discriminant = match parse_type {
+                    ParseErrorType::UnexpectedEof => 0u8,
+                    ParseErrorType::UnclosedDelimiter(_) => 1u8,
+                    ParseErrorType::UnexpectedToken(_) => 2u8,
+                    ParseErrorType::InvalidNumber(_) => 3u8,
+                    ParseErrorType::InvalidString(_) => 4u8,
+                };
+                std::ptr::write_unaligned(ptr.add(offset) as *mut u8, parse_discriminant);
+            },
+            BlinkErrorType::UndefinedSymbol { name } => {
+                let name_bytes = name.as_bytes();
+                let name_len = name_bytes.len() as u32;
+                
+                std::ptr::write_unaligned(ptr.add(offset) as *mut u32, name_len);
+                offset += std::mem::size_of::<u32>();
+                
+                std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), ptr.add(offset), name_bytes.len());
+            },
+            BlinkErrorType::ArityMismatch { expected, got, form } => {
+                std::ptr::write_unaligned(ptr.add(offset) as *mut usize, *expected);
+                offset += std::mem::size_of::<usize>();
+                
+                std::ptr::write_unaligned(ptr.add(offset) as *mut usize, *got);
+                offset += std::mem::size_of::<usize>();
+                
+                let form_bytes = form.as_bytes();
+                let form_len = form_bytes.len() as u32;
+                
+                std::ptr::write_unaligned(ptr.add(offset) as *mut u32, form_len);
+                offset += std::mem::size_of::<u32>();
+                
+                std::ptr::copy_nonoverlapping(form_bytes.as_ptr(), ptr.add(offset), form_bytes.len());
+            },
+            BlinkErrorType::UnexpectedToken { token } => {
+                let token_bytes = token.as_bytes();
+                let token_len = token_bytes.len() as u32;
+                
+                std::ptr::write_unaligned(ptr.add(offset) as *mut u32, token_len);
+                offset += std::mem::size_of::<u32>();
+                
+                std::ptr::copy_nonoverlapping(token_bytes.as_ptr(), ptr.add(offset), token_bytes.len());
+            },
+            BlinkErrorType::UserDefined { data } => {
+                match data {
+                    Some(obj_ref) => {
+                        std::ptr::write_unaligned(ptr.add(offset) as *mut u8, 1u8); // Some
+                        offset += std::mem::size_of::<u8>();
+                        std::ptr::write_unaligned(ptr.add(offset) as *mut ValueRef, *obj_ref);
+                    },
+                    None => {
+                        std::ptr::write_unaligned(ptr.add(offset) as *mut u8, 0u8); // None
+                    }
+                }
+            },
+        }
     }
 
     pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {

@@ -106,7 +106,6 @@ impl EvalContext {
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32) -> Result<ValueRef, BlinkError> {
-        println!("Resolving symbol: {}", symbol_id);
         let env = GcPtr::new(self.env).read_env();
         let symbol_table = self.vm.symbol_table.read();
         let module_registry = self.vm.module_registry.read();
