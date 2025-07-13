@@ -2,22 +2,19 @@ use core::fmt;
 use std::{
     fmt::Display,
     hash::{Hash, Hasher},
-    sync::Arc,
 };
 
 use mmtk::util::ObjectReference;
-use parking_lot::RwLock;
 
 use crate::{
-    env::Env,
     error::BlinkError,
     eval::{EvalContext, EvalResult},
     future::BlinkFuture,
     runtime::{ContextualBoundary, TypeTag, ValueBoundary},
     value::{
-        is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_module, pack_nil, pack_number,
+        is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_nil, pack_number,
         pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue,
-        IsolatedNativeFn, IsolatedValue, NativeFn,
+        IsolatedNativeFn, NativeFn,
     },
     collections::{BlinkHashMap, BlinkHashSet},
 };
@@ -118,10 +115,6 @@ impl ValueRef {
         ValueRef::Native(ptr | 1) // Tag 1 for contextual
     }
 
-    pub fn module(module: u32, symbol: u32) -> Self {
-        ValueRef::Immediate(pack_module(module, symbol))
-    }
-
     pub fn type_tag(&self) -> &'static str {
         match self {
             ValueRef::Immediate(packed) => unpack_immediate(*packed).type_tag(),
@@ -153,14 +146,7 @@ impl ValueRef {
 
     pub fn is_module(&self) -> bool {
         match self {
-            ValueRef::Immediate(packed) => {
-                let unpacked = unpack_immediate(*packed);
-                if let ImmediateValue::ModuleRef(_, _) = unpacked {
-                    true
-                } else {
-                    false
-                }
-            }
+            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Module,
             _ => false,
         }
     }
@@ -170,6 +156,20 @@ impl ValueRef {
             ValueRef::Immediate(packed) => {
                 let unpacked = unpack_immediate(*packed);
                 if let ImmediateValue::Symbol(_) = unpacked {
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_keyword(&self) -> bool {
+        match self {
+            ValueRef::Immediate(packed) => {
+                let unpacked = unpack_immediate(*packed);
+                if let ImmediateValue::Keyword(_) = unpacked {
                     true
                 } else {
                     false
@@ -365,7 +365,6 @@ impl ValueRef {
                 ImmediateValue::Symbol(_) => "symbol",
                 ImmediateValue::Nil => "nil",
                 ImmediateValue::Keyword(_) => "keyword",
-                ImmediateValue::ModuleRef(_, _) => "module",
             },
             ValueRef::Heap(gc_ptr) => gc_ptr.type_tag().to_str(),
             ValueRef::Native(_) => "native-function",

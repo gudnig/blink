@@ -80,12 +80,6 @@ pub fn eval(expr: ValueRef, ctx: &mut EvalContext) -> EvalResult {
                                     Err(err) => EvalResult::Value(ctx.error_value(err)),
                                 }
                             }
-                ImmediateValue::ModuleRef(module_alias , symbol) => {
-                    match ctx.resolve_module_symbol(module_alias, symbol) {
-                        Ok(val) => EvalResult::Value(val),
-                        Err(err) => EvalResult::Value(ctx.error_value(err)),
-                    }
-                }
             }
         }
         ValueRef::Native(tagged_ptr) => {

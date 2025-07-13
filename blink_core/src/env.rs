@@ -1,8 +1,7 @@
-use crate::error::BlinkError;
 use crate::module::ModuleRegistry;
-use crate::value::{pack_module, GcPtr, ValueRef};
+use crate::runtime::SymbolTable;
+use crate::value::{GcPtr, ValueRef};
 use mmtk::util::ObjectReference;
-use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct Env {
@@ -36,6 +35,15 @@ impl Env {
         match self.vars.binary_search_by_key(&key, |(k, _)| *k) {
             Ok(idx) => self.vars[idx].1 = val,  // Update existing
             Err(idx) => self.vars.insert(idx, (key, val)), // Insert at correct position
+        }
+    }
+
+    pub fn resolve_symbol(&self, symbol_id: u32, symbol_table: &SymbolTable, module_registry: &ModuleRegistry) -> Option<ValueRef> {
+        if symbol_table.is_qualified(symbol_id) {
+            let (module_id, symbol_id) = symbol_table.get_qualified(symbol_id)?;
+            self.resolve_qualified_symbol(module_id, symbol_id, module_registry) 
+        } else {
+            self.resolve_simple_symbol(symbol_id, module_registry)
         }
     }
 
@@ -110,7 +118,7 @@ impl Env {
         result
     }
 
-    pub fn add_module_alias(&mut self, alias: u32, module_id: u32, symbol_id: u32) {
+    pub fn add_module_import(&mut self, alias: u32, module_id: u32, symbol_id: u32) {
         let target = (module_id, symbol_id);
         match self.symbol_aliases.binary_search_by_key(&alias, |(k, _)| *k) {
             Ok(idx) => self.symbol_aliases[idx].1 = target,
@@ -119,9 +127,22 @@ impl Env {
     }
     
     // Get the full target: (module, symbol)
-    pub fn get_module_alias(&self, alias: u32) -> Option<(u32, u32)> {
+    pub fn get_module_import(&self, alias: u32) -> Option<(u32, u32)> {
         self.symbol_aliases.binary_search_by_key(&alias, |(k, _)| *k)
             .map(|idx| self.symbol_aliases[idx].1)
+            .ok()
+    }
+
+    pub fn add_module_alias(&mut self, alias: u32, module_id: u32) {
+        match self.module_aliases.binary_search_by_key(&alias, |(k, _)| *k) {
+            Ok(idx) => self.module_aliases[idx].1 = module_id,
+            Err(idx) => self.module_aliases.insert(idx, (alias, module_id)),
+        }
+    }
+
+    pub fn get_module_alias(&self, alias: u32) -> Option<u32> {
+        self.module_aliases.binary_search_by_key(&alias, |(k, _)| *k)
+            .map(|idx| self.module_aliases[idx].1)
             .ok()
     }
 }

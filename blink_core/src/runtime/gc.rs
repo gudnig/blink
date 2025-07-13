@@ -353,17 +353,21 @@ impl BlinkVM {
     pub fn alloc_env(&self, env: Env) -> ObjectReference {
         self.with_mutator(|mutator| {
             let vars_count = env.vars.len();
-            let modules_count = env.symbol_aliases.len();
+            let symbol_aliases_count = env.symbol_aliases.len();
+            let module_aliases_count = env.module_aliases.len();
             
-            // Layout: [vars_count][var_pairs...][modules_count][module_pairs...][parent_ref]
+            // Layout: [vars_count][var_pairs...][symbol_aliases_count][symbol_alias_triples...][module_aliases_count][module_alias_pairs...][parent_ref]
             let vars_size = std::mem::size_of::<u32>() + // count
                            (vars_count * (std::mem::size_of::<u32>() + std::mem::size_of::<ValueRef>()));
             
-            let modules_size = std::mem::size_of::<u32>() + // count  
-                              (modules_count * std::mem::size_of::<u32>() * 2); // pairs
+            let symbol_aliases_size = std::mem::size_of::<u32>() + // count  
+                                     (symbol_aliases_count * std::mem::size_of::<u32>() * 3); // (alias, module_id, symbol_id)
+            
+            let module_aliases_size = std::mem::size_of::<u32>() + // count
+                                     (module_aliases_count * std::mem::size_of::<u32>() * 2); // (alias, module_id)
             
             let parent_size = std::mem::size_of::<Option<ObjectReference>>();
-            let total_size = vars_size + modules_size + parent_size;
+            let total_size = vars_size + symbol_aliases_size + module_aliases_size + parent_size;
             
             let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Env, total_size);
             
@@ -386,18 +390,35 @@ impl BlinkVM {
                     offset += std::mem::size_of::<ValueRef>();
                 }
                 
-                // Write modules count
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, modules_count as u32);
+                // Write symbol aliases count
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, symbol_aliases_count as u32);
                 offset += std::mem::size_of::<u32>();
                 
-                // Write modules in sorted order for faster lookup
-                let mut sorted_modules: Vec<_> = env.symbol_aliases.iter().collect();
-                sorted_modules.sort_by_key(|(k, _)| *k);
+                // Write symbol aliases in sorted order
+                let mut sorted_symbol_aliases: Vec<_> = env.symbol_aliases.iter().collect();
+                sorted_symbol_aliases.sort_by_key(|(k, _)| *k);
                 
-                for (alias, module) in sorted_modules {
+                for (alias, (module_id, symbol_id)) in sorted_symbol_aliases {
                     std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *alias);
                     offset += std::mem::size_of::<u32>();
-                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module);
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module_id);
+                    offset += std::mem::size_of::<u32>();
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *symbol_id);
+                    offset += std::mem::size_of::<u32>();
+                }
+                
+                // Write module aliases count
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, module_aliases_count as u32);
+                offset += std::mem::size_of::<u32>();
+                
+                // Write module aliases in sorted order
+                let mut sorted_module_aliases: Vec<_> = env.module_aliases.iter().collect();
+                sorted_module_aliases.sort_by_key(|(k, _)| *k);
+                
+                for (alias, module_id) in sorted_module_aliases {
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *alias);
+                    offset += std::mem::size_of::<u32>();
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module_id);
                     offset += std::mem::size_of::<u32>();
                 }
                 

@@ -484,22 +484,6 @@ fn import_symbols_into_env(
 
     let module_read = GcPtr::new(module_ref).read_module();
 
-    // Handle import all (*) - check first symbol only
-    if symbols.len() == 1 {
-        if let Some(first_name) = ctx.get_symbol_name(symbols[0].clone()) {
-            if first_name == ":all" {
-                for export_name in &module_read.exports {
-                    let local_name = aliases.get(export_name).unwrap_or(export_name);
-                    let reference = ctx.module_value(module_name, *export_name);
-                    import_frame.set(*local_name, reference);
-                }
-                let import_frame_ref = ctx.vm.alloc_env(import_frame);
-                ctx.env = import_frame_ref;
-                return Ok(());
-            }
-        }
-    }
-
     // Import specific symbols
     for symbol_ref in symbols {
         let symbol_name = ctx
@@ -515,7 +499,7 @@ fn import_symbols_into_env(
         }
 
         let local_name = aliases.get(&symbol_name).unwrap_or(&symbol_name);
-        let reference = ctx.module_value(module_name, symbol_name);
+        let reference = ctx.resolve_symbol(symbol_name)?;
         import_frame.set(*local_name, reference);
     }
 
@@ -918,35 +902,6 @@ pub fn eval_load(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     }
 }
 
-fn parse_import_args(
-    args: &[ValueRef],
-    ctx: &mut EvalContext,
-) -> Result<(ImportType, Option<HashMap<String, ValueRef>>), BlinkError> {
-    if args.is_empty() {
-        return Err(BlinkError::arity(1, 0, "imp"));
-    }
-
-    let first_arg = args[0];
-    let heap = first_arg.read_heap_value();
-    if let Some(heap) = heap {
-        match heap {
-            // File import: (imp "module-name")
-            HeapValue::Str(s) => Ok((ImportType::File(s.clone()), None)),
-            // Vector import: (imp [sym1 sym2] :from module)
-            HeapValue::Vector(symbols) => {
-                let (import_type, options) = parse_symbol_import(&symbols, &args[1..], ctx)?;
-                Ok((import_type, Some(options)))
-            }
-            _ => Err(BlinkError::eval(
-                "imp expects a string (file) or vector (symbols)",
-            )),
-        }
-    } else {
-        Err(BlinkError::eval(
-            "imp expects a string (file) or vector (symbols)",
-        ))
-    }
-}
 
 fn parse_symbol_import(
     symbol_list: &[ValueRef],
@@ -955,15 +910,35 @@ fn parse_symbol_import(
 ) -> Result<(ImportType, HashMap<String, ValueRef>), BlinkError> {
     // Parse symbols and any aliases
     let mut symbols = Vec::new();
-    let aliases = HashMap::new();
+    let mut aliases = HashMap::new();
 
-    let i = 0;
+    let mut i = 0;
     while i < symbol_list.len() {
         match &symbol_list[i] {
             ValueRef::Immediate(packed) => {
                 let unpacked = unpack_immediate(*packed);
                 if let ImmediateValue::Symbol(symbol_id) = unpacked {
                     symbols.push(symbol_id);
+                    if i + 1 < symbol_list.len() {
+                        if let Some(kw) = ctx.get_keyword_name(symbol_list[i + 1]) {
+                            match kw.as_str() {
+                                "as" => {
+                                    if i + 2 < symbol_list.len() {
+                                        if let Some(sym) = ctx.get_symbol_id(symbol_list[i + 2]) {
+                                            aliases.insert(sym.clone(), symbol_id);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    return Err(BlinkError::eval(format!("Unknown import option: {}", kw)));
+                                }
+                            }
+                            i += 3;
+                        } else {
+                            symbols.push(symbol_id);
+                            i += 1;
+                        }
+                    }
                 } else {
                     return Err(BlinkError::eval("Symbol list must contain symbols"));
                 }
@@ -1355,78 +1330,127 @@ fn file_contains_module(file_path: &PathBuf, module_name: &str) -> Result<bool, 
 pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // TODO revisit the way we find modules/files
 
-    let parsed = parse_import_args(args, ctx);
-    let (import_type, _options) = match parsed {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            return EvalResult::Value(ctx.error_value(e));
+    // 3 cases
+
+    // 1 (import "module-name" :as name) or (import module-name :as name) aliased module
+    // 2 (import "module-name") or (import module-name) does nothing since qualified symbols are already available
+    // 3 (import [sym1 sym2] :from module) direct symbols import
+
+    
+    let mut aliases = vec![];
+    let mut imports = vec![];
+
+
+    if args.len() == 1 {
+        // Case 2: (import "module-name") or (import module-name) does nothing since qualified symbols are already available
+        let first_arg = args[0];
+        if first_arg.is_symbol() || first_arg.is_string() {
+            // do nothing since qualified symbols are already available
+            return EvalResult::Value(ctx.nil_value());
+        } else {
+            return EvalResult::Value(ctx.eval_error("Expected a symbol or string for import"));
         }
-    };
+    } else if args.len() == 3 {
 
-    match import_type {
-        ImportType::File(file_name) => {
-            // File import: (imp "module-name")
-            let file_path = PathBuf::from(format!("lib/{}.blink", file_name));
+        let second_arg = args[1];
+        let third_arg = args[2];
+        let as_or_from_kw = ctx.get_keyword_name(second_arg);
+        
 
-            // Load the file if needed
-            let file_path_symbol_id = ctx.intern_symbol_id(&file_path.to_string_lossy());
-            let loaded = eval_blink_file(file_path_symbol_id, ctx);
-            try_eval!(loaded, ctx);
+        let first_arg = args[0];
+        if first_arg.is_symbol() || first_arg.is_string() {
+            // Case 1: (import "module-name" :as name) or (import module-name :as name) aliased module
+            let alias = if as_or_from_kw == Some("as".to_string()) && third_arg.is_symbol() {
+                let symbol_id = ctx.get_symbol_id(third_arg).unwrap();
+                let module_ref = ctx.get_module(symbol_id);
+                match module_ref {
+                    Some(_module_ref) => {
+                        symbol_id
+                    }
+                    None => {
+                        return EvalResult::Value(ctx.eval_error("Module not found"));
+                    }
+                }
+            } else {
+                return EvalResult::Value(ctx.eval_error("Expected :as keyword"));
+            };
 
-            // Make the file's modules available for qualified access
-            // (they're already registered by eval_mod during file evaluation)
-            EvalResult::Value(ctx.nil_value())
-        }
+            let symbol =if first_arg.is_symbol() {
+                ctx.get_symbol_id(first_arg).unwrap()
+            } else {
+                let string = first_arg.get_string().unwrap();
+                ctx.intern_symbol_id(&string)
+            };
 
-        ImportType::Symbols {
-            symbols,
-            module,
-            aliases,
-        } => {
-            // Check if module already exists
-            let module_exists = ctx.get_module(module).is_some();
-            let module_name = match ctx.resolve_symbol_name(module) {
-                Some(name) => name,
+            aliases.push((alias, symbol));
+            return EvalResult::Value(ctx.nil_value());
+
+        } else if first_arg.is_vec() && third_arg.is_symbol() {
+            // Case 3: (import [sym1 sym2] :from module) direct symbols import
+
+            let symbols_vec = match first_arg.get_vec() {
+                Some(vec) => vec,
                 None => {
-                    return EvalResult::Value(ctx.eval_error("Module not found"));
+                    return EvalResult::Value(ctx.eval_error("Expected a vector for import"));
                 }
             };
 
-            if !module_exists {
-                // Find which file contains the module
-                let file_path = find_module_file(&module_name, ctx);
-                if let Err(e) = file_path {
-                    return EvalResult::Value(ctx.error_value(e));
+            match as_or_from_kw {
+                Some(s) => {
+                    if s != "from" {
+                        return EvalResult::Value(ctx.eval_error("Expected :from keyword"));
+                    }
                 }
-                let file_path = file_path.unwrap();
+                _ => { return EvalResult::Value(ctx.eval_error("Expected :from keyword")); }
+            };
 
-                // Load the file if needed (this registers all modules in the file)
-                let loaded = eval_blink_file(file_path, ctx);
-                try_eval!(loaded, ctx);
-
-                // Verify the module is now available
-                if ctx.get_module(module).is_none() {
-                    return EvalResult::Value(ctx.eval_error(&format!(
-                        "Module '{}' was not found in the loaded file",
-                        module
-                    )));
-                }
+            let module_symbol_id = ctx.get_symbol_id(third_arg).unwrap();
+            if ctx.get_module(module_symbol_id).is_none() {
+                return EvalResult::Value(ctx.eval_error("Module not found"));
             }
 
-            let symbol_values = symbols
-                .iter()
-                .map(|s| ValueRef::symbol(*s))
-                .collect::<Vec<ValueRef>>();
-
-            // Import the symbols into current environment
-            match import_symbols_into_env(&symbol_values, module, &aliases, ctx) {
-                Ok(_) => (),
-                Err(e) => {
-                    return EvalResult::Value(ctx.error_value(e));
+            let mut i = 0;
+            while i < symbols_vec.len() {
+                let symbol = symbols_vec[i];
+                let import_symbol_id = match ctx.get_symbol_id(symbol) {
+                    Some(symbol_id) => symbol_id,
+                    None => {
+                        return EvalResult::Value(ctx.eval_error("Symbol not found"));
+                    }
+                };
+                // check next value for :as keyword
+                if let Some(next_arg) = args.get(i + 1) {
+                    if next_arg.is_keyword() { 
+                        if ctx.get_keyword_name(*next_arg) == Some("as".to_string()) {
+                            if let Some(alias) = args.get(i + 2) {
+                                if alias.is_symbol() {
+                                    let alias_id = ctx.get_symbol_id(*alias).unwrap();
+                                    imports.push((alias_id, (module_symbol_id, import_symbol_id)));
+                                    i += 3;
+                                    continue;
+                                } else {
+                                    return EvalResult::Value(ctx.eval_error("Expected a symbol for alias"));
+                                }
+                            } else {
+                                return EvalResult::Value(ctx.eval_error("Expected a symbol for alias"));
+                            }
+                        } else {
+                            return EvalResult::Value(ctx.eval_error("Expected :as keyword"));
+                        }
+                    }
                 }
+                imports.push((module_symbol_id, (module_symbol_id, import_symbol_id)));
+                i += 1;
             };
-            EvalResult::Value(ctx.nil_value())
+
+            return EvalResult::Value(ctx.nil_value());
+
+        } else {
+            return EvalResult::Value(ctx.eval_error("Expected a symbol, string, or vector for import"));
         }
+    } else {
+        // arity error
+        return EvalResult::Value(ctx.arity_error(2, args.len(), "imp"));
     }
 }
 

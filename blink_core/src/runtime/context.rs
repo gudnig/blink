@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 
 use crate::env::Env;
 use crate::module::Module;
-use crate::value::{pack_module, FunctionHandle, FutureHandle, GcPtr};
+use crate::value::{FunctionHandle, FutureHandle, GcPtr};
 use crate::value::HeapValue;
 use crate::{
     
@@ -93,118 +93,31 @@ impl EvalContext {
         module_alias: u32,
         symbol: u32,
     ) -> Result<ValueRef, BlinkError> {
-        // Step 1: Look up module alias -> full module name (acquire and release lock)
-        let module_name = {
-            let env = GcPtr::new(self.env).read_env();
-            env.get_module_alias(module_alias)
+
+        let env = GcPtr::new(self.env).read_env();
+        let module_registry = self.vm.module_registry.read();
+        let module_symbol = env.resolve_module_symbol(module_alias, symbol, &module_registry);
+
+        match module_symbol {
+            Some(module_symbol) => Ok(module_symbol),
+            None => Err(BlinkError::eval("Module symbol not found")),
         }
-        .ok_or_else(|| {
-            let symbol_table = self.vm.symbol_table.read();
-            let alias_name = symbol_table.get_symbol(module_alias).unwrap_or("?");
-            BlinkError::eval(format!("Module alias '{}' not found", alias_name))
-        })?;
-
-        // Step 2: Get the module from registry (new lock scope)
-        let module = {
-            let module_registry = self.vm.module_registry.read();
-            module_registry.get_module(module_name).map(|m| m.clone())
-        }
-        .ok_or_else(|| {
-            let symbol_table = self.vm.symbol_table.read();
-            let module_name_str = symbol_table.get_symbol(module_name).unwrap_or("?");
-            BlinkError::eval(format!("Module '{}' not found", module_name_str))
-        })?;
-
-        // Step 3: Look up symbol in module environment (new lock scope)
-        let result = {
-            let module = GcPtr::new(module).read_module();
-            let env = GcPtr::new(module.env).read_env();
-            env.get_local(symbol)
-        };
-
-        result.ok_or_else(|| {
-            let symbol_table = self.vm.symbol_table.read();
-            let symbol_name = symbol_table.get_symbol(symbol).unwrap_or("?");
-            let module_name_str = symbol_table.get_symbol(module_name).unwrap_or("?");
-            BlinkError::eval(format!(
-                "Symbol '{}' not found in module '{}'",
-                symbol_name, module_name_str
-            ))
-        })
+        
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32) -> Result<ValueRef, BlinkError> {
         println!("Resolving symbol: {}", symbol_id);
-        
-        if self.vm.symbol_table.read().is_qualified(symbol_id) {
-            if let Some((module_id, symbol_id)) = self.vm.symbol_table.read().get_qualified(symbol_id) {
-                self.resolve_module_symbol(module_id, symbol_id)
-            } else {
-                Err(BlinkError::eval("Invalid qualified symbol"))
-            }
-        } else {
-            // Use get_with_registry instead of get_local
-            let env = GcPtr::new(self.env).read_env();
-            let module_registry = self.vm.module_registry.read();
-            
-            println!("Checking symbol {} in env with registry", symbol_id);
-            match env.get_with_registry(symbol_id, &module_registry) {
-                Some(value) => {
-                    println!("Found symbol {} with value", symbol_id);
-                    Ok(value)
-                }
-                None => {
-                    println!("Symbol {} not found anywhere", symbol_id);
-                    // Try to avoid complex error creation for now
-                    Err(BlinkError::eval("Symbol not found"))
-                }
-            }
-        }
-    }
-
-    // Alternative: if you want to support string-based lookup for backward compatibility
-    pub fn resolve_symbol_by_name(&self, name: &str) -> Result<ValueRef, BlinkError> {
-        // Check for qualified names (module/symbol)
-        if let Some((module_alias, symbol)) = name.split_once('/') {
-            let module_alias_id = self.vm.symbol_table.write().intern(module_alias);
-            let symbol_id = self.vm.symbol_table.write().intern(symbol);
-            self.resolve_module_symbol(module_alias_id, symbol_id)
-        } else {
-            // Check local environment
-            let symbol_id = self.vm.symbol_table.write().intern(name);
-            self.resolve_symbol(symbol_id)
-        }
-    }
-
-    
-    pub fn get(&self, key: &str) -> Option<ValueRef> {
-        let symbol_id = self.vm.symbol_table.write().intern(key);
+        let env = GcPtr::new(self.env).read_env();
+        let symbol_table = self.vm.symbol_table.read();
         let module_registry = self.vm.module_registry.read();
-        GcPtr::new(self.env)
-            .read_env()
-            .get_with_registry(symbol_id, &module_registry)
+
+        env.resolve_symbol(symbol_id, &symbol_table, &module_registry).ok_or_else(|| BlinkError::eval("Symbol not found"))
+
     }
 
-    pub fn set(&self, key: &str, val: ValueRef) {
-        let symbol_id = self.vm.symbol_table.write().intern(key);
-        GcPtr::new(self.env).read_env().set(symbol_id, val)
-    }
-
-    // New preferred methods that work with symbol IDs directly
-    pub fn get_symbol(&self, symbol_id: u32) -> Option<ValueRef> {
-        let module_registry = self.vm.module_registry.read();
-        GcPtr::new(self.env)
-            .read_env()
-            .get_with_registry(symbol_id, &module_registry)
-    }
 
     pub fn set_symbol(&self, symbol_id: u32, value: ValueRef) {
         GcPtr::new(self.env).read_env().set(symbol_id, value);
-    }
-
-    // Helper for creating module references during import
-    pub fn create_module_reference(&self, module_id: u32, symbol_id: u32) -> ValueRef {
-        ValueRef::Immediate(pack_module(module_id, symbol_id))
     }
 }
 
@@ -294,6 +207,11 @@ impl EvalContext {
         let full_name = format!(":{}", name);
         let id = self.vm.symbol_table.write().intern(&full_name);
         ValueRef::keyword(id) // Use a different immediate tag
+    }
+
+    pub fn intern_keyword_id(&mut self, name: &str) -> u32 {
+        let full_name = format!(":{}", name);
+        self.vm.symbol_table.write().intern(&full_name)
     }
 
     pub fn get_keyword_name(&self, val: ValueRef) -> Option<String> {

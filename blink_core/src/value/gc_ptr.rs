@@ -129,54 +129,54 @@ impl GcPtr {
             let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            println!("Reading env from ptr: {:p}", data_ptr);
-            
             // Read vars count
             let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-            println!("Vars count: {}", vars_count);
             offset += std::mem::size_of::<u32>();
             
             // Read variables
             let mut vars = Vec::new();
-            for i in 0..vars_count {
-                println!("Reading var {} at offset {}", i, offset);
+            for _ in 0..vars_count {
                 let key = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-                println!("  Key: {}", key);
                 offset += std::mem::size_of::<u32>();
-                
-                println!("  Reading value at offset {}", offset);
                 let value = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
-                println!("  Value read successfully");
                 offset += std::mem::size_of::<ValueRef>();
                 vars.push((key, value));
             }
-            println!("Finished reading {} vars", vars.len());
             
-            // Read modules count
-            println!("Reading modules count at offset {}", offset);
-            let modules_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-            println!("Modules count: {}", modules_count);
+            // Read symbol aliases count
+            let symbol_aliases_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+            
+            // Read symbol aliases
+            let mut symbol_aliases = Vec::new();
+            for _ in 0..symbol_aliases_count {
+                let alias = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                offset += std::mem::size_of::<u32>();
+                let module_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                offset += std::mem::size_of::<u32>();
+                let symbol_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                offset += std::mem::size_of::<u32>();
+                symbol_aliases.push((alias, (module_id, symbol_id)));
+            }
+            
+            // Read module aliases count
+            let module_aliases_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
             
             // Read module aliases
-            let mut available_modules = Vec::new();
-            for i in 0..modules_count {
-                println!("Reading module {} at offset {}", i, offset);
+            let mut module_aliases = Vec::new();
+            for _ in 0..module_aliases_count {
                 let alias = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
                 offset += std::mem::size_of::<u32>();
-                let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                let module_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
                 offset += std::mem::size_of::<u32>();
-                available_modules.push((alias, module));
+                module_aliases.push((alias, module_id));
             }
-            println!("Finished reading {} modules", available_modules.len());
             
             // Read parent reference
-            println!("Reading parent at offset {}", offset);
             let parent = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<ObjectReference>);
-            println!("Parent read successfully");
             
-            println!("Successfully created Env with {} vars, {} modules", vars.len(), available_modules.len());
-            Env { vars, parent, symbol_aliases: available_modules }
+            Env { vars, symbol_aliases, module_aliases, parent }
         }
     }
 

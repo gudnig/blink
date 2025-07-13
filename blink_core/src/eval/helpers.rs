@@ -113,9 +113,6 @@ impl EvalContext {
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
-    pub fn module_value(&mut self, module_name: u32, symbol_name: u32) -> ValueRef {
-        ValueRef::module(module_name, symbol_name)
-    }
 
     pub fn empty_map_value(&mut self) -> ValueRef {
         let map = BlinkHashMap::new();
@@ -267,12 +264,7 @@ impl EvalContext {
                     ImmediateValue::Keyword(id) => {
                                         self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
                                     }
-                    ImmediateValue::ModuleRef(module, symbol) => {
-                        let symbol_table = self.vm.symbol_table.read();
-                        let module_name = symbol_table.get_symbol(module).unwrap_or("<unknown>");
-                        let symbol_name = symbol_table.get_symbol(symbol).unwrap_or("<unknown>");
-                        format!("#<module {}/{}>", module_name, symbol_name)
-                    },
+
                 }
             }
             ValueRef::Heap(gc_ptr) => {
