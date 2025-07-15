@@ -1121,11 +1121,7 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         return EvalResult::Value(ctx.arity_error(1, 0, "mod"));
     }
 
-    // Parse flags
-    let (flags, name_index) = parse_flags(args, ctx);
-    if flags.len() < 1 {
-        return EvalResult::Value(ctx.eval_error("At least one flag is required."));
-    }
+    let name_index = 0;
 
     // Extract module name
     if name_index >= args.len() {
@@ -1146,8 +1142,8 @@ pub fn eval_mod(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         }
     };
 
-    let should_declare = flags.contains("declare") || flags.is_empty();
-    let should_enter = flags.contains("enter");
+    let should_declare = true;
+    let should_enter = true;
 
     let module_ref = ctx.get_module(name);
     let mut module: Module;

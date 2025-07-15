@@ -33,7 +33,7 @@ impl ParsedValueWithPos {
         match &self.value {
             ParsedValue::Number(n) => n.to_string(),
             ParsedValue::Bool(b) => b.to_string(),
-            ParsedValue::Symbol(s) => symbol_table.get_symbol(*s).unwrap_or("Unknown").to_string(),
+            ParsedValue::Symbol(s) => symbol_table.get_symbol(*s).unwrap_or("Unknown".to_string()),
             ParsedValue::Keyword(id) => {
                 let symbol_name = symbol_table.get_symbol(*id);
                 if let Some(symbol_name) = symbol_name {

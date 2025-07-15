@@ -218,8 +218,11 @@ impl EvalContext {
             if let ImmediateValue::Keyword(id) = unpack_immediate(packed) {
                 let symbol_table = self.vm.symbol_table.read();
                 let full_name = symbol_table.get_symbol(id);
+                println!("Full name: {:?}", full_name);
                 // Strip the ":" prefix and convert to owned String
-                full_name.map(|s| s.strip_prefix(":").map(|s| s.to_string()))?
+                let name = full_name.map(|s| s.to_string());
+                println!("Name: {:?}", name);
+                name
             } else {
                 None
             }

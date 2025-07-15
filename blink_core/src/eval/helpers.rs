@@ -258,11 +258,11 @@ impl EvalContext {
                     ImmediateValue::Number(n) => n.to_string(),
                     ImmediateValue::Bool(b) => b.to_string(),
                     ImmediateValue::Symbol(id) => {
-                                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>".to_string())
                                                     }
                     ImmediateValue::Nil => "nil".to_string(),
                     ImmediateValue::Keyword(id) => {
-                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>").to_string()
+                                        self.vm.symbol_table.read().get_symbol(id).unwrap_or("<unknown>".to_string())
                                     }
 
                 }
@@ -305,7 +305,7 @@ impl EvalContext {
             HeapValue::Env(env) => format!("#<env {:?}>", env),
             HeapValue::Module(module) => {
                 let symbol_table = self.vm.symbol_table.read();
-                let module_name = symbol_table.get_symbol(module.name).unwrap_or("<unknown>");
+                let module_name = symbol_table.get_symbol(module.name).unwrap_or("<unknown>".to_string());
                 format!("#<module {}>", module_name)
             }
         }

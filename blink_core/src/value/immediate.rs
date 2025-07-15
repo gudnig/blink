@@ -9,7 +9,6 @@ const BOOL_TAG: u64 = 1;
 const SYMBOL_TAG: u64 = 2;
 const NIL_TAG: u64 = 3;
 const KEYWORD_TAG: u64 = 4;
-const MODULE_TAG: u64 = 5;
 
 // Packing functions
 pub fn pack_number(n: f64) -> u64 {
@@ -80,6 +79,7 @@ pub fn unpack_immediate(packed: u64) -> ImmediateValue {
             BOOL_TAG => ImmediateValue::Bool(((packed >> 3) & 1) != 0),
             SYMBOL_TAG => ImmediateValue::Symbol((packed >> 3) as u32),
             NIL_TAG => ImmediateValue::Nil,
+            KEYWORD_TAG => ImmediateValue::Keyword((packed >> 3) as u32),
             _ => panic!("Invalid immediate tag: {}", packed & TAG_MASK),
         }
     }

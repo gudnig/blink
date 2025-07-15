@@ -34,8 +34,8 @@ impl SymbolTable {
             println!("{}: {}", symbol, id);
         }
         for ((module_id, symbol_id), qualified_id) in self.qualified_lookup.iter() {
-            let module_name = self.get_symbol(*module_id).unwrap_or("?");
-            let symbol_name = self.get_symbol(*symbol_id).unwrap_or("?");
+            let module_name = self.get_symbol(*module_id).unwrap_or("?".to_string());
+            let symbol_name = self.get_symbol(*symbol_id).unwrap_or("?".to_string());
             println!("{}/{}: {}", module_name, symbol_name, qualified_id);
         }
     }
@@ -96,11 +96,14 @@ impl SymbolTable {
         }
     }
     
-    pub fn get_symbol(&self, id: u32) -> Option<&str> {
+    pub fn get_symbol(&self, id: u32) -> Option<String> {
         if self.is_qualified(id) {
-            None // Qualified symbols don't have direct string representation
+            let (module_id, symbol_id) = self.get_qualified(id).unwrap();
+            let module_name = self.get_symbol(module_id).unwrap_or("?".to_string());
+            let symbol_name = self.get_symbol(symbol_id).unwrap_or("?".to_string());
+            Some(format!("{}/{}", module_name, symbol_name))
         } else {
-            self.strings.get(id as usize).map(|s| s.as_str())
+            self.strings.get(id as usize).map(|s| s.clone())
         }
     }
     
@@ -124,8 +127,8 @@ impl SymbolTable {
             name.to_string()
         } else if let Some((module_id, symbol_id)) = self.get_qualified(id) {
             format!("{}/{}", 
-                    self.get_symbol(module_id).unwrap_or("?"),
-                    self.get_symbol(symbol_id).unwrap_or("?"))
+                    self.get_symbol(module_id).unwrap_or("?".to_string()),
+                    self.get_symbol(symbol_id).unwrap_or("?".to_string()))
         } else {
             format!("symbol#{}", id)
         }
@@ -170,8 +173,8 @@ mod tests {
         
         assert!(!table.is_qualified(foo));
         assert!(!table.is_qualified(bar));
-        assert_eq!(table.get_symbol(foo), Some("foo"));
-        assert_eq!(table.get_symbol(bar), Some("bar"));
+        assert_eq!(table.get_symbol(foo), Some("foo".to_string()));
+        assert_eq!(table.get_symbol(bar), Some("bar".to_string()));
     }
     
     #[test]
@@ -183,8 +186,8 @@ mod tests {
         assert!(table.is_qualified(math_add));
         
         if let Some((module_id, symbol_id)) = table.get_qualified(math_add) {
-            assert_eq!(table.get_symbol(module_id), Some("math"));
-            assert_eq!(table.get_symbol(symbol_id), Some("add"));
+            assert_eq!(table.get_symbol(module_id), Some("math".to_string()));
+            assert_eq!(table.get_symbol(symbol_id), Some("add".to_string()));
         } else {
             panic!("Should be qualified");
         }

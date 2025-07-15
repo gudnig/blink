@@ -2,11 +2,18 @@ use mmtk::{util::{Address, ObjectReference}, vm::slot::{MemorySlice, Slot}};
 
 // Slot and MemorySlice - basic memory operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlinkSlot(Address);
+pub struct BlinkSlot(pub Address);
 
 impl Slot for BlinkSlot {
     fn load(&self) -> Option<ObjectReference> {
-        unsafe { Some(self.0.load::<ObjectReference>()) }  // Need to wrap in Some()
+        unsafe { 
+            let addr = self.0.load::<Address>();
+            if addr.is_zero() {
+                None
+            } else {
+                ObjectReference::from_raw_address(addr)
+            }
+        }
     }
     
     fn store(&self, object: ObjectReference) {

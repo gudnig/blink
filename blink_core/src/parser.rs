@@ -306,7 +306,7 @@ fn atom_with_pos(token: &str, start_pos: SourcePos, symbol_table: &mut SymbolTab
     } else if token == "nil" {
         ParsedValue::Nil
     } else if token.starts_with(':') {
-        let id = symbol_table.intern(&token[1..]);
+        let id = symbol_table.intern(&token);
         ParsedValue::Keyword(id)
     } else {
         let id = parse_symbol_token(token, symbol_table);

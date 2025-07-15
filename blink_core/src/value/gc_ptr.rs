@@ -129,23 +129,33 @@ impl GcPtr {
             let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Read vars count
+            // Read parent reference
+            let parent = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<ObjectReference>);
+            offset += std::mem::size_of::<Option<ObjectReference>>();
+            
+            // Read counts
             let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
-            
-            // Read variables
-            let mut vars = Vec::new();
-            for _ in 0..vars_count {
-                let key = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-                offset += std::mem::size_of::<u32>();
-                let value = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
-                offset += std::mem::size_of::<ValueRef>();
-                vars.push((key, value));
-            }
-            
-            // Read symbol aliases count
             let symbol_aliases_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
+            let module_aliases_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+            
+            // Read all ValueRefs
+            let mut values = Vec::with_capacity(vars_count);
+            for _ in 0..vars_count {
+                let value = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
+                values.push(value);
+                offset += std::mem::size_of::<ValueRef>();
+            }
+            
+            // Read all keys (same order as values)
+            let mut vars = Vec::with_capacity(vars_count);
+            for i in 0..vars_count {
+                let key = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+                vars.push((key, values[i]));
+                offset += std::mem::size_of::<u32>();
+            }
             
             // Read symbol aliases
             let mut symbol_aliases = Vec::new();
@@ -159,10 +169,6 @@ impl GcPtr {
                 symbol_aliases.push((alias, (module_id, symbol_id)));
             }
             
-            // Read module aliases count
-            let module_aliases_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-            offset += std::mem::size_of::<u32>();
-            
             // Read module aliases
             let mut module_aliases = Vec::new();
             for _ in 0..module_aliases_count {
@@ -173,12 +179,10 @@ impl GcPtr {
                 module_aliases.push((alias, module_id));
             }
             
-            // Read parent reference
-            let parent = std::ptr::read_unaligned(data_ptr.add(offset) as *const Option<ObjectReference>);
-            
             Env { vars, symbol_aliases, module_aliases, parent }
         }
     }
+    
 
     pub fn read_error(&self) -> BlinkError {
         unsafe {
@@ -356,84 +360,80 @@ impl GcPtr {
         }
     }
 
-    pub fn read_module(&self) -> Module {
-        unsafe {
-            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
-            let mut offset = 0;
-            
-            // Read name
-            let name = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+pub fn read_module(&self) -> Module {
+    let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+    
+    unsafe {
+        let mut offset = 0;
+        
+        let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
+        offset += std::mem::size_of::<ObjectReference>();
+        
+        let name = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+        offset += std::mem::size_of::<u32>();
+        
+        let exports_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+        offset += std::mem::size_of::<u32>();
+        
+        let mut exports = Vec::with_capacity(exports_count);
+        for i in 0..exports_count {
+            let export = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            exports.push(export);
             offset += std::mem::size_of::<u32>();
-            
-            // Read env reference
-            let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
-            offset += std::mem::size_of::<ObjectReference>();
-            
-            // Read exports count
-            let exports_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-            offset += std::mem::size_of::<u32>();
-            
-            // Read exports
-            let mut exports = Vec::with_capacity(exports_count);
-            for _ in 0..exports_count {
-                let export = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-                exports.push(export);
-                offset += std::mem::size_of::<u32>();
-            }
-            
-            // Read source data
-            let source = std::ptr::read_unaligned(data_ptr.add(offset) as *const SerializedModuleSource);
-            offset += std::mem::size_of::<SerializedModuleSource>();
-            
-            // Read ready flag
-            let ready = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
-            
-            Module { name, env, exports, source, ready }
         }
+        
+        let source = std::ptr::read_unaligned(data_ptr.add(offset) as *const SerializedModuleSource);
+        offset += std::mem::size_of::<SerializedModuleSource>();
+        
+        let ready = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
+        
+        Module { name, env, exports, source, ready }
     }
+}
 
-    pub fn read_callable(&self) -> Callable {
-        unsafe {
-            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
-            let mut offset = 0;
-            
-            // Read params count
-            let params_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+    
+pub fn read_callable(&self) -> Callable {
+    unsafe {
+        let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+        let mut offset = 0;
+        
+        // Read env reference FIRST
+        let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
+        offset += std::mem::size_of::<ObjectReference>();
+        
+        // Read body count
+        let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+        offset += std::mem::size_of::<u32>();
+        
+        // Read all body expressions
+        let mut body = Vec::with_capacity(body_count);
+        for _ in 0..body_count {
+            let expr = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
+            body.push(expr);
+            offset += std::mem::size_of::<ValueRef>();
+        }
+        
+        // Read params count
+        let params_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+        offset += std::mem::size_of::<u32>();
+        
+        // Read parameter IDs
+        let mut params = Vec::with_capacity(params_count);
+        for _ in 0..params_count {
+            let param_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            params.push(param_id);
             offset += std::mem::size_of::<u32>();
-            
-            // Read parameter IDs
-            let mut params = Vec::with_capacity(params_count);
-            for _ in 0..params_count {
-                let param_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-                params.push(param_id);
-                offset += std::mem::size_of::<u32>();
-            }
-            
-            // Read body count
-            let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-            offset += std::mem::size_of::<u32>();
-            
-            // Read body expressions
-            let mut body = Vec::with_capacity(body_count);
-            for _ in 0..body_count {
-                let expr = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
-                body.push(expr);
-                offset += std::mem::size_of::<ValueRef>();
-            }
-            
-            // Read environment reference
-            let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
-            offset += std::mem::size_of::<ObjectReference>();
-            
-            // Read variadic flag
-            let is_variadic = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
-            
-            Callable {
-                params,
-                body,
-                env,
-                is_variadic,
-            }
+        }
+        
+        // Read variadic flag
+        let is_variadic = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
+        
+        Callable {
+            params,
+            body,
+            env,
+            is_variadic,
         }
     }
+}
 }
