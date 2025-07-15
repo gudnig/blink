@@ -473,28 +473,29 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     
 
     pub fn alloc_map(&self, pairs: Vec<(&ValueRef, &ValueRef)>) -> ObjectReference {
-        
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(pairs.len());
             let item_count = pairs.len();
             
-            let buckets_size = bucket_count * std::mem::size_of::<u32>(); // bucket start indices
-            let pairs_size = item_count * 2 * std::mem::size_of::<ValueRef>();
-            let total_data_size = buckets_size + pairs_size;
+            // Calculate sizes
+            let metadata_size = 2 * std::mem::size_of::<usize>(); // bucket_count + item_count
+            let buckets_size = bucket_count * std::mem::size_of::<u32>(); // bucket offsets
+            let pairs_size = item_count * 2 * std::mem::size_of::<ValueRef>(); // key-value pairs
+            let total_data_size = metadata_size + buckets_size + pairs_size;
             
             let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Map, total_data_size);
             
             unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
                 
                 // Write metadata
-                let bucket_count_ptr = data_start.to_raw_address().as_usize() as *mut usize;
-                std::ptr::write(bucket_count_ptr, bucket_count);
-                let item_count_ptr = data_start.to_raw_address().as_usize() as *mut usize;
-                std::ptr::write(item_count_ptr, item_count);
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut usize, bucket_count);
+                offset += std::mem::size_of::<usize>();
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut usize, item_count);
+                offset += std::mem::size_of::<usize>();
                 
                 // Organize into buckets
-
-                let mut hasher = DefaultHasher::new();
                 let mut buckets: Vec<Vec<(ValueRef, ValueRef)>> = vec![Vec::new(); bucket_count];
                 for (key, val) in pairs {
                     let mut hasher = DefaultHasher::new();
@@ -504,16 +505,17 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                     buckets[bucket].push((*key, *val));
                 }
                 
-                // Write bucket offsets
-                let bucket_offsets_ptr = data_start.to_raw_address().as_usize() as *mut u32;
+                // Write bucket offsets (using correct offset)
+                let bucket_offsets_ptr = data_ptr.add(offset) as *mut u32;  // ← Fixed!
                 let mut current_offset = 0u32;
                 for (i, bucket) in buckets.iter().enumerate() {
                     std::ptr::write(bucket_offsets_ptr.add(i), current_offset);
                     current_offset += bucket.len() as u32;
                 }
+                offset += buckets_size;
                 
-                // Write pairs
-                let pairs_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
+                // Write pairs (using correct offset)
+                let pairs_ptr = data_ptr.add(offset) as *mut ValueRef;  // ← Fixed!
                 let mut pair_index = 0;
                 for bucket in buckets {
                     for (key, val) in bucket {
@@ -523,11 +525,8 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                     }
                 }
             }
-            
             data_start
         })
-        
-    
     }
 
     pub fn alloc_blink_hash_set(&self, set: BlinkHashSet) -> ObjectReference {
@@ -536,7 +535,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     }
     
     pub fn alloc_set(&self, items: Vec<&ValueRef>) -> ObjectReference {
-        
         self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(items.len());
             let item_count = items.len();
@@ -546,23 +544,18 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let items_size = item_count * std::mem::size_of::<ValueRef>();
             let total_data_size = header_size + buckets_size + items_size;
             
-            let address = mutator.alloc(
-                std::mem::size_of::<ObjectHeader>() + total_data_size,
-                8, 0, mmtk::AllocationSemantics::Default
-            );
+            // Use consistent allocation method like other types
+            let data_start = BlinkObjectModel::alloc_with_type(mutator, TypeTag::Set, total_data_size);
             
             unsafe {
-                let base_ptr = address.as_usize() as *mut u8;
-                let header_ptr = base_ptr as *mut ObjectHeader;
-                std::ptr::write(header_ptr, ObjectHeader::new(TypeTag::Set, total_data_size));
-                
-                let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
                 
                 // Write metadata
-                let bucket_count_ptr = data_start as *mut usize;
-                std::ptr::write(bucket_count_ptr, bucket_count);
-                let item_count_ptr = data_start.add(std::mem::size_of::<usize>()) as *mut usize;
-                std::ptr::write(item_count_ptr, item_count);
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut usize, bucket_count);
+                offset += std::mem::size_of::<usize>();
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut usize, item_count);
+                offset += std::mem::size_of::<usize>();
                 
                 // Organize into buckets
                 let mut buckets: Vec<Vec<ValueRef>> = vec![Vec::new(); bucket_count];
@@ -575,15 +568,16 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                 }
                 
                 // Write bucket offsets
-                let bucket_offsets_ptr = data_start.add(header_size) as *mut u32;
+                let bucket_offsets_ptr = data_ptr.add(offset) as *mut u32;
                 let mut current_offset = 0u32;
                 for (i, bucket) in buckets.iter().enumerate() {
                     std::ptr::write(bucket_offsets_ptr.add(i), current_offset);
                     current_offset += bucket.len() as u32;
                 }
+                offset += buckets_size;
                 
                 // Write items
-                let items_ptr = data_start.add(header_size + buckets_size) as *mut ValueRef;
+                let items_ptr = data_ptr.add(offset) as *mut ValueRef;
                 let mut item_index = 0;
                 for bucket in buckets {
                     for item in bucket {
@@ -593,9 +587,8 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                 }
             }
             
-            ObjectReference::from_raw_address(address).unwrap()
+            data_start  // Return the ObjectReference directly
         })
-        
     }
 
     pub fn alloc_error(&self, error: BlinkError) -> ObjectReference {
@@ -745,10 +738,10 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             },
             BlinkErrorType::UserDefined { data } => {
                 match data {
-                    Some(obj_ref) => {
+                    Some(value_ref) => {
                         std::ptr::write_unaligned(ptr.add(offset) as *mut u8, 1u8); // Some
                         offset += std::mem::size_of::<u8>();
-                        std::ptr::write_unaligned(ptr.add(offset) as *mut ValueRef, *obj_ref);
+                        std::ptr::write_unaligned(ptr.add(offset) as *mut ValueRef, *value_ref);  // ← Fixed!
                     },
                     None => {
                         std::ptr::write_unaligned(ptr.add(offset) as *mut u8, 0u8); // None
@@ -799,6 +792,8 @@ fn read_header(address: ObjectReference) -> ObjectHeader {
         std::ptr::read(header_ptr)
     }
 }
+
+
 
 impl ValueRef {
     pub fn read_heap_value(&self) -> Option<HeapValue> {

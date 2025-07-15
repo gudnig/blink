@@ -1,32 +1,54 @@
 use mmtk::{util::{Address, ObjectReference}, vm::slot::{MemorySlice, Slot}};
 
-// Slot and MemorySlice - basic memory operations
+use crate::value::{GcPtr, ValueRef};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlinkSlot(pub Address);
+pub enum BlinkSlot {
+    ObjectRef(Address),   // Points to raw ObjectReference
+    OptionObjectRef(Address), // Points to Option<ObjectReference>
+    ValueRef(Address),    // Points to ValueRef enum
+}
 
 impl Slot for BlinkSlot {
     fn load(&self) -> Option<ObjectReference> {
-        unsafe { 
-            let addr = self.0.load::<Address>();
-            if addr.is_zero() {
-                None
-            } else {
-                ObjectReference::from_raw_address(addr)
+        match self {
+            BlinkSlot::ObjectRef(addr) => {
+                let obj_ref = unsafe { (*addr).load::<ObjectReference>() };
+                Some(obj_ref)
+            },
+            BlinkSlot::OptionObjectRef(addr) => {  // ← NEW!
+                let opt_ref = unsafe { (*addr).load::<Option<ObjectReference>>() };
+                opt_ref  // Returns Option<ObjectReference> directly
+            },
+            BlinkSlot::ValueRef(addr) => {
+                let value_ref = unsafe { (*addr).load::<ValueRef>() };
+                match value_ref {
+                    ValueRef::Heap(gc_ptr) => Some(gc_ptr.0),
+                    _ => None,
+                }
             }
         }
     }
     
     fn store(&self, object: ObjectReference) {
-        unsafe { self.0.store(object) }
+        unsafe {
+            match self {
+                BlinkSlot::ObjectRef(addr) => {
+                    (*addr).store(object);
+                },
+                BlinkSlot::OptionObjectRef(addr) => {  // ← NEW!
+                    (*addr).store(Some(object));
+                },
+                BlinkSlot::ValueRef(addr) => {
+                    let value_ref = ValueRef::Heap(GcPtr::new(object));
+                    (*addr).store(value_ref);
+                }
+            }
+        }
     }
     
-    fn prefetch_load(&self) {
-        // no-op by default
-    }
-    
-    fn prefetch_store(&self) {
-        // no-op by default
-    }
+    fn prefetch_load(&self) { /* no-op */ }
+    fn prefetch_store(&self) { /* no-op */ }
 }
 
 
@@ -48,7 +70,7 @@ impl Iterator for BlinkSlotIterator {
     
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
-            let slot = BlinkSlot(self.current);
+            let slot = BlinkSlot::ObjectRef(self.current);
             self.current = self.current + self.slot_size;
             Some(slot)
         } else {

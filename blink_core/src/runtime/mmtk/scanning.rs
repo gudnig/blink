@@ -1,6 +1,6 @@
-use mmtk::{scheduler::ProcessEdgesWork, util::{Address, ObjectReference}, vm::{slot::MemorySlice, Scanning, VMBinding}, Mutator};
+use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, Scanning, VMBinding}, Mutator};
 
-use crate::{runtime::{BlinkMemorySlice, BlinkSlot, BlinkVM}, value::ValueRef};
+use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader, ScanBlinkVMRoots, TypeTag, GLOBAL_VM}, value::{SourceRange, ValueRef}};
 
 use mmtk::vm::slot::Slot;
 
@@ -12,11 +12,28 @@ impl Scanning<BlinkVM> for BlinkScanning {
     
     fn scan_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
         _tls: mmtk::util::VMWorkerThread,
-        _object: ObjectReference,
-        _slot_visitor: &mut SV,
+        object: ObjectReference,
+        slot_visitor: &mut SV,
     ) {
-        // For NoGC, we don't need to scan objects
-        // This would be implemented for actual GC plans
+        println!("Scanning object: {:?}", object);
+        let type_tag = BlinkObjectModel::get_type_tag(object);
+        println!("Type tag: {:?}", type_tag);
+        
+        
+        match type_tag {
+            TypeTag::Module => Self::scan_module_object(slot_visitor, object),
+            TypeTag::Macro | TypeTag::UserDefinedFunction => Self::scan_callable_object(slot_visitor, object),
+            TypeTag::Env => Self::scan_env_object(slot_visitor, object),
+            TypeTag::List => Self::scan_vec_or_list_object(slot_visitor, object),
+            TypeTag::Vector => Self::scan_vec_or_list_object(slot_visitor, object),
+            TypeTag::Map => Self::scan_map_object(slot_visitor, object),
+            TypeTag::Str => {
+                // No object references to scan - just raw string data
+            },
+            TypeTag::Set => Self::scan_set_object(slot_visitor, object),
+            TypeTag::Error => Self::scan_error_object(slot_visitor, object),
+            TypeTag::Future => todo!(),
+        }
     }
 
     fn notify_initial_thread_scan_complete(_partial_scan: bool, _tls: mmtk::util::VMWorkerThread) {
@@ -34,11 +51,22 @@ impl Scanning<BlinkVM> for BlinkScanning {
 
     fn scan_vm_specific_roots(
         _tls: mmtk::util::VMWorkerThread,
-        _factory: impl mmtk::vm::RootsWorkFactory<<BlinkVM as VMBinding>::VMSlot>
+        factory: impl mmtk::vm::RootsWorkFactory<<BlinkVM as VMBinding>::VMSlot>
     ) {
-        // For NoGC, we don't scan roots
-    }
+        println!("Scanning VM specific roots");
 
+        
+        
+        let static_mmtk = crate::runtime::GLOBAL_MMTK.get().expect("MMTK not initialized");
+        let free_bytes = mmtk::memory_manager::free_bytes(static_mmtk);
+        println!("Free bytes: {:?}", free_bytes);
+        println!("Total bytes: {:?}", mmtk::memory_manager::total_bytes(static_mmtk));
+        let scan_work = ScanBlinkVMRoots::new(factory);
+        let packets: Vec<Box<dyn GCWork<BlinkVM>>> = vec![Box::new(scan_work)];
+        
+        mmtk::memory_manager::add_work_packets(static_mmtk, WorkBucketStage::Prepare, packets);
+        
+    }
     fn supports_return_barrier() -> bool {
         false // No return barriers for NoGC
     }
@@ -53,94 +81,184 @@ impl Scanning<BlinkVM> for BlinkScanning {
 
 impl BlinkScanning {
 
-    fn scan_module_objec<T>(trace: &mut T, object: ObjectReference)
-    where
-        T: ProcessEdgesWork<VM = BlinkVM>, {
+    fn scan_module_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference) {
         // Only need to scan the first ObjectReference!
-        let env_slot = BlinkSlot(object.to_raw_address()); // Points to env_ref
-        if let Some(env_ref) = env_slot.load() {
-            trace.trace_object(env_ref);
-        }
-        // Done! Everything else is non-reference data
+        let env_slot = BlinkSlot::ObjectRef(object.to_raw_address()); // Points to env_ref
+        slot_visitor.visit_slot(env_slot);
     }
 
-    fn scan_callable_object<T>(trace: &mut T, object: ObjectReference)
-    where
-        T: ProcessEdgesWork<VM = BlinkVM>,
-    {
+    fn scan_callable_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
         unsafe {
             let data_ptr = object.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Scan env reference (ObjectReference #1)
+            // Scan env reference (raw ObjectReference)
             let env_addr = Address::from_usize(data_ptr.add(offset) as usize);
-            let env_slot = BlinkSlot(env_addr);
-            
-            // For gencopy, we need to use both approaches:
-            // 1. trace_object to mark/copy the object
-            // 2. Process the slot so references can be updated
-            if let Some(env_ref) = env_slot.load() {
-                trace.trace_object(env_ref);
-            }
-            
+            let env_slot = BlinkSlot::ObjectRef(env_addr);
+            slot_visitor.visit_slot(env_slot);
             offset += std::mem::size_of::<ObjectReference>();
             
             // Read body count
             let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
             
-            // Scan all body expressions
-            for _ in 0..body_count {
-                let value_addr = Address::from_usize(data_ptr.add(offset) as usize);
-                let value_slot = BlinkSlot(value_addr);
-                
-                if let Some(obj_ref) = value_slot.load() {
-                    trace.trace_object(obj_ref);
-                    // TODO: Process slot for reference updating
-                }
-                
-                offset += std::mem::size_of::<ValueRef>();
-            }
+            // Scan body expressions using helper
+            Self::scan_value_ref_seq(slot_visitor, data_ptr, body_count, offset);
         }
     }
 
-    fn scan_env_object<T>(trace: &mut T, object: ObjectReference)
-    where
-        T: ProcessEdgesWork<VM = BlinkVM>,
-    {
+    fn scan_vec_or_list_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
+        let data_ptr = object.to_raw_address().as_usize() as *const u8;
+            
+        // Get the data size from the object header
+        let header = BlinkObjectModel::get_header(object).0;
+        let data_size = header.total_size as usize - ObjectHeader::SIZE;
+        let item_count = data_size / std::mem::size_of::<ValueRef>();
+        
+        // Scan all ValueRef items starting from offset 0
+        Self::scan_value_ref_seq(slot_visitor, data_ptr, item_count, 0);
+    }
+
+    fn scan_map_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
         unsafe {
             let data_ptr = object.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Scan parent reference
-            let parent_addr = Address::from_usize(data_ptr.add(offset) as usize);
-            let parent_slot = BlinkSlot(parent_addr);
+            // Read bucket_count
+            let bucket_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const usize);
+            offset += std::mem::size_of::<usize>();
             
-            if let Some(parent_ref) = parent_slot.load() {
-                trace.trace_object(parent_ref);
-            }
+            // Read item_count
+            let item_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const usize);
+            offset += std::mem::size_of::<usize>();
             
-            offset += std::mem::size_of::<Option<ObjectReference>>();
+            // Skip bucket offsets (non-reference data)
+            offset += bucket_count * std::mem::size_of::<u32>();
             
-            // Skip to ValueRef array
-            offset += std::mem::size_of::<u32>() * 3; // Skip counts
-            
-            // Get vars count
-            let vars_count = std::ptr::read_unaligned(
-                (data_ptr.add(std::mem::size_of::<Option<ObjectReference>>()) as *const u8) as *const u32
-            ) as usize;
-            
-            // Scan all ValueRefs
-            for _ in 0..vars_count {
-                let value_addr = Address::from_usize(data_ptr.add(offset) as usize);
-                let value_slot = BlinkSlot(value_addr);
+            // Scan key-value pairs (each pair is 2 ValueRefs)
+            Self::scan_value_ref_seq(slot_visitor, data_ptr, item_count * 2, offset);
+        }
+    }
+
+
+    // Helper function to scan a sequence of ValueRefs
+    fn scan_value_ref_seq<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        start_ptr: *const u8,
+        size: usize,
+        mut offset: usize) {
+        unsafe {
+            for i in 0..size {
+                let value_ref_ptr = start_ptr.add(offset) as *const ValueRef;
+                let value_ref = std::ptr::read_unaligned(value_ref_ptr);
                 
-                if let Some(obj_ref) = value_slot.load() {
-                    trace.trace_object(obj_ref);
+                match value_ref {
+                    ValueRef::Heap(_) => {
+                        let slot = BlinkSlot::ValueRef(Address::from_ptr(value_ref_ptr));
+                        slot_visitor.visit_slot(slot);
+                    }
+                    _ => {} // Skip immediate/native values
                 }
                 
-                offset += std::mem::size_of::<ValueRef>();
+                offset  += std::mem::size_of::<ValueRef>();
             }
+        }
+    }
+
+    fn scan_set_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
+        unsafe {
+            let data_ptr = object.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
+            
+            // Read bucket_count
+            let bucket_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const usize);
+            offset += std::mem::size_of::<usize>();
+            
+            // Read item_count
+            let item_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const usize);
+            offset += std::mem::size_of::<usize>();
+            
+            // Skip bucket offsets (non-reference data)
+            offset += bucket_count * std::mem::size_of::<u32>();
+            
+            // Scan items (each item is 1 ValueRef, unlike map's 2 per pair)
+            Self::scan_value_ref_seq(slot_visitor, data_ptr, item_count, offset);
+        }
+    }
+
+    fn scan_env_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
+        unsafe {
+            let data_ptr = object.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
+            
+            // Scan parent reference (Option<ObjectReference>)
+            let parent_addr = Address::from_usize(data_ptr.add(offset) as usize);
+            let parent_slot = BlinkSlot::OptionObjectRef(parent_addr);  // ← Fixed!
+            slot_visitor.visit_slot(parent_slot);
+            offset += std::mem::size_of::<Option<ObjectReference>>();
+            
+            // Read vars count
+            let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+            
+            // Skip other counts
+            offset += std::mem::size_of::<u32>() * 2; // symbol_aliases_count + module_aliases_count
+            
+            // Scan ValueRef array (the actual variable values)
+            Self::scan_value_ref_seq(slot_visitor, data_ptr, vars_count, offset);
+        }
+    }
+
+    fn scan_error_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
+        slot_visitor: &mut SV,
+        object: ObjectReference
+    ) {
+        unsafe {
+            let data_ptr = object.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
+            
+            // Skip message (non-reference data)
+            let message_len = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>() + message_len;
+            
+            // Skip position (non-reference data)
+            offset += std::mem::size_of::<Option<SourceRange>>();
+            
+            // Read error type discriminant
+            let discriminant = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+            
+            // Only UserDefined errors (discriminant 6) can contain references
+            if discriminant == 6 { // UserDefined variant
+                // Read the Option<ObjectReference> discriminant
+                let has_data = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+                offset += std::mem::size_of::<u8>();
+                
+                if has_data == 1 { // Some(ValueRef)
+                    let value_ref_addr = Address::from_usize(data_ptr.add(offset) as usize);
+                    let value_ref_slot = BlinkSlot::ValueRef(value_ref_addr);
+                    slot_visitor.visit_slot(value_ref_slot);
+                }
+                // If has_data == 0 (None), no reference to scan
+            }
+            // All other error types contain only non-reference data
         }
     }
 }

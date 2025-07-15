@@ -4,6 +4,7 @@ mod collection;
 mod active_plan;
 mod reference_glue;
 mod slot;
+mod gc_work;
 
 use mmtk::vm::VMBinding;
 pub use object_model::*;
@@ -12,6 +13,7 @@ pub use collection::*;
 pub use active_plan::*;
 pub use reference_glue::*;
 pub use slot::*;
+pub use gc_work::*;
 
 use crate::runtime::BlinkVM;
 

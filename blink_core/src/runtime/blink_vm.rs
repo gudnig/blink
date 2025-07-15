@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ffi::c_void, path::PathBuf};
+use std::{collections::HashMap, ffi::c_void, path::PathBuf, sync::{Arc, OnceLock}};
 use mmtk::{
     util::{address, options::PlanSelector, Address, ObjectReference}, MMTKBuilder, MMTK
     
@@ -11,6 +11,9 @@ use crate::{
     }, telemetry::TelemetryEvent, value::{Callable, GcPtr, ValueRef}
 };
 
+pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
+pub static GLOBAL_MMTK: OnceLock<&'static MMTK<BlinkVM>> = OnceLock::new(); 
+
 extern "C" {
     // Apple-specific JIT protection functions
     fn pthread_jit_write_protect_np(enabled: i32);
@@ -22,6 +25,7 @@ extern "C" {
 const MAP_JIT: i32 = 0x800;
 const MAP_PRIVATE: i32 = 0x0002;
 const MAP_ANON: i32 = 0x1000;
+
 
 pub struct BlinkVM {
     pub mmtk: Box<MMTK<BlinkVM>>,
@@ -37,6 +41,15 @@ pub struct BlinkVM {
     pub handle_registry: RwLock<HandleRegistry>,
 }
 
+impl std::fmt::Debug for BlinkVM {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlinkVM")
+            .field("global_env", &self.global_env)
+            .field("gc_roots_count", &self.gc_roots.read().len())
+            .finish()
+    }
+}
+
 impl Default for BlinkVM {
     fn default() -> Self {
         Self::new()
@@ -45,7 +58,10 @@ impl Default for BlinkVM {
 
 impl BlinkVM {
 
-    
+    pub fn modules(&self) -> Vec<ObjectReference> {
+        self.module_registry.read().modules.iter().map(|(_, module)| *module).collect()
+    }
+
     pub fn global_env(&self) -> ObjectReference {
         self.global_env.unwrap()
     }
@@ -77,12 +93,29 @@ impl BlinkVM {
         global_env
     }
 
+    pub fn new_arc() -> Arc<Self> {
+        let vm = Self::new();
+        let vm_arc = Arc::new(vm);
+        GLOBAL_VM.set(vm_arc.clone()).unwrap();
+        vm_arc
+    }
+
     pub fn new() -> Self {
         // Standard MMTK initialization for non-Apple Silicon
         let mut builder = MMTKBuilder::new();
-        builder.options.plan.set(PlanSelector::NoGC);
+        builder.options.plan.set(PlanSelector::SemiSpace);
         
         let mmtk = mmtk::memory_manager::mmtk_init(&builder);
+        
+        // Store static MMTK reference
+        let static_mmtk = unsafe {
+            std::mem::transmute::<&MMTK<BlinkVM>, &'static MMTK<BlinkVM>>(&*mmtk)
+        };
+        
+        match GLOBAL_MMTK.set(static_mmtk) {
+            Ok(_) => {},
+            Err(_) => panic!("MMTK already initialized"),
+        }
         
         let mut vm = Self::construct_vm(mmtk);
         vm.register_special_forms();
@@ -90,12 +123,7 @@ impl BlinkVM {
         vm.preload_builtin_reader_macros();
         vm.register_builtins();
 
-        
-
-        
-        
         vm
-        
     }
 
     pub fn add_gc_root(&self, obj_ref: ObjectReference) {
