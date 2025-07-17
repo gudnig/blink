@@ -74,7 +74,7 @@ impl GcPtr {
             TypeTag::Set => HeapValue::Set(self.read_blink_hash_set()),
             TypeTag::Error => HeapValue::Error(self.read_error()),
             TypeTag::UserDefinedFunction => HeapValue::Function(self.read_callable()),
-            TypeTag::Macro => todo!(),
+            TypeTag::Macro => HeapValue::Macro(self.read_callable()),
             TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
             TypeTag::Module => HeapValue::Module(self.read_module()),
@@ -84,13 +84,12 @@ impl GcPtr {
     pub fn read_map(&self) -> Vec<(ValueRef, ValueRef)> {
         unsafe {
             let base_ptr = self.0.to_raw_address().as_usize() as *mut u8;
-            let header_ptr = base_ptr as *mut ObjectHeader;
-            let header = std::ptr::read(header_ptr);
+            let (_header, type_tag) = BlinkObjectModel::get_header(self.0);
             
             // Verify this is actually a map
-            debug_assert_eq!(header.type_tag, TypeTag::Map as i8);
+            debug_assert_eq!(type_tag, TypeTag::Map);
             
-            let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
+            let data_start = base_ptr;
             
             // Read metadata
             let bucket_count_ptr = data_start as *const usize;
@@ -112,7 +111,7 @@ impl GcPtr {
                 let val = std::ptr::read(pairs_ptr.add(i * 2 + 1));
                 pairs.push((key, val));
             }
-            
+
             pairs
         }
     }

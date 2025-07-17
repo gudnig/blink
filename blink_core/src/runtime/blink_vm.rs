@@ -122,6 +122,9 @@ impl BlinkVM {
         vm.init_global_env();
         vm.preload_builtin_reader_macros();
         vm.register_builtins();
+        vm.register_builtin_macros();
+        vm.register_complex_macros();
+        
 
         vm
     }

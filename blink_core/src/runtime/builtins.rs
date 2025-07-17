@@ -7,8 +7,8 @@ use crate::{
         native_vector,
     },
     runtime::BlinkVM,
-    value::{pack_number, Callable, GcPtr, NativeFn},
     value::ValueRef,
+    value::{pack_number, Callable, GcPtr, NativeFn},
 };
 
 impl BlinkVM {
@@ -48,6 +48,9 @@ impl BlinkVM {
         // TODO: async module
         reg("future", native_future);
         reg("complete", native_complete_future);
+
+        let new_env = self.alloc_env(current_env);
+        self.global_env = Some(new_env);
     }
 
     pub fn register_builtin_macros(&mut self) {
@@ -199,6 +202,9 @@ impl BlinkVM {
 
         let macro_value = self.alloc_macro(or_macro);
         current_env.set(or_sym, ValueRef::Heap(GcPtr::new(macro_value)));
+
+        let new_env = self.alloc_env(current_env);
+        self.global_env = Some(new_env);
         // cond - expands to nested ifs
         // defn - expands to (def name (fn ...))
         // -> and ->> - threading macros
@@ -277,7 +283,7 @@ impl BlinkVM {
         let cond_macro_val = self.alloc_macro(cond_macro);
         current_env.set(cond_sym, ValueRef::Heap(GcPtr::new(cond_macro_val)));
 
-        // defn macro - simple expansion
+        // defn macro - complete implementation with quasiquote/unquote
         let defn_sym_val = ValueRef::symbol(symbol_table.intern("defn"));
         let name_sym_val = ValueRef::symbol(symbol_table.intern("name"));
         let args_sym_val = ValueRef::symbol(symbol_table.intern("args"));
@@ -288,21 +294,56 @@ impl BlinkVM {
         let args_sym = symbol_table.intern("args");
         let body_sym = symbol_table.intern("body");
 
-        // Build step by step
-        let cons_args_body = ValueRef::Heap(GcPtr::new(
-            self.alloc_vec_or_list(vec![cons_sym_val.clone(), args_sym_val, body_sym_val], true),
-        ));
-        let fn_expr = ValueRef::Heap(GcPtr::new(
-            self.alloc_vec_or_list(vec![cons_sym_val.clone(), fn_sym_val, cons_args_body], true),
+        // Get the required symbols for quasiquote/unquote
+        let quasiquote_sym_val = ValueRef::symbol(symbol_table.intern("quasiquote"));
+        let unquote_sym_val = ValueRef::symbol(symbol_table.intern("unquote"));
+        let unquote_splicing_sym_val = ValueRef::symbol(symbol_table.intern("unquote-splicing"));
+
+        // Build: `(def ~name (fn ~name ~args ~@body))
+        //
+        // This creates a quasiquote expression that will be evaluated to produce:
+        // (def actual-name (fn actual-name actual-args body-form1 body-form2 ...))
+
+        // Build ~name (unquote name)
+        let unquote_name = ValueRef::Heap(GcPtr::new(
+            self.alloc_vec_or_list(vec![unquote_sym_val.clone(), name_sym_val.clone()], true),
         ));
 
+        // Build ~args (unquote args)
+        let unquote_args = ValueRef::Heap(GcPtr::new(
+            self.alloc_vec_or_list(vec![unquote_sym_val.clone(), args_sym_val.clone()], true),
+        ));
+
+        // Build ~@body (unquote-splicing body)
+        let unquote_splicing_body = ValueRef::Heap(GcPtr::new(
+            self.alloc_vec_or_list(vec![unquote_splicing_sym_val, body_sym_val.clone()], true),
+        ));
+
+        // Build the fn expression: (fn ~name ~args ~@body)
+        let fn_expr = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+            vec![
+                fn_sym_val.clone(),
+                unquote_name.clone(),
+                unquote_args,
+                unquote_splicing_body,
+            ],
+            true,
+        )));
+
+        // Build the complete def expression: (def ~name (fn ~name ~args ~@body))
+        let def_expr = ValueRef::Heap(GcPtr::new(
+            self.alloc_vec_or_list(vec![def_sym_val.clone(), unquote_name, fn_expr], true),
+        ));
+
+        // Wrap the entire thing in quasiquote: `(def ~name (fn ~name ~args ~@body))
         let defn_body = ValueRef::Heap(GcPtr::new(
-            self.alloc_vec_or_list(vec![def_sym_val, name_sym_val, fn_expr], true),
+            self.alloc_vec_or_list(vec![quasiquote_sym_val, def_expr], true),
         ));
 
+        // Create the macro
         let defn_macro = Callable {
             params: vec![name_sym, args_sym, body_sym],
-            is_variadic: true,
+            is_variadic: true, // body can have multiple forms
             body: vec![defn_body],
             env: self.global_env(),
         };
@@ -507,5 +548,8 @@ impl BlinkVM {
             thread_last_sym,
             ValueRef::Heap(GcPtr::new(thread_last_macro_val)),
         );
+
+        let new_env = self.alloc_env(current_env);
+        self.global_env = Some(new_env);
     }
 }

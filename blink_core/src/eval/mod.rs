@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use crate::{
     env::Env, eval::special_forms::{
             eval_and, eval_apply, eval_def, eval_def_reader_macro, eval_deref, eval_do, eval_fn, eval_go, eval_if, eval_imp, eval_let, eval_load, eval_macro, eval_mod, eval_or, eval_quasiquote, eval_quote, eval_try
-        }, telemetry::TelemetryEvent, value::{unpack_immediate, Callable, ImmediateValue, ValueRef}, value::HeapValue
+        }, telemetry::TelemetryEvent, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, ValueRef}
 };
 
 macro_rules! try_eval {
@@ -179,6 +179,14 @@ fn eval_symbol_and_call(symbol_id: u32, args: &[ValueRef], ctx: &mut EvalContext
         Ok(val) => val,
         Err(e) => return EvalResult::Value(ctx.error_value(e)),
     };
+    
+    // Check if it's a macro
+    if let ValueRef::Heap(gc_ptr) = &function_val {
+        if matches!(gc_ptr.to_heap_value(), HeapValue::Macro(_)) {
+            // For macros, pass arguments unevaluated directly to eval_func
+            return eval_func(function_val, args.to_vec(), ctx);
+        }
+    }
 
     // Create args list with function first
     let mut all_args = vec![function_val];
@@ -217,6 +225,7 @@ fn eval_function_call_inline(
             }
         }
     }
+    
 
     // Now evaluate arguments one by one
     loop {
@@ -224,7 +233,7 @@ fn eval_function_call_inline(
             // All arguments evaluated, call the function
             return eval_func(func.unwrap(), evaluated_args, ctx);
         }
-
+        println!("DEBUG: About to evaluate in macro body: {:?}", list[index]);
         let result = trace_eval(list[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
@@ -255,16 +264,23 @@ fn eval_macro_body_inline(
     mut index: usize,
     mut expansion: ValueRef,
     original_env: ObjectReference,
-    mut ctx: EvalContext,
+    ctx: &mut EvalContext,
 ) -> EvalResult {
+
+    // In eval_macro_body_inline, at the start:
+    println!("DEBUG: Macro body structure:");
+    for (i, expr) in body.iter().enumerate() {
+        println!("  body[{}]: {:?}", i, expr);
+    }
+    println!("DEBUG: eval_macro_body_inline - body: {:?}", body);
     loop {
         if index >= body.len() {
             // Switch back to original environment and evaluate the expansion
             ctx.env = original_env;
-            return trace_eval(expansion, &mut ctx);
+            return trace_eval(expansion, ctx);
         }
 
-        let result = trace_eval(body[index].clone(), &mut ctx);
+        let result = trace_eval(body[index].clone(),  ctx);
         match result {
             EvalResult::Value(val) => {
                 if val.is_error() {
@@ -280,7 +296,7 @@ fn eval_macro_body_inline(
                         if v.is_error() {
                             return EvalResult::Value(v);
                         }
-                        eval_macro_body_inline(body, index + 1, v, original_env, ctx.clone())
+                        eval_macro_body_inline(body, index + 1, v, original_env, ctx)
                     }),
                 };
             }
@@ -360,6 +376,7 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     // Create macro environment and bind parameters
                     let mut macro_env = Env::with_parent(env);
                     
+                    
                     if is_variadic {
                         for (i, param) in params.iter().take(params.len() - 1).enumerate() {
                             macro_env.set(*param, args[i].clone());
@@ -373,13 +390,20 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                         }
                     }
                     let macro_env_ref = ctx.vm.alloc_env(macro_env);
-                
+                    println!("DEBUG: Macro env contents:");
+                    let env_debug = GcPtr::new(macro_env_ref).read_env();
+                    for (sym_id, val) in &env_debug.vars {
+                        let sym_name = ctx.resolve_symbol_name(*sym_id).unwrap_or("unknown".to_string());
+                        println!("  {} ({}): {:?}", sym_name, sym_id, val);
+                    }
 
                     let old_env = ctx.env;
-                    let macro_ctx = ctx.with_env(macro_env_ref);
+                    ctx.env = macro_env_ref;
 
                     // Evaluate macro body with proper suspension handling
-                    eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, macro_ctx)
+                    let result = eval_macro_body_inline(body.clone(), 0, ctx.nil_value(), old_env, ctx);
+                    ctx.env = old_env;
+                    result
                 }
 
                 HeapValue::Function(Callable { params, body, env, is_variadic }) => {

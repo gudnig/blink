@@ -97,11 +97,15 @@ pub fn parse_symbol_token(token: &str, symbol_table: &mut SymbolTable) -> u32 {
         let module_id = symbol_table.intern(module_part);
         let symbol_id = symbol_table.intern(symbol_part);
         let id = symbol_table.intern_qualified(module_id, symbol_id);
+
+        println!("DEBUG: interned {:?} as {:?}", token, id);
     
         id  
     } else {
         // Simple symbol like "add"
         let id = symbol_table.intern(token);
+
+        println!("DEBUG: interned {:?} as {:?}", token, id);
     
         id
     }

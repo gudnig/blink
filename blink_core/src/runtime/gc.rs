@@ -755,6 +755,46 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         Self::fake_object_reference(0x70000)
     }
 
+    pub fn update_env_variable(&self, env_ref: ObjectReference, symbol: u32, new_value: ValueRef) {
+        unsafe {
+            let data_ptr = env_ref.to_raw_address().as_usize() as *mut u8;
+            let mut offset = 0;
+            
+            // Skip parent reference
+            offset += std::mem::size_of::<Option<ObjectReference>>();
+            
+            // Read vars_count
+            let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+            
+            // Skip other counts
+            offset += std::mem::size_of::<u32>() * 2; // symbol_aliases_count + module_aliases_count
+            
+            // Now we're at the ValueRef array - this is what we need to update
+            let values_start_ptr = data_ptr.add(offset) as *mut ValueRef;
+            
+            // Skip past all ValueRefs to get to the keys
+            let keys_start_offset = offset + (vars_count * std::mem::size_of::<ValueRef>());
+            let keys_start_ptr = data_ptr.add(keys_start_offset) as *const u32;
+            
+            // Read the keys array to find our symbol
+            let keys_slice = std::slice::from_raw_parts(keys_start_ptr, vars_count);
+            
+            // Binary search to find the symbol (keys are sorted)
+            match keys_slice.binary_search(&symbol) {
+                Ok(index) => {
+                    // Found it! Update the corresponding ValueRef
+                    let value_ptr = values_start_ptr.add(index);
+                    std::ptr::write(value_ptr, new_value);
+                }
+                Err(_) => {
+                    // Symbol not found - this shouldn't happen if we set it up correctly
+                    eprintln!("Warning: Symbol {} not found in environment", symbol);
+                }
+            }
+        }
+    }
+
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
             HeapValue::List(list) => self.alloc_vec_or_list(list, true),

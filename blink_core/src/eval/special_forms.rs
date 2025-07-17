@@ -67,6 +67,8 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // Evaluate the second argument (the value to bind)
     let value = try_eval!(trace_eval(args[1], ctx), ctx);
 
+    println!("DEBUG: eval_def - evaluated value: {:?}", value);
+
     // Bind the symbol to the value in the current module
     // Always get read the latest version of the module
     let current_module_ref = ctx.get_module(ctx.current_module);
@@ -88,6 +90,8 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         // Gc should then clean up the old module
         ctx.register_module(&new_module);
 
+        println!("DEBUG: eval_def - allocated in new module env: {:?}", new_module_env_ref);
+
         // Update the current module and env
         ctx.current_module = module.name;
         ctx.env = new_module_env_ref;
@@ -98,30 +102,50 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     }
 
     // Return the value that was bound
+
+    println!("DEBUG: eval_def - returning value: {:?}", value);
     EvalResult::Value(value)
 }
 pub fn eval_fn(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
-    if args.len() < 2 {
-        return EvalResult::Value(ctx.arity_error(2, args.len(), "fn"));
-    }
+    // Parse name vs anonymous
+    let (name, params_index) = if let Some(name_sym) = ctx.get_symbol_id(args[0]) {
+        if args.len() < 3 {
+            return EvalResult::Value(ctx.arity_error(3, args.len(), "named fn"));
+        }
+        (Some(name_sym), 1)
+    } else {
+        (None, 0)
+    };
 
-    // Extract parameter names from the first argument (should be a vector of symbols)
-    let params = match ctx.get_vector_of_symbols(args[0]) {
+    let params = match ctx.get_vector_of_symbols(args[params_index]) {
         Ok(params) => params,
         Err(error_msg) => {
             return EvalResult::Value(ctx.eval_error(&error_msg));
         }
     };
 
-    // Create the user-defined function
+    let env = if let Some(name_sym) = name {
+        // Create environment with placeholder for self-reference
+        let mut fn_env = Env::with_parent(ctx.env);
+        fn_env.set(name_sym, ctx.nil_value()); // Placeholder
+        ctx.vm.alloc_env(fn_env)
+    } else {
+        ctx.env
+    };
+
     let user_fn = Callable {
         params,
-        body: args[1..].to_vec(),
-        env: ctx.env,
-        is_variadic: false, //TODO: handle variadic functions
+        body: args[(params_index + 1)..].to_vec(),
+        env,
+        is_variadic: false,
     };
 
     let value_ref = ctx.user_defined_function_value(user_fn);
+
+    // If named, update the placeholder with the actual function
+    if let Some(name_sym) = name {
+        ctx.vm.update_env_variable(env, name_sym, value_ref);
+    }
 
     EvalResult::Value(value_ref)
 }
@@ -1327,6 +1351,8 @@ fn file_contains_module(file_path: &PathBuf, module_name: &str) -> Result<bool, 
     Ok(false)
 }
 
+
+
 pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // TODO revisit the way we find modules/files
 
@@ -1415,7 +1441,7 @@ pub fn eval_imp(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
                 let import_symbol_id = match ctx.get_symbol_id(symbol) {
                     Some(symbol_id) => symbol_id,
                     None => {
-                        return EvalResult::Value(ctx.eval_error("Symbol not found"));
+                        return EvalResult::Value(ctx.eval_error(&format!("Symbol {} not found", symbol)));
                     }
                 };
                 // check next value for :as keyword

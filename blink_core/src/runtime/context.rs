@@ -106,11 +106,37 @@ impl EvalContext {
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32) -> Result<ValueRef, BlinkError> {
+        
         let env = GcPtr::new(self.env).read_env();
         let symbol_table = self.vm.symbol_table.read();
         let module_registry = self.vm.module_registry.read();
+        
 
-        env.resolve_symbol(symbol_id, &symbol_table, &module_registry).ok_or_else(|| BlinkError::eval("Symbol not found"))
+        let result = env.resolve_symbol(symbol_id, &symbol_table, &module_registry);
+
+        // might want explicit module env lookup
+        match result {
+            Some(val) => Ok(val),
+            None => {
+                if let Some(module_ref) = self.get_module(self.current_module) {
+                    let module = GcPtr::new(module_ref).read_module();
+                    let module_env = GcPtr::new(module.env).read_env();
+                    let module_symbol = module_env.resolve_symbol(symbol_id, &symbol_table, &module_registry);
+                    match module_symbol {
+                        Some(val) => Ok(val),
+                        None => {
+                            let symbol_str = self.get_symbol_name(ValueRef::symbol(symbol_id)).unwrap_or("unknown".to_string());
+                            Err(BlinkError::eval(format!("Symbol not found: {}", symbol_str)))
+                        },
+                    }
+                } else {
+                    let symbol_str = self.get_symbol_name(ValueRef::symbol(symbol_id)).unwrap_or("unknown".to_string());
+                    Err(BlinkError::eval(format!("Symbol not found: {}", symbol_str)))
+                }
+            }
+        }
+
+
 
     }
 
