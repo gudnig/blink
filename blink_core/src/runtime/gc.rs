@@ -2,7 +2,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkObjectModel, TypeTag};
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, TypeTag};
 use crate::value::{Callable, GcPtr, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
@@ -18,49 +18,12 @@ use std::sync::OnceLock;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use crate::value::HeapValue;
 
-thread_local! {
-    static MUTATOR: RefCell<Option<Box<Mutator<BlinkVM>>>> = RefCell::new(None);
-    static THREAD_TLS: RefCell<Option<VMMutatorThread>> = RefCell::new(None);
-}
 static THREAD_IDS: OnceLock<Mutex<HashMap<std::thread::ThreadId, usize>>> = OnceLock::new();
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 impl BlinkVM {
     pub fn with_mutator<T>(&self, f: impl FnOnce(&mut Mutator<BlinkVM>) -> T) -> T {
-        MUTATOR.with(|m| {
-            let mut mutator_ref = m.borrow_mut();
-            if mutator_ref.is_none() {
-                // Create VMMutatorThread using current thread as identifier
-                let tls = Self::create_vm_mutator_thread();
-                
-                // Get static reference to MMTK (required by bind_mutator)
-                let static_mmtk = self.get_static_mmtk();
-                
-                // CORRECT: Bind mutator with VMMutatorThread
-                let mutator = mmtk::memory_manager::bind_mutator(static_mmtk, tls);
-                *mutator_ref = Some(mutator);
-            }
-
-            let mutator = mutator_ref.as_mut().unwrap();
-            f(mutator.as_mut())
-        })
-    }
-    
-
-    fn create_vm_mutator_thread() -> VMMutatorThread {
-        let thread_id = std::thread::current().id();
-        let map = THREAD_IDS.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut map = map.lock();
-        
-        let unique_id = *map.entry(thread_id).or_insert_with(|| {
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        });
-        
-        let address = unsafe { Address::from_usize(unique_id) };
-        let opaque = OpaquePointer::from_address(address);
-        
-        let vm_thread = VMThread(opaque);
-        VMMutatorThread(vm_thread)
+        BlinkActivePlan::with_mutator(f)
     }
     
     
@@ -72,40 +35,6 @@ impl BlinkVM {
             std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
             
         }
-    }
-    
-    // Explicit initialization for worker threads
-    pub fn init_mutator_for_thread(&self) -> Result<(), String> {
-        MUTATOR.with(|m| {
-            let mut mutator_ref = m.borrow_mut();
-            if mutator_ref.is_some() {
-                return Err("Mutator already initialized for this thread".to_string());
-            }
-            
-            let tls = Self::create_vm_mutator_thread();
-            let static_mmtk = self.get_static_mmtk();
-            
-            let mutator = memory_manager::bind_mutator(static_mmtk, tls);
-            *mutator_ref = Some(mutator);
-            
-            println!("Initialized mutator for thread: {:?}", tls);
-            Ok(())
-        })
-    }
-    
-    pub fn destroy_mutator_for_thread(&self) {
-        MUTATOR.with(|m| {
-            let mut mutator_ref = m.borrow_mut();
-            if let Some(mutator) = mutator_ref.take() {
-                // Clean up the mutator
-                drop(mutator);
-                println!("Destroyed mutator for current thread");
-            }
-        });
-    }
-    
-    pub fn has_thread_local_mutator(&self) -> bool {
-        MUTATOR.with(|m| m.borrow().is_some())
     }
 
     fn fake_object_reference(id: usize) -> ObjectReference {

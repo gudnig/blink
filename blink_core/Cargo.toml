@@ -22,6 +22,9 @@ serde = { version = "1.0", features = ["derive"] }
 generational-arena = "0.2"
 
 libc = "0.2"
-mmtk = "0.31.0"
+enum-map = "2.0"
+downcast-rs = "1.2" 
+mmtk = { version="0.31.0", features = ["vm_space"] }
+mmtk-macros = "0.31.0"
 tokio = { version = "1.0", features = ["full"] }
 

@@ -149,10 +149,13 @@ checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 name = "blink_core"
 version = "0.1.0"
 dependencies = [
+ "downcast-rs 1.2.1",
+ "enum-map",
  "generational-arena",
  "libc",
  "libloading",
  "mmtk",
+ "mmtk-macros",
  "parking_lot",
  "rustyline",
  "serde",
@@ -399,6 +402,12 @@ dependencies = [
  "quote",
  "syn 2.0.104",
 ]
+
+[[package]]
+name = "downcast-rs"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "downcast-rs"
@@ -872,7 +881,7 @@ dependencies = [
  "cfg-if",
  "crossbeam",
  "delegate",
- "downcast-rs",
+ "downcast-rs 2.0.1",
  "enum-map",
  "env_logger",
  "idna_adapter",

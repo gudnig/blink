@@ -261,6 +261,7 @@ pub fn native_count(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     EvalResult::Value(ctx.number_value(count as f64))
 }
 
+
 pub fn native_get(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 || args.len() > 3 {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "get"));

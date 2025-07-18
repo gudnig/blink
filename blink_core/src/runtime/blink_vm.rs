@@ -1,13 +1,13 @@
 use std::{collections::HashMap, ffi::c_void, path::PathBuf, sync::{Arc, OnceLock}};
 use mmtk::{
-    util::{address, options::PlanSelector, Address, ObjectReference}, MMTKBuilder, MMTK
+    util::{address, options::PlanSelector, Address, ObjectReference}, MMTKBuilder, Mutator, MMTK
     
 };
 use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        HandleRegistry, SymbolTable, ValueMetadataStore
+        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore
     }, telemetry::TelemetryEvent, value::{Callable, GcPtr, ValueRef}
 };
 
@@ -57,6 +57,18 @@ impl Default for BlinkVM {
 }
 
 impl BlinkVM {
+
+    pub fn get_or_init_mmtk() -> &'static MMTK<BlinkVM> {
+        GLOBAL_MMTK.get_or_init(|| {
+            let mut builder = MMTKBuilder::new();
+            builder.options.plan.set(PlanSelector::SemiSpace);
+            let mmtk = mmtk::memory_manager::mmtk_init(&builder);
+            
+            unsafe {
+                std::mem::transmute::<&MMTK<BlinkVM>, &'static MMTK<BlinkVM>>(&*mmtk)
+            }
+        })
+    }
 
     pub fn modules(&self) -> Vec<ObjectReference> {
         self.module_registry.read().modules.iter().map(|(_, module)| *module).collect()
@@ -108,14 +120,15 @@ impl BlinkVM {
         let mmtk = mmtk::memory_manager::mmtk_init(&builder);
         
         // Store static MMTK reference
-        let static_mmtk = unsafe {
-            std::mem::transmute::<&MMTK<BlinkVM>, &'static MMTK<BlinkVM>>(&*mmtk)
-        };
+        let static_mmtk: &'static MMTK<BlinkVM> = Self::get_or_init_mmtk();
         
         match GLOBAL_MMTK.set(static_mmtk) {
             Ok(_) => {},
             Err(_) => panic!("MMTK already initialized"),
         }
+        
+        
+        
         
         let mut vm = Self::construct_vm(mmtk);
         vm.register_special_forms();
@@ -132,6 +145,25 @@ impl BlinkVM {
     pub fn add_gc_root(&self, obj_ref: ObjectReference) {
         self.gc_roots.write().push(obj_ref);
     }
+
+    // Add method to trigger GC for testing
+    pub fn trigger_gc(&self) {
+        println!("Manually triggering GC...");
+        let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
+        let tls = BlinkActivePlan::get_current_tls();
+        mmtk::memory_manager::handle_user_collection_request(static_mmtk, tls);
+        println!("GC request completed");
+    }
+
+    // Add method to get allocation stats
+    pub fn print_gc_stats(&self) {
+        let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
+        let used = mmtk::memory_manager::used_bytes(static_mmtk);
+        let total = mmtk::memory_manager::total_bytes(static_mmtk);
+        let free = mmtk::memory_manager::free_bytes(static_mmtk);
+        println!("Memory: {} bytes used, {} bytes free, {} bytes total", used, free, total);
+    }
+
 
     fn register_special_forms(&mut self) {
         let mut st = self.symbol_table.write();
