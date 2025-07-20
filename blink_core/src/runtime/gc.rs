@@ -379,9 +379,11 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     
 
     pub fn alloc_str(&self, s: &str) -> ObjectReference {
-        
+        //println!("Thread {:?} requesting string allocation", std::thread::current().id());
         //TODO String interning
         self.with_mutator(|mutator| {
+            //rintln!("Thread {:?} has mutator, allocating string", std::thread::current().id());
+            
             // For strings, we might want to store the string data inline
             let string_bytes = s.as_bytes();
             let data_size = string_bytes.len();

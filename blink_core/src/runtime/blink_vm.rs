@@ -107,6 +107,13 @@ impl BlinkVM {
         vm
     }
 
+    pub fn new_arc() -> Arc<BlinkVM> {
+        let vm = Self::new();
+        let vm_arc = Arc::new(vm);
+        GLOBAL_VM.set(vm_arc.clone()).expect("GLOBAL_VM already initialized");
+        vm_arc.clone()
+    }
+
     fn init_global_env(&mut self) -> ObjectReference {
         let global_env = self.alloc_env(Env::new());
         self.global_env = Some(global_env);

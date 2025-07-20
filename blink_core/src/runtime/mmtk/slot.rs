@@ -11,6 +11,7 @@ pub enum BlinkSlot {
 
 impl Slot for BlinkSlot {
     fn load(&self) -> Option<ObjectReference> {
+        println!("BlinkSlot::load called for {:?}", self);
         match self {
             BlinkSlot::ObjectRef(addr) => {
                 let obj_ref = unsafe { (*addr).load::<ObjectReference>() };
@@ -31,6 +32,7 @@ impl Slot for BlinkSlot {
     }
     
     fn store(&self, object: ObjectReference) {
+        println!("BlinkSlot::store called for {:?}", self);
         unsafe {
             match self {
                 BlinkSlot::ObjectRef(addr) => {
@@ -69,13 +71,7 @@ impl Iterator for BlinkSlotIterator {
     type Item = BlinkSlot;
     
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current < self.end {
-            let slot = BlinkSlot::ObjectRef(self.current);
-            self.current = self.current + self.slot_size;
-            Some(slot)
-        } else {
-            None
-        }
+        None
     }
 }
 

@@ -50,10 +50,11 @@ impl<'a> Iterator for BlinkMutatorIterator<'a> {
 pub fn gc_poll() {
     let (lock, cvar) = &*init_gc_park();
     let mut is_gc = lock.lock();
+    
     while *is_gc {
-        println!("Mutator parking for GC...");
+        println!("Mutator {:?} parking for GC...", std::thread::current().id());
         cvar.wait(&mut is_gc);
-        println!("Mutator resumed after GC");
+        println!("Mutator {:?} resumed after GC", std::thread::current().id());
     }
 }
 
@@ -88,33 +89,39 @@ impl BlinkActivePlan {
     
 
     pub fn with_mutator<T>(f: impl FnOnce(&mut Mutator<BlinkVM>) -> T) -> T {
-        gc_poll();  // ensure cooperation with GC
-    
+        // Check for GC *before* acquiring any mutator locks
+        gc_poll();
+        
         MUTATOR.with(|mutator_cell| {
-            if mutator_cell.borrow().is_none() {
+            // First check if we already have a mutator
+            let needs_creation = mutator_cell.borrow().is_none();
+            
+            if needs_creation {
+                // Create the mutator without holding any locks
                 let tls = Self::create_vm_mutator_thread_pre();
-    
                 let static_mmtk = crate::runtime::GLOBAL_MMTK.get()
                     .expect("MMTK not initialized");
-    
+                
                 let boxed_mutator = mmtk::memory_manager::bind_mutator(static_mmtk, tls);
                 let arc_mutator = Arc::new(Mutex::new(boxed_mutator));
-    
+                
                 // Register globally
                 let mutators = MUTATORS.get_or_init(|| Mutex::new(HashMap::new()));
                 mutators.lock().unwrap().insert(std::thread::current().id(), arc_mutator.clone());
-    
-                // Register thread id
-                let active_threads = ACTIVE_THREADS.get_or_init(|| Mutex::new(Vec::new()));
-                active_threads.lock().unwrap().push(std::thread::current().id());
-    
+                
+                // Store locally
                 *mutator_cell.borrow_mut() = Some(arc_mutator);
-    
+                
                 MUTATOR_COUNT.fetch_add(1, Ordering::SeqCst);
                 println!("Created mutator for thread {:?}", std::thread::current().id());
             }
-    
+            
+            // Now use the mutator
             let arc_mutator = mutator_cell.borrow().as_ref().unwrap().clone();
+            
+            // Check for GC again before acquiring the lock
+            gc_poll();
+            
             let mut guard = arc_mutator.lock().unwrap();
             f(guard.as_mut())
         })

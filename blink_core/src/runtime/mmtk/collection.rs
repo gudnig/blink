@@ -10,32 +10,40 @@ pub struct BlinkCollection;
 
 impl Collection<BlinkVM> for BlinkCollection {
     fn stop_all_mutators<F>(_tls: VMWorkerThread, mut mutator_visitor: F)
-    where
-        F: FnMut(&'static mut Mutator<BlinkVM>),
+where
+    F: FnMut(&'static mut Mutator<BlinkVM>),
     {
         println!("Stopping all mutators for GC");
 
-        // Signal to mutators to park
+        // First, signal all mutators to park
         let (lock, _) = &*init_gc_park();
         {
             let mut is_gc = lock.lock();
             *is_gc = true;
         }
 
+        // Give mutators a chance to see the signal and park themselves
+        std::thread::yield_now();
+        
         if let Some(mutators) = MUTATORS.get() {
             let map = mutators.lock().unwrap();
-
-            for (_thread_id, arc_mutex_mutator) in map.iter() {
-                let mut guard = arc_mutex_mutator.lock().unwrap();
-
-                let static_mutator: &'static mut Mutator<BlinkVM> = unsafe {
-                    &mut *(guard.as_mut() as *mut _)
-                };
-
-                mutator_visitor(static_mutator);
+            
+            // Process each mutator
+            for (thread_id, arc_mutex_mutator) in map.iter() {
+                // Try to lock with a timeout to detect deadlocks
+                match arc_mutex_mutator.try_lock() {
+                    Ok(mut guard) => {
+                        let static_mutator: &'static mut Mutator<BlinkVM> = unsafe {
+                            &mut *(guard.as_mut() as *mut _)
+                        };
+                        mutator_visitor(static_mutator);
+                    }
+                    Err(_) => {
+                        println!("Warning: Could not lock mutator for thread {:?} - it may be the requesting thread", thread_id);
+                        // Skip this mutator - it's likely the one that requested GC
+                    }
+                }
             }
-        } else {
-            println!("No mutators registered yet.");
         }
     }
 

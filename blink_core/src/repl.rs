@@ -48,8 +48,7 @@ pub async fn start_repl() {
     let mut rl = Editor::<(), FileHistory>::with_config(config).expect("failed to start editor");
     rl.load_history("history.txt").ok();
 
-    let vm = BlinkVM::new();
-    let vm_arc = Arc::new(vm);
+    let vm_arc = BlinkVM::new_arc();
     vm_arc.symbol_table.read().print_all();
     
 

@@ -1,6 +1,6 @@
-use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, Scanning, VMBinding}, Mutator};
+use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, RootsWorkFactory, Scanning, VMBinding}, Mutator};
 
-use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader, ScanBlinkVMRoots, TypeTag, GLOBAL_VM}, value::{SourceRange, ValueRef}};
+use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader , TypeTag, GLOBAL_VM}, value::{SourceRange, ValueRef}};
 
 use mmtk::vm::slot::Slot;
 
@@ -50,25 +50,37 @@ impl Scanning<BlinkVM> for BlinkScanning {
         // For NoGC, we don't scan roots
         println!("scan_roots_in_mutator_thread called");
     }
-
+    
     fn scan_vm_specific_roots(
         _tls: mmtk::util::VMWorkerThread,
-        factory: impl mmtk::vm::RootsWorkFactory<<BlinkVM as VMBinding>::VMSlot>
+        mut factory: impl RootsWorkFactory<BlinkSlot>
     ) {
         println!("Scanning VM specific roots");
+        println!("Factory debug: {:?}", std::any::type_name_of_val(&factory));
+        println!("Factory type: {}", std::any::type_name_of_val(&factory));
 
-        
-        
-        let static_mmtk = crate::runtime::GLOBAL_MMTK.get().expect("MMTK not initialized");
-        let free_bytes = mmtk::memory_manager::free_bytes(static_mmtk);
-        println!("Free bytes: {:?}", free_bytes);
-        println!("Total bytes: {:?}", mmtk::memory_manager::total_bytes(static_mmtk));
-        let scan_work = ScanBlinkVMRoots::new(factory);
-        let packets: Vec<Box<dyn GCWork<BlinkVM>>> = vec![Box::new(scan_work)];
-        
-        mmtk::memory_manager::add_work_packets(static_mmtk, WorkBucketStage::Prepare, packets);
-        
+    
+        let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+        let mut root_slots = Vec::new();
+    
+        if let Some(global_env) = vm.global_env {
+            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(&global_env)));
+        }
+        let gc_roots = vm.gc_roots.read();
+        for root in gc_roots.iter() {
+            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(root)));
+        }
+        let modules = vm.modules();
+        for module_ref in modules {
+            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(&module_ref)));
+        }
+    
+        if !root_slots.is_empty() {
+            println!("Enqueuing {} root slots directly via factory", root_slots.len());
+            let x = factory.create_process_roots_work(root_slots);
+        }
     }
+    
     fn supports_return_barrier() -> bool {
         false // No return barriers for NoGC
     }
