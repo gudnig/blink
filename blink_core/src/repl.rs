@@ -48,13 +48,14 @@ pub async fn start_repl() {
     let mut rl = Editor::<(), FileHistory>::with_config(config).expect("failed to start editor");
     rl.load_history("history.txt").ok();
 
-    let vm = BlinkVM::new_arc();
-    vm.symbol_table.read().print_all();
+    let vm = BlinkVM::new();
+    let vm_arc = Arc::new(vm);
+    vm_arc.symbol_table.read().print_all();
     
 
-    let mut ctx = EvalContext::new(vm.global_env(), vm.clone());
+    let mut ctx = EvalContext::new(vm_arc.global_env(), vm_arc.clone());
     let user_module_name = ctx.vm.symbol_table.write().intern("user");
-    let user_module_env = ctx.vm.alloc_env(Env::with_parent(vm.global_env()));
+    let user_module_env = ctx.vm.alloc_env(Env::with_parent(vm_arc.global_env()));
 
     let user_module = Module {
         name: user_module_name,
@@ -67,7 +68,7 @@ pub async fn start_repl() {
     ctx.current_module = user_module_name;
     ctx.env = user_module_env;
 
-    println!("Global env: {}", vm.global_env());
+    println!("Global env: {}", vm_arc.global_env());
     println!("User module env: {}", user_module_env);
 
 

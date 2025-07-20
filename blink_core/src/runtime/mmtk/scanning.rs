@@ -38,6 +38,7 @@ impl Scanning<BlinkVM> for BlinkScanning {
 
     fn notify_initial_thread_scan_complete(_partial_scan: bool, _tls: mmtk::util::VMWorkerThread) {
         // No-op for NoGC 
+        println!("notify_initial_thread_scan_complete called");
         
     }
 
@@ -47,6 +48,7 @@ impl Scanning<BlinkVM> for BlinkScanning {
         _factory: impl mmtk::vm::RootsWorkFactory<<BlinkVM as VMBinding>::VMSlot>,
     ) {
         // For NoGC, we don't scan roots
+        println!("scan_roots_in_mutator_thread called");
     }
 
     fn scan_vm_specific_roots(

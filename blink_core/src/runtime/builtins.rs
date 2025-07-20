@@ -1,14 +1,10 @@
 use crate::{
     eval::{EvalContext, EvalResult},
     native_functions::{
-        native_add, native_complete_future, native_cons, native_div, native_eq, native_error,
-        native_first, native_future, native_get, native_list, native_map, native_map_construct,
-        native_mul, native_not, native_print, native_rest, native_sub, native_type_of,
-        native_vector,
+        native_add, native_complete_future, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
     },
     runtime::BlinkVM,
-    value::ValueRef,
-    value::{pack_number, Callable, GcPtr, NativeFn},
+    value::{pack_number, Callable, GcPtr, NativeFn, ValueRef},
 };
 
 impl BlinkVM {
@@ -41,7 +37,8 @@ impl BlinkVM {
         reg("first", native_first);
         reg("rest", native_rest);
         reg("get", native_get);
-
+        reg("report-gc-stats", native_report_gc_stats);
+        reg("gc-stress", native_gc_stress);
         // TODO: Error module
         reg("err", native_error);
 

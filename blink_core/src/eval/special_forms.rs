@@ -67,7 +67,6 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     // Evaluate the second argument (the value to bind)
     let value = try_eval!(trace_eval(args[1], ctx), ctx);
 
-    println!("DEBUG: eval_def - evaluated value: {:?}", value);
 
     // Bind the symbol to the value in the current module
     // Always get read the latest version of the module
@@ -90,8 +89,6 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
         // Gc should then clean up the old module
         ctx.register_module(&new_module);
 
-        println!("DEBUG: eval_def - allocated in new module env: {:?}", new_module_env_ref);
-
         // Update the current module and env
         ctx.current_module = module.name;
         ctx.env = new_module_env_ref;
@@ -102,8 +99,6 @@ pub fn eval_def(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {
     }
 
     // Return the value that was bound
-
-    println!("DEBUG: eval_def - returning value: {:?}", value);
     EvalResult::Value(value)
 }
 pub fn eval_fn(args: &[ValueRef], ctx: &mut EvalContext) -> EvalResult {

@@ -228,7 +228,7 @@ impl BlinkObjectModel {
         );
 
         
-        println!("Allocated {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
+        //println!("Allocated {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
         
         // Initialize header
         unsafe {
@@ -244,7 +244,7 @@ impl BlinkObjectModel {
     pub fn get_type_tag(object: ObjectReference) -> TypeTag {
         unsafe {
             let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
-            println!("Reading header pointer: {:?}", header_ptr);
+            
             (*header_ptr).get_type()
         }
     }

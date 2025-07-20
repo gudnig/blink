@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 use crate::error::{BlinkError, BlinkErrorType};
 use crate::eval::{eval_func, EvalContext, EvalResult};
 use crate::future::BlinkFuture;
-use crate::value::{unpack_immediate, Callable, ImmediateValue, NativeFn, ValueRef};
+use crate::value::{unpack_immediate, Callable, GcPtr, ImmediateValue, NativeFn, ValueRef};
 use crate::env::Env;
 
 
@@ -261,6 +261,40 @@ pub fn native_count(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     EvalResult::Value(ctx.number_value(count as f64))
 }
 
+pub fn native_gc_stress(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
+    if args.len() != 1 {
+        return EvalResult::Value(ctx.arity_error(0, args.len(), "gc-stress"));
+    }
+
+    let n = ctx.get_number(args[0]);
+    if n.is_none() {
+        return EvalResult::Value(ctx.eval_error("gc-stress expects a number"));
+    }
+    let n = n.unwrap() as usize;
+
+    for _ in 0..n {
+        let mut strings = Vec::new();
+        for _ in 0..1000 {
+            let str = ctx.vm.alloc_str("hello");
+            let val = ValueRef::Heap(GcPtr::new(str));
+            strings.push(val);
+        }
+    
+        let x = ctx.vm.alloc_vec_or_list(strings, false);
+    }
+    
+    EvalResult::Value(ValueRef::nil())
+}
+
+pub fn native_report_gc_stats(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
+    if args.len() != 0 {
+        return EvalResult::Value(ctx.arity_error(0, args.len(), "report-gc-stats"));
+    }
+    
+    let vm = ctx.vm.clone();
+    vm.print_gc_stats();
+    EvalResult::Value(ValueRef::nil())
+}
 
 pub fn native_get(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     if args.len() < 2 || args.len() > 3 {

@@ -7,12 +7,12 @@ use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore
+        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore, THREAD_TLS
     }, telemetry::TelemetryEvent, value::{Callable, GcPtr, ValueRef}
 };
 
 pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
-pub static GLOBAL_MMTK: OnceLock<&'static MMTK<BlinkVM>> = OnceLock::new(); 
+pub static GLOBAL_MMTK: OnceLock<Box<MMTK<BlinkVM>>> = OnceLock::new(); 
 
 extern "C" {
     // Apple-specific JIT protection functions
@@ -28,7 +28,7 @@ const MAP_ANON: i32 = 0x1000;
 
 
 pub struct BlinkVM {
-    pub mmtk: Box<MMTK<BlinkVM>>,
+    // pub mmtk: Box<MMTK<BlinkVM>>,
     pub symbol_table: RwLock<SymbolTable>,
     pub global_env: Option<ObjectReference>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
@@ -58,30 +58,20 @@ impl Default for BlinkVM {
 
 impl BlinkVM {
 
+    
     pub fn get_or_init_mmtk() -> &'static MMTK<BlinkVM> {
         GLOBAL_MMTK.get_or_init(|| {
             let mut builder = MMTKBuilder::new();
             builder.options.plan.set(PlanSelector::SemiSpace);
-            let mmtk = mmtk::memory_manager::mmtk_init(&builder);
-            
-            unsafe {
-                std::mem::transmute::<&MMTK<BlinkVM>, &'static MMTK<BlinkVM>>(&*mmtk)
-            }
+            let threads = *builder.options.threads;
+            println!("Threads: {:?}", threads);
+            mmtk::memory_manager::mmtk_init(&builder)
         })
     }
 
-    pub fn modules(&self) -> Vec<ObjectReference> {
-        self.module_registry.read().modules.iter().map(|(_, module)| *module).collect()
-    }
-
-    pub fn global_env(&self) -> ObjectReference {
-        self.global_env.unwrap()
-    }
-    
-    fn construct_vm(mmtk: Box<mmtk::MMTK<BlinkVM>>) -> Self {
-        
+    fn construct_vm() -> Self {
         Self {
-            mmtk,
+            // Remove mmtk field
             symbol_table: RwLock::new(SymbolTable::new()),
             global_env: None,
             telemetry_sink: None,
@@ -92,6 +82,29 @@ impl BlinkVM {
             handle_registry: RwLock::new(HandleRegistry::new()),
             gc_roots: RwLock::new(Vec::new()),
         }
+    }
+
+    pub fn new() -> Self {
+        // Initialize MMTK globally (only happens once)
+        let mmtk = Self::get_or_init_mmtk();
+
+        let current_thread = mmtk::util::VMThread(
+            mmtk::util::OpaquePointer::from_address(mmtk::util::Address::ZERO)
+        );
+
+        mmtk::memory_manager::initialize_collection(mmtk, current_thread);
+        
+        let mut vm = Self::construct_vm();
+
+
+        vm.register_special_forms();
+        vm.init_global_env();
+        vm.preload_builtin_reader_macros();
+        vm.register_builtins();
+        vm.register_builtin_macros();
+        vm.register_complex_macros();
+
+        vm
     }
 
     fn init_global_env(&mut self) -> ObjectReference {
@@ -105,56 +118,35 @@ impl BlinkVM {
         global_env
     }
 
-    pub fn new_arc() -> Arc<Self> {
-        let vm = Self::new();
-        let vm_arc = Arc::new(vm);
-        GLOBAL_VM.set(vm_arc.clone()).unwrap();
-        vm_arc
+    pub fn global_env(&self) -> ObjectReference {
+        self.global_env.unwrap()
     }
 
-    pub fn new() -> Self {
-        // Standard MMTK initialization for non-Apple Silicon
-        let mut builder = MMTKBuilder::new();
-        builder.options.plan.set(PlanSelector::SemiSpace);
-        
-        let mmtk = mmtk::memory_manager::mmtk_init(&builder);
-        
-        // Store static MMTK reference
-        let static_mmtk: &'static MMTK<BlinkVM> = Self::get_or_init_mmtk();
-        
-        match GLOBAL_MMTK.set(static_mmtk) {
-            Ok(_) => {},
-            Err(_) => panic!("MMTK already initialized"),
-        }
-        
-        
-        
-        
-        let mut vm = Self::construct_vm(mmtk);
-        vm.register_special_forms();
-        vm.init_global_env();
-        vm.preload_builtin_reader_macros();
-        vm.register_builtins();
-        vm.register_builtin_macros();
-        vm.register_complex_macros();
-        
-
-        vm
+    pub fn modules(&self) -> Vec<ObjectReference> {
+        let modules = self.module_registry.read();
+        modules.modules.values().map(|m| *m).collect()
     }
+
 
     pub fn add_gc_root(&self, obj_ref: ObjectReference) {
         self.gc_roots.write().push(obj_ref);
     }
 
-    // Add method to trigger GC for testing
     pub fn trigger_gc(&self) {
         println!("Manually triggering GC...");
         let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
-        let tls = BlinkActivePlan::get_current_tls();
+    
+        let tls = THREAD_TLS.with(|tls_cell| {
+            tls_cell.get().cloned().unwrap_or_else(|| {
+                println!("Initializing TLS for GC trigger thread...");
+                BlinkActivePlan::create_vm_mutator_thread_pre()
+            })
+        });
+    
         mmtk::memory_manager::handle_user_collection_request(static_mmtk, tls);
         println!("GC request completed");
     }
-
+    
     // Add method to get allocation stats
     pub fn print_gc_stats(&self) {
         let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");

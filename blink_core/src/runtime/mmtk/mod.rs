@@ -5,6 +5,7 @@ mod active_plan;
 mod reference_glue;
 mod slot;
 mod gc_work;
+mod upcalls;
 
 
 use mmtk::vm::VMBinding;
@@ -15,7 +16,7 @@ pub use active_plan::*;
 pub use reference_glue::*;
 pub use slot::*;
 pub use gc_work::*;
-
+pub use upcalls::*;
 
 use crate::{runtime::BlinkVM, value::pack_number, value::ValueRef};
 

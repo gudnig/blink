@@ -233,7 +233,7 @@ fn eval_function_call_inline(
             // All arguments evaluated, call the function
             return eval_func(func.unwrap(), evaluated_args, ctx);
         }
-        println!("DEBUG: About to evaluate in macro body: {:?}", list[index]);
+        
         let result = trace_eval(list[index].clone(), ctx);
         match result {
             EvalResult::Value(val) => {
@@ -268,11 +268,8 @@ fn eval_macro_body_inline(
 ) -> EvalResult {
 
     // In eval_macro_body_inline, at the start:
-    println!("DEBUG: Macro body structure:");
-    for (i, expr) in body.iter().enumerate() {
-        println!("  body[{}]: {:?}", i, expr);
-    }
-    println!("DEBUG: eval_macro_body_inline - body: {:?}", body);
+    
+    
     loop {
         if index >= body.len() {
             // Switch back to original environment and evaluate the expansion
@@ -390,13 +387,8 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                         }
                     }
                     let macro_env_ref = ctx.vm.alloc_env(macro_env);
-                    println!("DEBUG: Macro env contents:");
-                    let env_debug = GcPtr::new(macro_env_ref).read_env();
-                    for (sym_id, val) in &env_debug.vars {
-                        let sym_name = ctx.resolve_symbol_name(*sym_id).unwrap_or("unknown".to_string());
-                        println!("  {} ({}): {:?}", sym_name, sym_id, val);
-                    }
-
+                    
+                    
                     let old_env = ctx.env;
                     ctx.env = macro_env_ref;
 

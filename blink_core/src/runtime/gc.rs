@@ -2,7 +2,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkActivePlan, BlinkObjectModel, TypeTag};
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, TypeTag, GLOBAL_MMTK};
 use crate::value::{Callable, GcPtr, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
@@ -10,12 +10,18 @@ use crate::{runtime::BlinkVM, value::ValueRef};
 use mmtk::util::{Address, OpaquePointer, VMThread};
 use mmtk::MutatorContext;
 use mmtk::{util::ObjectReference, Mutator, util::VMMutatorThread, memory_manager};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::hash::{DefaultHasher, Hash, Hasher};
+
+static GC_PARK: OnceLock<Arc<(Mutex<bool>, Condvar)>> = OnceLock::new();
+
+pub fn init_gc_park() -> Arc<(Mutex<bool>, Condvar)> {
+    GC_PARK.get_or_init(|| Arc::new((Mutex::new(false), Condvar::new()))).clone()
+}
 use crate::value::HeapValue;
 
 static THREAD_IDS: OnceLock<Mutex<HashMap<std::thread::ThreadId, usize>>> = OnceLock::new();
@@ -32,7 +38,8 @@ impl BlinkVM {
         // UNSAFE: Required because bind_mutator expects 'static
         // This is safe as long as your VM instance lives for the program duration
         unsafe {
-            std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*self.mmtk)
+            let mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
+            std::mem::transmute::<&mmtk::MMTK<BlinkVM>, &'static mmtk::MMTK<BlinkVM>>(&*mmtk)
             
         }
     }
