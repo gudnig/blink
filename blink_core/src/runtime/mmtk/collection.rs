@@ -1,81 +1,88 @@
 // blink_core/src/runtime/mmtk/collection.rs
-// Collection implementation that properly supports mutator_visitor
+// PROPER MMTk Collection implementation - let MMTk handle coordination
 
-use std::{hash::{DefaultHasher, Hash, Hasher}, sync::{atomic::{AtomicBool, Ordering}, Arc}};
+use std::sync::atomic::{AtomicBool, Ordering};
 use mmtk::{
-    util::{Address, OpaquePointer, VMThread, VMWorkerThread}, 
-    vm::{Collection, GCThreadContext}, 
+    util::{VMThread, VMWorkerThread, VMMutatorThread}, 
+    vm::Collection, 
     Mutator
 };
-use parking_lot::{Condvar, Mutex};
 
-
-
-use crate::runtime::{BlinkActivePlan, BlinkVM, GC_COORDINATOR};
+use crate::runtime::BlinkVM;
 
 pub struct BlinkCollection;
 
+// Simple global flag - MMTk will coordinate the timing
+static GC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
 impl Collection<BlinkVM> for BlinkCollection {
-    fn stop_all_mutators<F>(_tls: VMWorkerThread, mutator_visitor: F)
+    fn stop_all_mutators<F>(_tls: VMWorkerThread, mut mutator_visitor: F)
     where
         F: FnMut(&'static mut Mutator<BlinkVM>),
     {
-        // This is called by MMTk GC worker thread
-        // Pass the mutator_visitor to visit each mutator for stack scanning
+        println!("🔒 MMTk: Stopping all mutators");
+        
+        // Set the flag - MMTk controls when this happens
         
         
-        println!("Stopping all mutators GC requested");
-        BlinkActivePlan::stop_all_mutators_impl(mutator_visitor);
-
+        // Visit all mutators for root scanning
+        // MMTk will call this method when it's time to stop mutators
+        crate::runtime::BlinkActivePlan::visit_all_mutators(mutator_visitor);
+        
+        println!("🔒 MMTk: All mutators stopped");
     }
 
     fn resume_mutators(_tls: VMWorkerThread) {
-        // This is called by MMTk GC worker thread  
+        println!("🔓 MMTk: Resuming all mutators");
         
-        BlinkActivePlan::resume_all_mutators_impl();
+        // Clear the flag - MMTk controls when this happens
+        GC_IN_PROGRESS.store(false, Ordering::SeqCst);
         
+        println!("🔓 MMTk: All mutators resumed");
     }
 
-    fn block_for_gc(_tls: mmtk::util::VMMutatorThread) {
-        // This is called on the specific mutator thread that triggered GC
-        // The thread should block itself and wait for GC to complete
+    fn block_for_gc(_tls: VMMutatorThread) {
+        // THIS is where you implement VM-specific blocking
+        // MMTk calls this automatically when allocation needs to block
         
-        println!("Mutator {:?} blocking for GC", std::thread::current().id());
-
+        println!("🚦 MMTk: Mutator {:?} blocking for GC", std::thread::current().id());
         
-        // Block until GC is complete
-        BlinkActivePlan::gc_poll();
+        // Set flag when GC blocking starts
+        GC_IN_PROGRESS.store(true, Ordering::SeqCst);
         
-        println!("Mutator {:?} unblocked after GC", std::thread::current().id());
+        // Block until MMTk says we can continue
+        while GC_IN_PROGRESS.load(Ordering::SeqCst) {
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+        
+        println!("🚦 MMTk: Mutator {:?} resumed after GC", std::thread::current().id());
     }
 
-    fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<BlinkVM>) {
+    fn spawn_gc_thread(_tls: VMThread, ctx: mmtk::vm::GCThreadContext<BlinkVM>) {
         let mmtk = crate::runtime::GLOBAL_MMTK.get()
             .expect("MMTK not initialized");
             
         match ctx {
-            GCThreadContext::Worker(worker) => {
-                println!("Spawning GC worker thread");
+            mmtk::vm::GCThreadContext::Worker(worker) => {
+                println!("🔧 MMTk: Spawning GC worker thread");
                 
                 std::thread::spawn(move || {
-                    println!("GC worker thread started");
-                    
                     // Create TLS for this GC worker thread
-                    let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(
-                        unsafe { Address::from_usize(thread_id_as_usize()) },
+                    let tls = VMWorkerThread(VMThread(mmtk::util::OpaquePointer::from_address(
+                        unsafe { mmtk::util::Address::from_usize(thread_id_as_usize()) },
                     )));
                     
-                    // Run the GC worker
+                    // Run the GC worker - MMTk handles all coordination
                     worker.run(tls, mmtk);
-                    
-                    println!("GC worker thread finished");
                 });
             }
         }
     }
 }
 
+// Helper function
 fn thread_id_as_usize() -> usize {
+    use std::hash::{DefaultHasher, Hash, Hasher};
     let thread_id = std::thread::current().id();
     let mut hasher = DefaultHasher::new();
     thread_id.hash(&mut hasher);

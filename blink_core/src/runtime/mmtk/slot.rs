@@ -14,15 +14,20 @@ impl Slot for BlinkSlot {
         println!("BlinkSlot::load called for {:?}", self);
         match self {
             BlinkSlot::ObjectRef(addr) => {
-                let obj_ref = unsafe { (*addr).load::<ObjectReference>() };
+                // RIGHT - Reads ObjectReference that's STORED AT the address  
+                let obj_ref_ptr = addr.as_usize() as *const ObjectReference;
+                let obj_ref = unsafe { std::ptr::read(obj_ref_ptr) };
                 Some(obj_ref)
             },
             BlinkSlot::OptionObjectRef(addr) => {  // ← NEW!
-                let opt_ref = unsafe { (*addr).load::<Option<ObjectReference>>() };
-                opt_ref  // Returns Option<ObjectReference> directly
+                println!("BlinkSlot::OptionObjectRef::load called for {:?}", addr);
+                let obj_ref_ptr = addr.as_usize() as *const Option<ObjectReference>;
+                let obj_ref = unsafe { std::ptr::read(obj_ref_ptr) };
+                obj_ref  // Returns Option<ObjectReference> directly
             },
             BlinkSlot::ValueRef(addr) => {
-                let value_ref = unsafe { (*addr).load::<ValueRef>() };
+                let value_ref_ptr = addr.as_usize() as *const ValueRef;
+                let value_ref = unsafe { std::ptr::read(value_ref_ptr) };
                 match value_ref {
                     ValueRef::Heap(gc_ptr) => Some(gc_ptr.0),
                     _ => None,
@@ -36,14 +41,20 @@ impl Slot for BlinkSlot {
         unsafe {
             match self {
                 BlinkSlot::ObjectRef(addr) => {
-                    (*addr).store(object);
+                    // FIXED: Use std::ptr::write instead of (*addr).store()
+                    let obj_ref_ptr = addr.as_usize() as *mut ObjectReference;
+                    std::ptr::write(obj_ref_ptr, object);
                 },
-                BlinkSlot::OptionObjectRef(addr) => {  // ← NEW!
-                    (*addr).store(Some(object));
+                BlinkSlot::OptionObjectRef(addr) => {
+                    // FIXED: Use std::ptr::write instead of (*addr).store()
+                    let opt_ref_ptr = addr.as_usize() as *mut Option<ObjectReference>;
+                    std::ptr::write(opt_ref_ptr, Some(object));
                 },
                 BlinkSlot::ValueRef(addr) => {
+                    // FIXED: Use std::ptr::write instead of (*addr).store()
+                    let value_ref_ptr = addr.as_usize() as *mut ValueRef;
                     let value_ref = ValueRef::Heap(GcPtr::new(object));
-                    (*addr).store(value_ref);
+                    std::ptr::write(value_ref_ptr, value_ref);
                 }
             }
         }

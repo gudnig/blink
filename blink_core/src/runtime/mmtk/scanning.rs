@@ -55,29 +55,18 @@ impl Scanning<BlinkVM> for BlinkScanning {
         _tls: mmtk::util::VMWorkerThread,
         mut factory: impl RootsWorkFactory<BlinkSlot>
     ) {
-        println!("Scanning VM specific roots");
-        println!("Factory debug: {:?}", std::any::type_name_of_val(&factory));
-        println!("Factory type: {}", std::any::type_name_of_val(&factory));
-
-    
+        println!("Scanning VM specific roots - MINIMAL VERSION");
+        
         let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
         let mut root_slots = Vec::new();
     
-        if let Some(global_env) = vm.global_env {
-            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(&global_env)));
-        }
-        let gc_roots = vm.gc_roots.read();
-        for root in gc_roots.iter() {
-            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(root)));
-        }
-        let modules = vm.modules();
-        for module_ref in modules {
-            root_slots.push(BlinkSlot::ObjectRef(Address::from_ptr(&module_ref)));
-        }
+        // ONLY scan the global_env field for now
+        root_slots.push(BlinkSlot::OptionObjectRef(Address::from_ptr(&vm.global_env)));
+        println!("Added global_env field at address: {:?}", Address::from_ptr(&vm.global_env));
     
         if !root_slots.is_empty() {
-            println!("Enqueuing {} root slots directly via factory", root_slots.len());
-            let x = factory.create_process_roots_work(root_slots);
+            println!("Enqueuing {} root slots", root_slots.len());
+            factory.create_process_roots_work(root_slots);
         }
     }
     
@@ -133,8 +122,14 @@ impl BlinkScanning {
         let data_ptr = object.to_raw_address().as_usize() as *const u8;
             
         // Get the data size from the object header
+        
         let header = BlinkObjectModel::get_header(object).0;
+        if header.total_size < ObjectHeader::SIZE as u32 {
+            println!("Object size is too small to be a valid Vec or List: {:?}", header.total_size);
+            panic!("Object size is too small to be a valid Vec or List");
+        }
         let data_size = header.total_size as usize - ObjectHeader::SIZE;
+        
         let item_count = data_size / std::mem::size_of::<ValueRef>();
         
         // Scan all ValueRef items starting from offset 0
@@ -218,13 +213,20 @@ impl BlinkScanning {
         slot_visitor: &mut SV,
         object: ObjectReference
     ) {
+        // Check if THIS environment object has a valid header first
+        let header = BlinkObjectModel::get_header(object).0;
+        if header.total_size == 0 {
+            println!("❌ Environment object {:?} has corrupted header!", object);
+            return;
+        }
+
         unsafe {
             let data_ptr = object.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
             // Scan parent reference (Option<ObjectReference>)
             let parent_addr = Address::from_usize(data_ptr.add(offset) as usize);
-            let parent_slot = BlinkSlot::OptionObjectRef(parent_addr);  // ← Fixed!
+            let parent_slot = BlinkSlot::OptionObjectRef(parent_addr); 
             slot_visitor.visit_slot(parent_slot);
             offset += std::mem::size_of::<Option<ObjectReference>>();
             

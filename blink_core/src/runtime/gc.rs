@@ -29,7 +29,7 @@ static THREAD_IDS: OnceLock<Mutex<HashMap<std::thread::ThreadId, usize>>> = Once
 static COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 impl BlinkVM {
-    pub fn with_mutator<T>(&self, f: impl FnOnce(&mut Mutator<BlinkVM>, Box<dyn Fn (&mut Mutator<BlinkVM>, &TypeTag, &usize) -> ObjectReference>) -> T) -> T {
+    pub fn with_mutator<T>(&self, f: impl FnOnce(&mut Mutator<BlinkVM>) -> T) -> T {
         BlinkActivePlan::with_mutator(f)
     }
     
@@ -54,12 +54,12 @@ impl BlinkVM {
     }
 
     pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
             let total_data_size = vec_data_size;
             let total_size = total_data_size;
             let type_tag = if is_list { TypeTag::List } else { TypeTag::Vector };
-            let data_start = alloc(mutator, &type_tag, &total_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
                 std::ptr::copy_nonoverlapping(items.as_ptr(), data_ptr, items.len());
@@ -78,7 +78,7 @@ impl BlinkVM {
 
 
     pub fn alloc_callable(&self, function: Callable, is_macro: bool) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let params_count = function.params.len();
             let body_count = function.body.len();
             
@@ -99,13 +99,9 @@ impl BlinkVM {
             
             let total_size = env_size + body_count_size + body_size + 
                             params_count_size + params_size + variadic_size;
-            
+
             let type_tag = if is_macro { TypeTag::Macro } else { TypeTag::UserDefinedFunction };
-            let data_start = alloc(
-                mutator,
-                &type_tag,
-                &total_size
-            );
+            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -142,7 +138,7 @@ impl BlinkVM {
     }
 
     pub fn alloc_module(&self, module: &Module) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let exports_count = module.exports.len();
             
             // GC-FRIENDLY LAYOUT: ObjectReferences first!
@@ -161,7 +157,7 @@ impl BlinkVM {
             let ready_size = std::mem::size_of::<bool>();
             let total_size = env_size + name_size + exports_size + source_size + ready_size;
             
-            let data_start = alloc(mutator, &TypeTag::Module, &total_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Module, &total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -291,7 +287,7 @@ impl BlinkVM {
 
     
 pub fn alloc_env(&self, env: Env) -> ObjectReference {
-    self.with_mutator(|mutator, alloc| {
+    self.with_mutator(|mutator| {
         let vars_count = env.vars.len();
         let symbol_aliases_count = env.symbol_aliases.len();
         let module_aliases_count = env.module_aliases.len();
@@ -316,7 +312,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         let total_size = parent_size + counts_size + refs_size + keys_size + 
                         symbol_aliases_size + module_aliases_size;
         
-        let data_start = alloc(mutator, &TypeTag::Env, &total_size);
+        let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Env, &total_size);
         
         unsafe {
             let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -383,7 +379,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     pub fn alloc_str(&self, s: &str) -> ObjectReference {
         //println!("Thread {:?} requesting string allocation", std::thread::current().id());
         //TODO String interning
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             //rintln!("Thread {:?} has mutator, allocating string", std::thread::current().id());
             
             // For strings, we might want to store the string data inline
@@ -391,7 +387,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let data_size = string_bytes.len();
             let total_size =  data_size;
 
-            let data_start = alloc(mutator, &TypeTag::Str, &total_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Str, &total_size);
             
             unsafe {
                 let  base_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -413,7 +409,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     
 
     pub fn alloc_map(&self, pairs: Vec<(&ValueRef, &ValueRef)>) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(pairs.len());
             let item_count = pairs.len();
             
@@ -423,7 +419,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let pairs_size = item_count * 2 * std::mem::size_of::<ValueRef>(); // key-value pairs
             let total_data_size = metadata_size + buckets_size + pairs_size;
             
-            let data_start = alloc(mutator, &TypeTag::Map, &total_data_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Map, &total_data_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -475,7 +471,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     }
     
     pub fn alloc_set(&self, items: Vec<&ValueRef>) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let bucket_count = Self::calculate_bucket_count(items.len());
             let item_count = items.len();
             
@@ -485,7 +481,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let total_data_size = header_size + buckets_size + items_size;
             
             // Use consistent allocation method like other types
-            let data_start = alloc(mutator, &TypeTag::Set, &total_data_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Set, &total_data_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -532,7 +528,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     }
 
     pub fn alloc_error(&self, error: BlinkError) -> ObjectReference {
-        self.with_mutator(|mutator, alloc| {
+        self.with_mutator(|mutator| {
             let message_bytes = error.message.as_bytes();
             let message_len = message_bytes.len() as u32;
             
@@ -542,7 +538,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let error_type_size = Self::calculate_error_type_size(&error.error_type);
             
             let total_size = message_size + pos_size + error_type_size;
-            let data_start = alloc(mutator, &TypeTag::Error, &total_size);
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Error, &total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;

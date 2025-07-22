@@ -14,19 +14,6 @@ use crate::{
 pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
 pub static GLOBAL_MMTK: OnceLock<Box<MMTK<BlinkVM>>> = OnceLock::new(); 
 
-extern "C" {
-    // Apple-specific JIT protection functions
-    fn pthread_jit_write_protect_np(enabled: i32);
-    fn pthread_jit_write_protect_supported_np() -> i32;
-    fn sys_icache_invalidate(start: *const c_void, size: usize);
-}
-
-// Constants for Apple Silicon mmap
-const MAP_JIT: i32 = 0x800;
-const MAP_PRIVATE: i32 = 0x0002;
-const MAP_ANON: i32 = 0x1000;
-
-
 pub struct BlinkVM {
     // pub mmtk: Box<MMTK<BlinkVM>>,
     pub symbol_table: RwLock<SymbolTable>,
@@ -62,7 +49,7 @@ impl BlinkVM {
     pub fn get_or_init_mmtk() -> &'static MMTK<BlinkVM> {
         GLOBAL_MMTK.get_or_init(|| {
             let mut builder = MMTKBuilder::new();
-            builder.options.plan.set(PlanSelector::SemiSpace);
+            builder.options.plan.set(PlanSelector::MarkSweep);
             let threads = *builder.options.threads;
             println!("Threads: {:?}", threads);
             mmtk::memory_manager::mmtk_init(&builder)

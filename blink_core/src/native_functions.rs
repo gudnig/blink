@@ -275,7 +275,7 @@ pub fn native_gc_stress(args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResul
     for _ in 0..n {
         let mut strings = Vec::new();
         for _ in 0..1000 {
-            let str = ctx.vm.alloc_str("hello");
+            let str = ctx.vm.alloc_str("hello this is a long string, so very long abcdefg hleloa asd adsg asf as asd asd as das asd adsa sdasdssdaf dsfdsas as ada sda sdasd asd asd asd asfd agdasd asf ");
             let val = ValueRef::Heap(GcPtr::new(str));
             strings.push(val);
         }
