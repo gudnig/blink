@@ -1,93 +1,78 @@
 // blink_core/src/runtime/mmtk/collection.rs
-// Collection implementation that works with thread-local mutators
+// Collection implementation that properly supports mutator_visitor
 
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::{hash::{DefaultHasher, Hash, Hasher}, sync::{atomic::{AtomicBool, Ordering}, Arc}};
+use mmtk::{
+    util::{Address, OpaquePointer, VMThread, VMWorkerThread}, 
+    vm::{Collection, GCThreadContext}, 
+    Mutator
+};
+use parking_lot::{Condvar, Mutex};
 
-use mmtk::{memory_manager, util::{Address, OpaquePointer, VMThread, VMWorkerThread}, vm::{ActivePlan, Collection, GCThreadContext}, Mutator};
-use crate::runtime::{gc_poll, init_gc_park, BlinkActivePlan, BlinkVM, MUTATORS};
+
+
+use crate::runtime::{BlinkActivePlan, BlinkVM, GC_COORDINATOR};
 
 pub struct BlinkCollection;
 
 impl Collection<BlinkVM> for BlinkCollection {
-    fn stop_all_mutators<F>(_tls: VMWorkerThread, mut mutator_visitor: F)
-where
-    F: FnMut(&'static mut Mutator<BlinkVM>),
+    fn stop_all_mutators<F>(_tls: VMWorkerThread, mutator_visitor: F)
+    where
+        F: FnMut(&'static mut Mutator<BlinkVM>),
     {
-        println!("Stopping all mutators for GC");
-
-        // First, signal all mutators to park
-        let (lock, _) = &*init_gc_park();
-        {
-            let mut is_gc = lock.lock();
-            *is_gc = true;
-        }
-
-        // Give mutators a chance to see the signal and park themselves
-        std::thread::yield_now();
+        // This is called by MMTk GC worker thread
+        // Pass the mutator_visitor to visit each mutator for stack scanning
         
-        if let Some(mutators) = MUTATORS.get() {
-            let map = mutators.lock().unwrap();
-            
-            // Process each mutator
-            for (thread_id, arc_mutex_mutator) in map.iter() {
-                // Try to lock with a timeout to detect deadlocks
-                match arc_mutex_mutator.try_lock() {
-                    Ok(mut guard) => {
-                        let static_mutator: &'static mut Mutator<BlinkVM> = unsafe {
-                            &mut *(guard.as_mut() as *mut _)
-                        };
-                        mutator_visitor(static_mutator);
-                    }
-                    Err(_) => {
-                        println!("Warning: Could not lock mutator for thread {:?} - it may be the requesting thread", thread_id);
-                        // Skip this mutator - it's likely the one that requested GC
-                    }
-                }
-            }
-        }
+        
+        println!("Stopping all mutators GC requested");
+        BlinkActivePlan::stop_all_mutators_impl(mutator_visitor);
+
     }
 
     fn resume_mutators(_tls: VMWorkerThread) {
-        println!("Resuming mutators after GC");
-
-        let (lock, cvar) = &*init_gc_park();
-        {
-            let mut is_gc = lock.lock();
-            *is_gc = false;
-        }
-        cvar.notify_all();
+        // This is called by MMTk GC worker thread  
+        
+        BlinkActivePlan::resume_all_mutators_impl();
+        
     }
 
     fn block_for_gc(_tls: mmtk::util::VMMutatorThread) {
-        println!("Blocking mutator for GC");
-        gc_poll();
+        // This is called on the specific mutator thread that triggered GC
+        // The thread should block itself and wait for GC to complete
+        
+        println!("Mutator {:?} blocking for GC", std::thread::current().id());
+
+        
+        // Block until GC is complete
+        BlinkActivePlan::gc_poll();
+        
+        println!("Mutator {:?} unblocked after GC", std::thread::current().id());
     }
 
     fn spawn_gc_thread(_tls: VMThread, ctx: GCThreadContext<BlinkVM>) {
-        println!("Spawning GC thread with context: {:?}", std::any::type_name::<GCThreadContext<BlinkVM>>());
-    
-        let mmtk = crate::runtime::GLOBAL_MMTK.get().unwrap();
+        let mmtk = crate::runtime::GLOBAL_MMTK.get()
+            .expect("MMTK not initialized");
+            
         match ctx {
-            mmtk::vm::GCThreadContext::Worker(worker) => {
-                println!("GC worker context received: spawning...");
+            GCThreadContext::Worker(worker) => {
+                println!("Spawning GC worker thread");
+                
                 std::thread::spawn(move || {
                     println!("GC worker thread started");
-    
+                    
+                    // Create TLS for this GC worker thread
                     let tls = VMWorkerThread(VMThread(OpaquePointer::from_address(
                         unsafe { Address::from_usize(thread_id_as_usize()) },
                     )));
-    
+                    
+                    // Run the GC worker
                     worker.run(tls, mmtk);
-    
+                    
                     println!("GC worker thread finished");
                 });
             }
-            other => {
-                println!("Received unhandled GCThreadContext variant: {:?}", std::any::type_name::<GCThreadContext<BlinkVM>>());
-            }
         }
     }
-    
 }
 
 fn thread_id_as_usize() -> usize {
@@ -96,4 +81,3 @@ fn thread_id_as_usize() -> usize {
     thread_id.hash(&mut hasher);
     hasher.finish() as usize
 }
-

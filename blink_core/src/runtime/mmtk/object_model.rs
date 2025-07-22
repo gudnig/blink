@@ -4,11 +4,10 @@
 
 use mmtk::{
     util::{
-        Address, ObjectReference,
-        copy::{CopySemantics, GCWorkerCopyContext},
+        copy::{CopySemantics, GCWorkerCopyContext}, Address, ObjectReference
     },
     vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, 
-        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}
+        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}, MutatorContext
 };
 use crate::{runtime::BlinkVM, value::ValueRef};
 
@@ -208,38 +207,6 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
 
 // Helper functions for allocation
 impl BlinkObjectModel {
-    /// Allocate a new object with the given type and size
-    pub fn alloc_with_type(
-        mutator: &mut mmtk::Mutator<BlinkVM>,
-        type_tag: TypeTag,
-        data_size: usize,
-    ) -> ObjectReference {
-
-        let total_size = (ObjectHeader::SIZE + data_size + 7) & !7;
-
-        
-        // Allocate memory
-        let start = mmtk::memory_manager::alloc(
-            mutator,
-            total_size,
-            8,
-            0,
-            mmtk::AllocationSemantics::Default,
-        );
-
-        
-        //println!("Allocated {:?} at {:?}, total size: {}, data size: {}, header size: {}", type_tag, start, total_size, data_size, ObjectHeader::SIZE);
-        
-        // Initialize header
-        unsafe {
-            let header_ptr = start.to_mut_ptr::<ObjectHeader>();
-            std::ptr::write(header_ptr, ObjectHeader::new(type_tag, data_size));
-        }
-        
-        // Return reference pointing after header
-        ObjectReference::from_raw_address(start + ObjectHeader::SIZE).unwrap()
-    }
-    
     /// Get the type tag of an object
     pub fn get_type_tag(object: ObjectReference) -> TypeTag {
         unsafe {

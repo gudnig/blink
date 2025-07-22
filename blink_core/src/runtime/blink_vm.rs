@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore, THREAD_TLS
+        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore
     }, telemetry::TelemetryEvent, value::{Callable, GcPtr, ValueRef}
 };
 
@@ -140,18 +140,18 @@ impl BlinkVM {
     }
 
     pub fn trigger_gc(&self) {
-        println!("Manually triggering GC...");
-        let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
+        // println!("Manually triggering GC...");
+        // let static_mmtk = GLOBAL_MMTK.get().expect("MMTK not initialized");
     
-        let tls = THREAD_TLS.with(|tls_cell| {
-            tls_cell.get().cloned().unwrap_or_else(|| {
-                println!("Initializing TLS for GC trigger thread...");
-                BlinkActivePlan::create_vm_mutator_thread_pre()
-            })
-        });
+        // let tls = THREAD_TLS.with(|tls_cell| {
+        //     tls_cell.get().cloned().unwrap_or_else(|| {
+        //         println!("Initializing TLS for GC trigger thread...");
+        //         BlinkActivePlan::create_vm_mutator_thread()
+        //     })
+        // });
     
-        mmtk::memory_manager::handle_user_collection_request(static_mmtk, tls);
-        println!("GC request completed");
+        // mmtk::memory_manager::handle_user_collection_request(static_mmtk, tls);
+        // println!("GC request completed");
     }
     
     // Add method to get allocation stats
