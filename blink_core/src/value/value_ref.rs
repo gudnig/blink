@@ -8,9 +8,8 @@ use mmtk::util::ObjectReference;
 
 use crate::{
     error::BlinkError,
-    eval::{EvalContext, EvalResult},
     future::BlinkFuture,
-    runtime::{ContextualBoundary, TypeTag, ValueBoundary},
+    runtime::{TypeTag},
     value::{
         is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_nil, pack_number,
         pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue,

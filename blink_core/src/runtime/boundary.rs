@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use crate::{
-    error::BlinkError, eval::EvalContext, runtime::BlinkVM, value::{
+    error::BlinkError, runtime::BlinkVM, value::{
         pack_bool, pack_nil, pack_number, unpack_immediate, HeapValue, ImmediateValue, IsolatedValue, ValueRef
     }
 };

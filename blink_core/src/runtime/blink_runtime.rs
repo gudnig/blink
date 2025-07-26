@@ -3,11 +3,7 @@ use std::sync::Arc;
 use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 
-use crate::{
-    env::Env,
-    eval::{EvalContext, EvalResult},
-    runtime::{BlinkVM, ExecutionContext, GoroutineId, GoroutineScheduler, SingleThreadScheduler},
-};
+use crate::runtime::{BlinkVM, EvalResult, ExecutionContext, GoroutineId, GoroutineScheduler, SingleThreadScheduler};
 
 pub static TOKIO_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
 pub static GLOBAL_RUNTIME: std::sync::OnceLock<Arc<BlinkRuntime<SingleThreadScheduler>>> = std::sync::OnceLock::new();

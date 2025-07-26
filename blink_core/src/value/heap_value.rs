@@ -1,7 +1,7 @@
 use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, eval::{EvalContext, EvalResult}, future::BlinkFuture, module::Module, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
+    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
 };
 
 #[derive(Debug)]

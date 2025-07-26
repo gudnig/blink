@@ -4,11 +4,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::error::{BlinkError, BlinkErrorType};
-use crate::eval::{eval_func, EvalResult};
-use crate::future::BlinkFuture;
-use crate::runtime::GLOBAL_VM;
-use crate::value::{unpack_immediate, Callable, GcPtr, ImmediateValue, NativeContext, NativeFn, ValueRef};
-use crate::env::Env;
+use crate::runtime::{EvalResult, GLOBAL_VM};
+use crate::value::{unpack_immediate, ImmediateValue, NativeContext, ValueRef};
 
 
 pub fn native_add(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {

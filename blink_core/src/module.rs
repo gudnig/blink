@@ -1,8 +1,6 @@
-use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
+use std::collections::{HashMap, HashSet};
 use libloading::Library;
-use mmtk::util::ObjectReference;
-use parking_lot::RwLock;
-use crate::{env::Env, runtime::BlinkVM, ValueRef};
+use crate::value::ValueRef;
 
 /// Module source specification
 /// // For heap storage, serialize to a simpler enum
@@ -108,6 +106,7 @@ impl ModuleRegistry {
     
 
     pub fn resolve_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {
+        //TODO overhaul qualified symbols
         let module = self.modules.get(&module_id)?;
         match module.exports.get(&symbol_id) {
             Some(val) => Some(*val),

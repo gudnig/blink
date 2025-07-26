@@ -3,7 +3,7 @@ use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
 use crate::runtime::{BlinkActivePlan, BlinkObjectModel, TypeTag, GLOBAL_MMTK};
-use crate::value::{Callable, GcPtr, SourceRange};
+use crate::value::{Callable, GcPtr, ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
 use crate::{runtime::BlinkVM, value::ValueRef};
@@ -140,6 +140,59 @@ impl BlinkVM {
             
             data_start
         })
+    }
+
+    pub fn alloc_parsed_value(&self, parsed: ParsedValueWithPos) -> ValueRef {
+        let value_ref = match parsed.value {
+            // Immediate values - pack directly
+            ParsedValue::Number(n) => ValueRef::number(n),
+            ParsedValue::Bool(b) => ValueRef::boolean(b),
+            ParsedValue::Symbol(id) => ValueRef::symbol(id),
+            ParsedValue::Keyword(id) => ValueRef::keyword(id),
+            ParsedValue::Nil => ValueRef::nil(),
+
+            // Complex values - alloc on gc heap
+            // functions are allocated during execution
+            // TODO: gradually allocate all values during execution
+            ParsedValue::String(s) => self.string_value(&s),
+
+            ParsedValue::List(items) => {
+                let converted_items: Vec<ValueRef> = items
+                    .into_iter()
+                    .map(|item| self.alloc_parsed_value(item))
+                    .collect();
+
+                self.list_value(converted_items)
+            }
+
+            ParsedValue::Vector(items) => {
+                let converted_items: Vec<ValueRef> = items
+                    .into_iter()
+                    .map(|item| self.alloc_parsed_value(item))
+                    .collect();
+
+                self.vector_value(converted_items)
+            }
+
+            ParsedValue::Map(pairs) => {
+                let value_pairs = pairs
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let key = self.alloc_parsed_value(k);
+                        let value = self.alloc_parsed_value(v);
+                        (key, value)
+                    })
+                    .collect();
+
+                self.map_value(value_pairs)
+            }
+        };
+
+        if let (Some(id), Some(pos)) = (value_ref.get_or_create_id(), parsed.pos) {
+            self.value_metadata.write().set_position(id, pos);
+        }
+
+        value_ref
     }
     
     

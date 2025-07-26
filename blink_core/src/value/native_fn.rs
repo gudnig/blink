@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    error::BlinkError, eval::EvalResult, future::BlinkFuture, runtime::{BlinkVM, ContextualBoundary, ValueBoundary, GLOBAL_VM}, value::{GcPtr, IsolatedValue, SourceRange, ValueRef}, BlinkHashMap, BlinkHashSet
+    error::BlinkError, 
+    future::BlinkFuture, 
+    runtime::{BlinkVM, ContextualBoundary, ValueBoundary, GLOBAL_VM, EvalResult}, value::{GcPtr, IsolatedValue, SourceRange, ValueRef}, collections::{BlinkHashMap, BlinkHashSet}
 };
 
 pub type IsolatedNativeFn =

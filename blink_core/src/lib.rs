@@ -10,6 +10,7 @@ pub mod module;
 pub mod future;
 pub mod runtime;
 pub mod collections;
+pub mod compiler;
 pub use env::Env;
 // TODO expose value creation
 pub use value::{ValueRef, HeapValue, ImmediateValue}; 

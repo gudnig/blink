@@ -1,10 +1,10 @@
 
-use crate::env::Env;
+
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 
 use crate::module::{Module, SerializedModuleSource};
 use crate::parser::{parse, tokenize};
-use crate::runtime::{BlinkVM, SymbolTable};
+use crate::runtime::{BlinkVM, EvalResult, ExecutionContext, SymbolTable};
 use crate::value::{GcPtr, ParsedValue, ParsedValueWithPos, ValueRef};
 
 use parking_lot::RwLock;
@@ -15,29 +15,11 @@ use std::sync::Arc;
 use std::thread::Thread;
 use std::time::Duration;
 
-use crate::eval::{eval, EvalContext, EvalResult};
+
 
 const DEBUG_POS: bool = true;
 
-fn get_final_value(mut result: EvalResult, ctx: &mut EvalContext) -> ValueRef {
-    let final_value = loop {
-        match result {
-            EvalResult::Value(value) => break value,
-            EvalResult::Suspended { future, resume } => {
-                // Poll until ready
-                let val = loop {
-                    if let Some(val) = future.try_poll() {
-                        break val;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                };
-                result = resume(val,  ctx);
-            }
-        }
-    };
 
-    final_value
-}
 
 pub async fn start_repl() {
     let config = Config::builder()
@@ -53,7 +35,8 @@ pub async fn start_repl() {
     vm_arc.symbol_table.read().print_all();
     
 
-    let mut ctx = EvalContext::new(vm_arc.global_env(), vm_arc.clone());
+    let mut ctx = ExecutionContext::new(vm_arc.clone());
+    
     let user_module_name = ctx.vm.symbol_table.write().intern("user");
 
     let user_module = Module {
@@ -63,13 +46,8 @@ pub async fn start_repl() {
         ready: true,
         imports: HashMap::new(),
     };
-    let _user_module_ref = ctx.register_module(user_module);
-    ctx.current_module = user_module_name;
+    let _user_module_ref = vm_arc.module_registry.write().register_module(user_module);
     
-
-    println!("Global env: {}", vm_arc.global_env());
-    
-
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
 
@@ -80,20 +58,20 @@ pub async fn start_repl() {
             Ok(parsed) => {
                 match parsed.value {
                     ParsedValue::Symbol(s) => {
-                        let name = ctx.get_symbol_name_from_id(s);
+                        let name = vm_arc.get_symbol_name(s);
                         if let Some(name) = name {
                             if name == "exit" {
                                 break;
                             }
                         }
-                        let current_result = run_line(parsed, &mut ctx);
-                        let final_value = get_final_value(current_result, &mut ctx);
+                        let current_result = run_line(parsed, vm_arc.clone(), &mut ctx);
+                        let final_value = current_result.unwrap();
                         println!("=> {}", final_value);
                     },
                 
                     _ => {
-                        let current_result = run_line(parsed, &mut ctx);
-                        let final_value = get_final_value(current_result, &mut ctx);
+                        let current_result = run_line(parsed, vm_arc.clone(), &mut ctx);
+                        let final_value = current_result.unwrap();
                         
 
                         println!("=> {}", final_value);
@@ -128,7 +106,7 @@ enum ReadError {
 
 fn read_multiline(
     rl: &mut Editor<(), FileHistory>,
-    ctx: &mut EvalContext,
+    ctx: &mut ExecutionContext,
 ) -> Result<ParsedValueWithPos, ReadError> {
     let mut lines = Vec::new();
 
@@ -154,10 +132,11 @@ fn read_multiline(
 
 fn run_line(
     parsed: ParsedValueWithPos,
-    ctx: &mut EvalContext,
-) -> EvalResult {
+    vm: Arc<BlinkVM>,
+    ctx: &mut ExecutionContext,
+) -> Result<ValueRef, String> {
 
     
-    let ast =  ctx.alloc_parsed_value(parsed);
-    eval(ast, ctx)
+    let ast =  vm.alloc_parsed_value(parsed);
+    ctx.compile_and_execute(ast)
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, EvalContext, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
 use crate::env::Env;
 
 impl BlinkVM {
@@ -26,6 +26,10 @@ impl BlinkVM {
             }
         }
         None
+    }
+
+    pub fn get_symbol_name(&self, id: u32) -> Option<String> {
+        self.symbol_table.read().get_symbol(id)
     }
 
     pub fn get_bool(&self, val: ValueRef) -> Option<bool> {

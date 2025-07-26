@@ -1,13 +1,7 @@
-use parking_lot::RwLock;
-
-use crate::error::{BlinkError, ParseErrorType};
-use crate::eval::EvalContext;
-use crate::runtime::{BlinkVM, SymbolTable};
-use crate::value::{Callable, ParsedValue, ParsedValueWithPos, SourcePos, SourceRange};
-use crate::env::Env;
-use crate::value::ValueRef;
+use crate::error::BlinkError;
+use crate::runtime::SymbolTable;
+use crate::value::{ParsedValue, ParsedValueWithPos, SourcePos, SourceRange};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 
 pub struct ReaderContext {

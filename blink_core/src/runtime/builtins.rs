@@ -1,10 +1,10 @@
 use crate::{
-    eval::{EvalContext, EvalResult},
+    runtime::EvalResult,
     native_functions::{
         native_add, native_complete_future, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
     },
     runtime::BlinkVM,
-    value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}, Env,
+    value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}, env::Env,
 };
 
 impl BlinkVM {

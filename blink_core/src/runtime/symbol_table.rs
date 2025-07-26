@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::runtime::SpecialFormId;
+
 // TODO: strategic symbol assignment for array index access
 pub struct SymbolTable {
     // Simple symbols: "foo", "bar", "add"
@@ -10,8 +12,7 @@ pub struct SymbolTable {
     qualified_lookup: HashMap<(u32, u32), u32>,
     qualified_symbols: Vec<(u32, u32)>, // For reverse lookup
     
-    // Separate ID counters to prevent overlap
-    next_simple_id: u32,
+    
     next_qualified_id: u32,
 }
 
@@ -20,14 +21,31 @@ impl SymbolTable {
     const QUALIFIED_ID_OFFSET: u32 = 0x80000000;
     
     pub fn new() -> Self {
-        SymbolTable {
+        let mut table = SymbolTable {
             strings: Vec::new(),
             lookup: HashMap::new(),
             qualified_lookup: HashMap::new(),
             qualified_symbols: Vec::new(),
-            next_simple_id: 32,
+            
             next_qualified_id: Self::QUALIFIED_ID_OFFSET,
+        };
+
+        table.init_special_forms();
+        table
+    }
+
+    fn init_special_forms(&mut self) {
+        // Order matches SpecialFormId enum
+        for i in 0..21 { 
+            let special_form = SpecialFormId::from_u32(i);
+            let name = special_form.to_string();
+            let id = self.intern(name);
+            assert_eq!(id, i as u32, "Special form '{}' got wrong ID", name);
         }
+    }
+    
+    pub fn is_special_form(&self, symbol_id: u32) -> bool {
+        symbol_id < 23  // Number of special forms
     }
     
     pub fn print_all(&self) {
@@ -63,14 +81,7 @@ impl SymbolTable {
         if let Some(&id) = self.lookup.get(name) {
             id
         } else {
-            let id = self.next_simple_id;
-            self.next_simple_id += 1;
-            
-            // Ensure we don't overflow into qualified ID space
-            if self.next_simple_id >= Self::QUALIFIED_ID_OFFSET {
-                panic!("Too many simple symbols - exceeded reserved ID space");
-            }
-            
+            let id = self.strings.len() as u32;  // Index = ID
             self.strings.push(name.to_string());
             self.lookup.insert(name.to_string(), id);
             id

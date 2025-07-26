@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{eval::EvalContext, value::SourceRange, value::{GcPtr, ValueRef}};
+use crate::{value::SourceRange, value::{GcPtr, ValueRef}};
 
 pub type ValueId = u64;
 
@@ -59,12 +59,5 @@ impl ValueRef {
                     }
             ValueRef::Native(ptr) => Some(*ptr as u64),
         }
-    }
-    
-    pub fn with_position(self, pos: SourceRange, ctx: &mut EvalContext) -> Self {
-        if let Some(id) = self.get_or_create_id() {
-            ctx.vm.value_metadata.write().set_position(id, pos);
-        }
-        self
     }
 }

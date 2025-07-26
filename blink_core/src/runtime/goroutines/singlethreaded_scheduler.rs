@@ -6,7 +6,7 @@ use std::{
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::runtime::{BlinkVM, GoroutineScheduler, SchedulerState};
+use crate::runtime::{BlinkVM, EvalResult, GoroutineScheduler, SchedulerState};
 
 // use crate::{
 //     eval::{EvalContext, EvalResult},
@@ -34,7 +34,7 @@ impl GoroutineScheduler for SingleThreadScheduler {
     
     fn spawn<F>(&self, vm: Arc<BlinkVM>, task: F) -> super::GoroutineId
     where 
-        F: FnOnce(Arc<BlinkVM>) -> crate::eval::EvalResult + Send + 'static {
+        F: FnOnce(Arc<BlinkVM>) -> EvalResult + Send + 'static {
         
         0
     }

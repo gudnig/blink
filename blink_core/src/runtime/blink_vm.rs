@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
+        BlinkActivePlan, CompiledFunction, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
     }, telemetry::TelemetryEvent, value::{Callable, FunctionHandle, FutureHandle, GcPtr, SourceRange, ValueRef}
 };
 
@@ -69,10 +69,40 @@ impl SpecialFormId {
             _ => panic!("Invalid special form id: {}", id),
         }
     }
+
+    pub fn to_string(&self) -> &str {
+        match self {
+            SpecialFormId::If => "if",
+            SpecialFormId::Def => "def",
+            SpecialFormId::Macro => "macro",
+            SpecialFormId::Rmac => "rmac",
+            SpecialFormId::Quasiquote => "quasiquote",
+            SpecialFormId::Unquote => "unquote",
+            SpecialFormId::UnquoteSplicing => "unquote-splicing",
+            SpecialFormId::Deref => "deref",
+            SpecialFormId::Go => "go",
+            SpecialFormId::Apply => "apply",
+            SpecialFormId::Fn => "fn",
+            SpecialFormId::Do => "do",
+            SpecialFormId::Let => "let",
+            SpecialFormId::And => "and",
+            SpecialFormId::Or => "or",
+            SpecialFormId::Try => "try",
+            SpecialFormId::Imp => "imp",
+            SpecialFormId::Mod => "mod",
+            SpecialFormId::Load => "load",
+            SpecialFormId::Loop => "loop",
+            SpecialFormId::Recur => "recur",
+            SpecialFormId::Eval => "eval",
+            SpecialFormId::Quote => "quote",
+        }
+    }
 }
+
 
 pub struct BlinkVM {
     // pub mmtk: Box<MMTK<BlinkVM>>,
+    
     pub symbol_table: RwLock<SymbolTable>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub module_registry: RwLock<ModuleRegistry>,
@@ -167,6 +197,7 @@ impl BlinkVM {
         GLOBAL_VM.set(vm_arc.clone()).expect("GLOBAL_VM already initialized");
         vm_arc.clone()
     }
+    
 
     fn init_global_env(&mut self) -> ObjectReference {
         let global_env = self.alloc_env(Env::new());
@@ -174,6 +205,13 @@ impl BlinkVM {
 
         
         global_env
+    }
+
+    pub fn alloc_compiled_function(&self, bytecode: CompiledFunction) -> ObjectReference {
+        // Store the compiled bytecode in a heap object
+        // This would be similar to your existing alloc_user_defined_fn
+        // but stores CompiledBytecode instead of raw expressions
+        todo!("Allocate compiled function object")
     }
 
     pub fn register_function(&self, handle: ValueRef) -> FunctionHandle {
@@ -278,6 +316,12 @@ impl BlinkVM {
         st.intern_special_form(SpecialFormId::Mod as u32,"mod");
         st.intern_special_form(SpecialFormId::Load as u32,"load");
         st.intern_special_form(SpecialFormId::Macro as u32,"macro");
+    }
+
+    pub fn resolve_global_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {
+        
+        let module_registry = self.module_registry.read();
+        module_registry.resolve_symbol(module_id, symbol_id)
     }
 
 

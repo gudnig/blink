@@ -6,8 +6,8 @@ use tokio::sync::oneshot;
 use parking_lot::RwLock;
 
 use crate::future::BlinkFuture;
+use crate::runtime::EvalResult;
 use crate::{
-    eval::{EvalContext, EvalResult},
     value::ValueRef,
     runtime::BlinkVM,
     env::Env,
