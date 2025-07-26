@@ -1,0 +1,1562 @@
+impl ExecutionContext {
+    
+}
+
+
+impl ExecutionContext {
+
+    fn snapshot(&self) -> ExecutionSnapshot {
+        ExecutionSnapshot {
+            call_stack: self.call_stack.clone(),
+            register_stack: self.register_stack.clone(),
+            current_module: self.current_module,
+        }
+    }
+    
+    fn restore_snapshot(&mut self, snapshot: ExecutionSnapshot) {
+        self.call_stack = snapshot.call_stack;
+        self.register_stack = snapshot.register_stack;
+        self.current_module = snapshot.current_module;
+    }
+
+    pub fn run(&mut self) -> EvalResult {
+        while !self.call_stack.is_empty() {
+            match self.execute_current_frame() {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    
+                    // Pop the completed frame
+                    let completed_frame = self.call_stack.pop().unwrap();
+                    
+                    // If this was the last frame, return the result
+                    if self.call_stack.is_empty() {
+                        return EvalResult::Value(val);
+                    }
+                    
+                    // Otherwise, store result in caller's return register
+                    // (you'll need to define a return register convention)
+                    if let Some(caller_frame) = self.call_stack.last() {
+                        let return_reg = caller_frame.reg_start; // or dedicated return register
+                        self.register_stack[return_reg] = val;
+                    }
+                }
+                
+                EvalResult::Suspended { future, resume } => {
+                    // Return suspension - the resume will continue from current state
+                    return EvalResult::Suspended { future, resume };
+                }
+            }
+        }
+        
+        EvalResult::Value(ValueRef::nil()) // Empty stack
+    }
+    
+
+    
+    fn execute_current_frame(&mut self) -> EvalResult {
+        let frame_idx = self.call_stack.len() - 1;
+        
+        match &self.call_stack[frame_idx].func {
+            FunctionRef::UserDefined(_) | FunctionRef::Macro(_) => {
+                // Both use the same execution logic!
+                self.execute_callable_frame()
+            }
+            FunctionRef::SpecialForm(form_id) => {
+                self.execute_special_form_frame(*form_id)
+            }
+            FunctionRef::Native(_) => {
+                self.execute_native_frame()
+            }
+        }
+    }
+
+    fn setup_frame(&mut self, func_ref: FunctionRef, args: &[ValueRef]) -> Result<(), String> {
+        let extra_regs = match func_ref {
+            FunctionRef::UserDefined(_) | FunctionRef::Macro(_) => 10,
+            FunctionRef::Native(_) => 1,
+            FunctionRef::SpecialForm(_) => 5,
+        };
+        
+        let register_base = self.register_stack.len();
+        let register_count = args.len() + extra_regs;
+        
+        // Put args in registers
+        self.register_stack.resize(register_base + register_count, ValueRef::nil());
+        for (i, arg) in args.iter().enumerate() {
+            self.register_stack[register_base + i] = *arg;
+        }
+
+        
+        // Symbol bindings only for user-defined functions and macros
+        let (symbol_bindings, current_module) = match func_ref {
+            FunctionRef::UserDefined(obj_ref) | FunctionRef::Macro(obj_ref) => {
+                let callable = GcPtr::new(obj_ref).read_callable();
+                (callable.params.iter().enumerate()
+                    .take(args.len())
+                    .map(|(i, &param_id)| (param_id, i as u8))
+                    .collect(), callable.module)
+            }
+            _ => (vec![], self.current_module),
+        };
+        
+        let frame = CallFrame {
+            func: func_ref,
+            pc: 0,
+            reg_start: register_base,
+            reg_count: register_count as u8,
+            current_module,
+            symbol_bindings,
+        };
+        
+        self.call_stack.push(frame);
+        Ok(())
+    }
+    
+    fn execute_callable_frame(&mut self) -> EvalResult {
+        let frame_idx = self.call_stack.len() - 1;
+        let func_ref = match self.call_stack[frame_idx].func {
+            FunctionRef::UserDefined(obj_ref) | FunctionRef::Macro(obj_ref) => obj_ref,
+            _ => unreachable!(),
+        };
+        
+        let callable = GcPtr::new(func_ref).read_callable();
+        let body = callable.body.clone();
+        
+        // Same execution logic for both!
+        while self.call_stack[frame_idx].pc < body.len() {
+            let expr = body[self.call_stack[frame_idx].pc];
+            
+            match self.execute_expression(expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    
+                    // Store result
+                    let frame = &self.call_stack[frame_idx];
+                    self.register_stack[frame.reg_start] = val;
+                    self.call_stack[frame_idx].pc += 1;
+                }
+                
+                EvalResult::Suspended { future, resume } => {
+                    // Same suspension handling for both!
+                    return EvalResult::Suspended { future, resume };
+                }
+            }
+        }
+        
+        // Different post-processing:
+        let result = {
+            let frame = &self.call_stack[frame_idx];
+            self.register_stack[frame.reg_start]
+        };
+        
+        match self.call_stack[frame_idx].func {
+            FunctionRef::UserDefined(_) => {
+                // Functions: return result directly
+                EvalResult::Value(result)
+            }
+            FunctionRef::Macro(_) => {
+                // Macros: evaluate the expansion
+                // (This will create a new evaluation, possibly new frames)
+                self.execute_expression(result)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn execute_special_form_frame(&mut self, form_id: SpecialFormId) -> EvalResult {
+        // Push minimal frame for stack trace
+        let frame = CallFrame {
+            func: FunctionRef::SpecialForm(form_id),
+            pc: 0,
+            reg_start: self.register_stack.len(),
+            reg_count: 2, // Minimal registers for special form
+            current_module: self.current_module,
+            symbol_bindings: vec![]
+        };
+        self.call_stack.push(frame);
+        
+
+        // Tree walker for no
+        //TODO bytecode interpreter
+        // let result = match form_id {
+        //     SpecialFormId::Def => eval_def(args),
+        //     SpecialFormId::Let => self.execute_let(args),
+        //     SpecialFormId::If => self.execute_if(args),
+        //     // ... dispatch table
+        // };
+        
+        self.call_stack.pop();
+        result
+    }
+
+    fn execute_native_frame(&mut self) -> EvalResult {
+        let frame_idx = self.call_stack.len() - 1;
+
+        let tagged_ptr = match self.call_stack[frame_idx].func {
+            FunctionRef::Native(fn_ptr) => fn_ptr,
+            _ => unreachable!(),
+        };
+
+        let ptr = tagged_ptr & !1; // Clear the tag bit
+
+        if tagged_ptr & 1 == 0 {
+            // Tag 0 = Isolated function
+            let boxed_fn_ptr = ptr as *const IsolatedNativeFn;
+            let boxed_fn = unsafe { &*boxed_fn_ptr };
+
+            // Convert args and call
+            let mut boundary = ContextualBoundary::new(self.vm.clone());
+            let isolated_args: Result<Vec<_>, _> = args
+                .iter()
+                .map(|arg| boundary.extract_isolated(*arg))
+                .collect();
+
+            match isolated_args {
+                Ok(isolated_args) => match boxed_fn(isolated_args) {
+                    Ok(result) => EvalResult::Value(boundary.alloc_from_isolated(result)),
+                    Err(e) => EvalResult::Value(self.vm.eval_error(&e.to_string())),
+                },
+                Err(e) => EvalResult::Value(self.vm.eval_error(&e.to_string())),
+            }
+        } else {
+            // Tag 1 = Contextual function
+            let boxed_fn_ptr = ptr as *const ContextualNativeFn;
+            let boxed_fn = unsafe { &*boxed_fn_ptr };
+            let mut ctx = NativeContext::new(&self.vm);
+            // Call directly
+            boxed_fn(args, &mut ctx)
+        }
+    }
+
+    fn function_ref_from_value_ref(&self, value_ref: ValueRef, depth: usize) -> Result<FunctionRef, String> {
+        if depth > 10 {
+            return Err("Symbol resolution too deep".to_string());
+        }
+
+
+        match value_ref {
+            ValueRef::Heap(gc_ptr) => {
+                let type_tag = gc_ptr.type_tag();
+                match type_tag {
+                    TypeTag::UserDefinedFunction => {
+                        Ok(FunctionRef::UserDefined(gc_ptr.0))
+                    }
+                    TypeTag::Macro => {
+                        Ok(FunctionRef::Macro(gc_ptr.0))
+                    }
+                    _ => Err("Not callable.".to_string()),
+                }
+            }
+            ValueRef::Native(fn_ptr) => {
+                Ok(FunctionRef::Native(fn_ptr))
+            }
+            ValueRef::Immediate(packed) => {
+                if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                    if symbol_id < 32 {
+                        Ok(FunctionRef::SpecialForm(SpecialFormId::from_u32(symbol_id)))
+                    } else {
+                        let val = self.resolve_symbol(symbol_id).ok_or("Symbol not found".to_string())?;
+                        self.function_ref_from_value_ref(val, depth + 1)
+                    }
+                } else {
+                    Err("Not callable.".to_string())
+                }
+            }
+            
+        }
+    }
+
+    fn execute_list(&mut self, items: Vec<ValueRef>) -> EvalResult {
+
+        // Handle special forms directly (no frame setup)
+        if let ValueRef::Immediate(packed) = items[0] {
+            if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                if symbol_id < 32 {
+                    let form_id = SpecialFormId::from_u32(symbol_id);
+                    return self.execute_special_form_frame(form_id);
+                }
+            }
+        }
+        
+        // Regular function call - complete the entire sequence
+        let func_ref = self.function_ref_from_value_ref(items[0], 0)
+            .map_err(|e| self.vm.eval_error(&e))?;
+        
+        // Evaluate arguments based on function type
+        let args = match func_ref {
+            FunctionRef::Macro(_) => items[1..].to_vec(), // Unevaluated
+            _ => {
+                let mut evaluated = Vec::new();
+                for arg in &items[1..] {
+                    match self.execute_expression(*arg) {
+                        EvalResult::Value(val) => evaluated.push(val),
+                        suspended => return suspended,
+                    }
+                }
+                evaluated
+            }
+        };
+        
+        // Set up frame and execute it completely
+        if let Err(e) = self.setup_frame(func_ref, &args) {
+            return EvalResult::Value(self.vm.eval_error(&e));
+        }
+        
+        // Execute the new frame to completion
+        let result = self.execute_current_frame();
+        
+        // Pop the frame we just executed
+        self.call_stack.pop();
+        
+        result
+        
+    }
+
+    pub fn resolve_local_symbol(&self, symbol_id: u32) -> Option<ValueRef> {
+        let current_frame = self.call_stack.last();
+        if let Some(frame) = current_frame {
+            let symbol_binding = frame.symbol_bindings.binary_search_by_key(&symbol_id, |(id, _)| *id);
+            if let Ok(reg_index) = symbol_binding {
+                return Some(self.register_stack[frame.reg_start + reg_index]);
+            }
+        }
+        None
+    }
+
+    pub fn resolve_symbol(&self, symbol_id: u32) -> Option<ValueRef> {
+        let current_frame = self.call_stack.last();
+        if let Some(frame) = current_frame {
+            let symbol_binding = frame.symbol_bindings.binary_search_by_key(&symbol_id, |(id, _)| *id);
+            if let Ok(reg_index) = symbol_binding {
+
+                return Some(self.register_stack[frame.reg_start + reg_index]);
+            } 
+            return self.vm.module_registry.read().resolve_symbol(frame.current_module, symbol_id);
+        }
+
+        None
+    }
+
+    pub fn execute_expression(&mut self, expr: ValueRef) -> EvalResult {
+        
+        match expr {
+            ValueRef::Immediate(packed) => {
+                match unpack_immediate(packed) {
+                    ImmediateValue::Number(_)
+                                | ImmediateValue::Bool(_)
+                                | ImmediateValue::Keyword(_)
+                                | ImmediateValue::Nil => {
+                                    // Self-evaluating
+                                    EvalResult::Value(expr)
+                                }
+                    ImmediateValue::Symbol(symbol_id) => {
+                                    match self.resolve_symbol(symbol_id) {
+                                        Some(val) => EvalResult::Value(val),
+                                        None => EvalResult::Value(self.vm.eval_error("Symbol not found")),
+                                    }
+                                }
+                }
+            }
+            ValueRef::Heap(gc_ptr) => {
+                let heap_value = gc_ptr.to_heap_value();
+                match heap_value {
+                    HeapValue::List(items) => self.eval_list(items),
+                    _ => EvalResult::Value(expr),
+                }
+            },
+            ValueRef::Native(_) => todo!(),
+        }
+    }
+}
+
+
+
+impl ExecutionContext {
+    
+    /// Execute def special form: (def symbol value)
+    pub fn execute_def(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Value(self.vm.eval_error("def expects 2 arguments: symbol and value"));
+        }
+        
+        // First argument must be a symbol
+        let symbol_id = if let ValueRef::Immediate(packed) = args[0] {
+            if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                id
+            } else {
+                return EvalResult::Value(self.vm.eval_error("def first argument must be a symbol"));
+            }
+        } else {
+            return EvalResult::Value(self.vm.eval_error("def first argument must be a symbol"));
+        };
+        
+        // Evaluate the second argument (the value)
+        let value = match self.execute_expression(args[1]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Store in current module's environment
+        let current_frame = self.call_stack.last();
+        let module_id = current_frame.map(|f| f.current_module).unwrap_or(self.current_module);
+        
+        // Add to module registry
+        self.vm.module_registry.write().define_symbol(module_id, symbol_id, value);
+        
+        EvalResult::Value(value) // Return the value that was defined
+    }
+    
+    /// Execute if special form: (if condition then-expr else-expr?)
+    pub fn execute_if(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 || args.len() > 3 {
+            return EvalResult::Value(self.vm.eval_error("if expects 2 or 3 arguments: condition, then-expr, and optional else-expr"));
+        }
+        
+        // Evaluate condition
+        let condition = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Check if condition is truthy
+        if condition.is_truthy() {
+            // Evaluate then-expr
+            self.execute_expression(args[1])
+        } else if args.len() == 3 {
+            // Evaluate else-expr
+            self.execute_expression(args[2])
+        } else {
+            // No else branch, return nil
+            EvalResult::Value(ValueRef::nil())
+        }
+    }
+    
+    /// Execute quote special form: (quote expr)
+    pub fn execute_quote(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Value(self.vm.eval_error("quote expects 1 argument"));
+        }
+        
+        // Return the argument without evaluating it
+        EvalResult::Value(args[0])
+    }
+    
+    /// Execute do special form: (do expr1 expr2 ... exprN)
+    pub fn execute_do(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.is_empty() {
+            return EvalResult::Value(ValueRef::nil());
+        }
+        
+        let mut result = ValueRef::nil();
+        
+        // Evaluate each expression in sequence
+        for &expr in args {
+            match self.execute_expression(expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    result = val; // Keep the last result
+                }
+                suspended => return suspended,
+            }
+        }
+        
+        EvalResult::Value(result)
+    }
+    
+    /// Execute let special form: (let [var1 val1 var2 val2 ...] body1 body2 ...)
+    pub fn execute_let(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Value(self.vm.eval_error("let expects at least 2 arguments: bindings vector and body"));
+        }
+        
+        // First argument should be a vector of bindings
+        let bindings = if let Some(bindings_vec) = args[0].get_vec() {
+            bindings_vec
+        } else {
+            return EvalResult::Value(self.vm.eval_error("let first argument must be a vector of bindings"));
+        };
+        
+        if bindings.len() % 2 != 0 {
+            return EvalResult::Value(self.vm.eval_error("let bindings must be pairs of symbol and value"));
+        }
+        
+        // Set up new frame with extended registers for let bindings
+        let register_base = self.register_stack.len();
+        let binding_count = bindings.len() / 2;
+        let register_count = binding_count + 5; // bindings + working space
+        
+        self.register_stack.resize(register_base + register_count, ValueRef::nil());
+        
+        // Evaluate bindings one by one and store in registers
+        let mut symbol_bindings = Vec::new();
+        for i in 0..binding_count {
+            let symbol_idx = i * 2;
+            let value_idx = i * 2 + 1;
+            
+            // Extract symbol
+            let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
+                if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                    id
+                } else {
+                    return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+                }
+            } else {
+                return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+            };
+            
+            // Evaluate value
+            let value = match self.execute_expression(bindings[value_idx]) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    val
+                }
+                suspended => return suspended,
+            };
+            
+            // Store in register
+            self.register_stack[register_base + i] = value;
+            symbol_bindings.push((symbol_id, i as u8));
+        }
+        
+        // Create let frame
+        let current_module = self.call_stack.last().map(|f| f.current_module).unwrap_or(self.current_module);
+        let frame = CallFrame {
+            func: FunctionRef::SpecialForm(SpecialFormId::Let),
+            pc: 0,
+            reg_start: register_base,
+            reg_count: register_count as u8,
+            current_module,
+            symbol_bindings,
+        };
+        
+        self.call_stack.push(frame);
+        
+        // Execute body expressions
+        let mut result = ValueRef::nil();
+        for &body_expr in &args[1..] {
+            match self.execute_expression(body_expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        self.call_stack.pop(); // Clean up frame
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                }
+                suspended => return suspended, // Frame stays on stack for resumption
+            }
+        }
+        
+        // Clean up frame and return result
+        self.call_stack.pop();
+        EvalResult::Value(result)
+    }
+    
+    /// Execute and special form: (and expr1 expr2 ... exprN)
+    pub fn execute_and(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.is_empty() {
+            return EvalResult::Value(ValueRef::boolean(true));
+        }
+        
+        let mut result = ValueRef::boolean(true);
+        
+        // Evaluate expressions one by one, short-circuiting on falsy values
+        for &expr in args {
+            match self.execute_expression(expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                    if !val.is_truthy() {
+                        // Short-circuit on falsy value
+                        return EvalResult::Value(val);
+                    }
+                }
+                suspended => return suspended,
+            }
+        }
+        
+        EvalResult::Value(result) // Return the last truthy value
+    }
+    
+    /// Execute or special form: (or expr1 expr2 ... exprN)
+    pub fn execute_or(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.is_empty() {
+            return EvalResult::Value(ValueRef::nil());
+        }
+        
+        // Evaluate expressions one by one, short-circuiting on truthy values
+        for &expr in args {
+            match self.execute_expression(expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    if val.is_truthy() {
+                        // Short-circuit on truthy value
+                        return EvalResult::Value(val);
+                    }
+                    // Continue with next expression if falsy
+                }
+                suspended => return suspended,
+            }
+        }
+        
+        // All expressions were falsy, return nil (or the last falsy value)
+        EvalResult::Value(ValueRef::nil())
+    }
+    
+    /// Execute fn special form: (fn [param1 param2 ...] body1 body2 ...)
+    pub fn execute_fn(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Value(self.vm.eval_error("fn expects at least 2 arguments: parameter vector and body"));
+        }
+        
+        // Extract parameters
+        let params_vec = if let Some(params) = args[0].get_vec() {
+            params
+        } else {
+            return EvalResult::Value(self.vm.eval_error("fn first argument must be a vector of parameters"));
+        };
+        
+        // Convert parameter ValueRefs to symbol IDs
+        let mut param_ids = Vec::new();
+        let mut is_variadic = false;
+        
+        let mut i = 0;
+        while i < params_vec.len() {
+            if let ValueRef::Immediate(packed) = params_vec[i] {
+                if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                    // Check for variadic marker (&)
+                    if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
+                        if symbol_name == "&" {
+                            if i + 1 < params_vec.len() {
+                                // Next symbol is the rest parameter
+                                if let ValueRef::Immediate(packed) = params_vec[i + 1] {
+                                    if let ImmediateValue::Symbol(rest_id) = unpack_immediate(packed) {
+                                        param_ids.push(rest_id);
+                                        is_variadic = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            return EvalResult::Value(self.vm.eval_error("& must be followed by a parameter name"));
+                        } else {
+                            param_ids.push(symbol_id);
+                        }
+                    } else {
+                        return EvalResult::Value(self.vm.eval_error("Invalid symbol in parameter list"));
+                    }
+                } else {
+                    return EvalResult::Value(self.vm.eval_error("fn parameters must be symbols"));
+                }
+            } else {
+                return EvalResult::Value(self.vm.eval_error("fn parameters must be symbols"));
+            }
+            i += 1;
+        }
+
+        
+        
+        // Create function object
+        let current_module = self.call_stack.last().map(|f| f.current_module).unwrap_or(self.current_module);
+        let callable = crate::value::Callable {
+            params: param_ids,
+            body: args[1..].to_vec(),
+            module: current_module,
+            is_variadic,
+            env: todo!(),
+        };
+        
+        let func_ref = self.vm.alloc_user_defined_fn(callable);
+        EvalResult::Value(ValueRef::Heap(GcPtr::new(func_ref)))
+    }
+
+    fn capture_current_env(&self) -> ObjectReference {
+        // Create an environment object with current bindings
+        let mut env_map = std::collections::HashMap::new();
+        
+        // Walk up the call stack and capture all local bindings
+        for frame in self.call_stack.iter().rev() {
+            for &(symbol_id, reg_offset) in &frame.symbol_bindings {
+                if !env_map.contains_key(&symbol_id) { // Don't shadow
+                    let value = self.register_stack[frame.reg_start + reg_offset as usize];
+                    env_map.insert(symbol_id, value);
+                }
+            }
+            
+            // Stop at function boundaries (don't capture across functions)
+            if matches!(frame.func, FunctionRef::UserDefined(_) | FunctionRef::Macro(_)) {
+                break;
+            }
+        }
+        
+        // Allocate environment object
+        self.vm.alloc_captured_env(env_map)
+    }
+    
+    /// Execute apply special form: (apply func args-list)
+    pub fn execute_apply(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Value(self.vm.eval_error("apply expects 2 arguments: function and argument list"));
+        }
+        
+        // Evaluate the function
+        let func = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Evaluate the argument list
+        let args_list = match self.execute_expression(args[1]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Extract arguments from list/vector
+        let args_vec = if let Some(list) = args_list.get_list() {
+            list
+        } else if let Some(vec) = args_list.get_vector() {
+            vec
+        } else {
+            return EvalResult::Value(self.vm.eval_error("apply second argument must be a list or vector"));
+        };
+        
+        // Create a new list with func as head and args as tail, then execute it
+        let mut call_list = vec![func];
+        call_list.extend(args_vec);
+        
+        self.execute_list(call_list)
+    }
+    
+    /// Execute try special form: (try expr catch-expr)
+    pub fn execute_try(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Value(self.vm.eval_error("try expects 2 arguments: expression and catch expression"));
+        }
+        
+        // Try to evaluate the first expression
+        match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    // If it's an error, evaluate the catch expression
+                    self.execute_expression(args[1])
+                } else {
+                    // If successful, return the value
+                    EvalResult::Value(val)
+                }
+            }
+            suspended => suspended, // Propagate suspension
+        }
+    }
+    
+    /// Execute imp special form: (imp "module-path" [import-options])
+    pub fn execute_imp(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.is_empty() || args.len() > 2 {
+            return EvalResult::Value(self.vm.eval_error("imp expects 1-2 arguments: module path and optional options"));
+        }
+        
+        // Get module path
+        let module_path = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        let path_string = if let Some(s) = module_path.get_string() {
+            s
+        } else {
+            return EvalResult::Value(self.vm.eval_error("imp first argument must be a string"));
+        };
+        
+        // TODO: Handle import options if provided (args[1])
+        
+        // Get current module for context
+        let current_module = self.call_stack.last()
+            .map(|f| f.current_module)
+            .unwrap_or(self.current_module);
+        
+        // Use VM's module loading system
+        match self.vm.load_module(&path_string, current_module) {
+            Ok(_) => EvalResult::Value(ValueRef::nil()),
+            Err(e) => EvalResult::Value(self.vm.eval_error(&format!("Failed to import module {}: {}", path_string, e))),
+        }
+    }
+    
+    /// Execute mod special form: (mod module-name & body)
+    pub fn execute_mod(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.is_empty() {
+            return EvalResult::Value(self.vm.eval_error("mod expects at least 1 argument: module name"));
+        }
+        
+        // Get module name
+        let module_name = if let Some(s) = args[0].get_string() {
+            s
+        } else if let ValueRef::Immediate(packed) = args[0] {
+            if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                self.vm.symbol_table.read().get_symbol(symbol_id)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unnamed".to_string())
+            } else {
+                return EvalResult::Value(self.vm.eval_error("mod first argument must be a string or symbol"));
+            }
+        } else {
+            return EvalResult::Value(self.vm.eval_error("mod first argument must be a string or symbol"));
+        };
+        
+        // Create new module and switch context
+        let old_module = self.current_module;
+        let new_module_id = self.vm.create_module(&module_name);
+        self.current_module = new_module_id;
+        
+        // Execute body in new module context
+        let mut result = ValueRef::nil();
+        for &expr in &args[1..] {
+            match self.execute_expression(expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        // Restore old module on error
+                        self.current_module = old_module;
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                }
+                suspended => return suspended,
+            }
+        }
+        
+        // Restore old module
+        self.current_module = old_module;
+        EvalResult::Value(result)
+    }
+    
+    /// Execute load special form: (load source-spec)
+    pub fn execute_load(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Value(self.vm.eval_error("load expects 1 argument: source specification"));
+        }
+        
+        // Evaluate the source spec
+        let source_spec = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Handle different source types
+        if let Some(path) = source_spec.get_string() {
+            // String path - load as file
+            match self.vm.load_file(&path) {
+                Ok(_) => EvalResult::Value(ValueRef::nil()),
+                Err(e) => EvalResult::Value(self.vm.eval_error(&format!("Failed to load file {}: {}", path, e))),
+            }
+        } else if let Some(map) = source_spec.get_map() {
+            // Map with :type and other options
+            // TODO: Parse map for :type :file/:native/:url etc.
+            EvalResult::Value(self.vm.eval_error("Map-based load specifications not yet implemented"))
+        } else {
+            EvalResult::Value(self.vm.eval_error("load argument must be a string path or specification map"))
+        }
+    }
+    
+    /// Execute macro special form: (macro [params] & body)
+    pub fn execute_macro(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Value(self.vm.eval_error("macro expects at least 2 arguments: parameter vector and body"));
+        }
+        
+        // Extract parameters (same logic as fn)
+        let params_vec = if let Some(params) = args[0].get_vec() {
+            params
+        } else {
+            return EvalResult::Value(self.vm.eval_error("macro first argument must be a vector of parameters"));
+        };
+        
+        // Convert parameter ValueRefs to symbol IDs
+        let mut param_ids = Vec::new();
+        let mut is_variadic = false;
+        
+        let mut i = 0;
+        while i < params_vec.len() {
+            if let ValueRef::Immediate(packed) = params_vec[i] {
+                if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                    // Check for variadic marker (&)
+                    if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
+                        if symbol_name == "&" {
+                            if i + 1 < params_vec.len() {
+                                // Next symbol is the rest parameter
+                                if let ValueRef::Immediate(packed) = params_vec[i + 1] {
+                                    if let ImmediateValue::Symbol(rest_id) = unpack_immediate(packed) {
+                                        param_ids.push(rest_id);
+                                        is_variadic = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            return EvalResult::Value(self.vm.eval_error("& must be followed by a parameter name"));
+                        } else {
+                            param_ids.push(symbol_id);
+                        }
+                    } else {
+                        return EvalResult::Value(self.vm.eval_error("Invalid symbol in parameter list"));
+                    }
+                } else {
+                    return EvalResult::Value(self.vm.eval_error("macro parameters must be symbols"));
+                }
+            } else {
+                return EvalResult::Value(self.vm.eval_error("macro parameters must be symbols"));
+            }
+            i += 1;
+        }
+        
+        // Create macro object
+        let current_module = self.call_stack.last().map(|f| f.current_module).unwrap_or(self.current_module);
+        let callable = crate::value::Callable {
+            params: param_ids,
+            body: args[1..].to_vec(),
+            module: current_module,
+            is_variadic,
+        };
+        
+        let macro_ref = self.vm.alloc_macro(callable);
+        EvalResult::Value(ValueRef::Heap(GcPtr::new(macro_ref)))
+    }
+    
+    /// Execute loop special form: (loop [bindings] & body)
+    pub fn execute_loop(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Value(self.vm.eval_error("loop expects at least 2 arguments: bindings vector and body"));
+        }
+        
+        // Set up loop bindings (similar to let)
+        let bindings = if let Some(bindings_vec) = args[0].get_vec() {
+            bindings_vec
+        } else {
+            return EvalResult::Value(self.vm.eval_error("loop first argument must be a vector of bindings"));
+        };
+        
+        if bindings.len() % 2 != 0 {
+            return EvalResult::Value(self.vm.eval_error("loop bindings must be pairs of symbol and value"));
+        }
+        
+        // Set up loop frame (similar to let frame)
+        let register_base = self.register_stack.len();
+        let binding_count = bindings.len() / 2;
+        let register_count = binding_count + 10; // bindings + working space + loop metadata
+        
+        self.register_stack.resize(register_base + register_count, ValueRef::nil());
+        
+        // Initialize bindings
+        let mut symbol_bindings = Vec::new();
+        for i in 0..binding_count {
+            let symbol_idx = i * 2;
+            let value_idx = i * 2 + 1;
+            
+            // Extract symbol
+            let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
+                if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                    id
+                } else {
+                    return EvalResult::Value(self.vm.eval_error("loop binding names must be symbols"));
+                }
+            } else {
+                return EvalResult::Value(self.vm.eval_error("loop binding names must be symbols"));
+            };
+            
+            // Evaluate initial value
+            let value = match self.execute_expression(bindings[value_idx]) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    val
+                }
+                suspended => return suspended,
+            };
+            
+            // Store in register
+            self.register_stack[register_base + i] = value;
+            symbol_bindings.push((symbol_id, i as u8));
+        }
+        
+        // Create loop frame
+        let current_module = self.call_stack.last().map(|f| f.current_module).unwrap_or(self.current_module);
+        let frame = CallFrame {
+            func: FunctionRef::SpecialForm(SpecialFormId::Loop),
+            pc: 0,
+            reg_start: register_base,
+            reg_count: register_count as u8,
+            current_module,
+            symbol_bindings,
+        };
+        
+        self.call_stack.push(frame);
+        
+        // Execute loop body (will be continued by recur)
+        loop {
+            let mut result = ValueRef::nil();
+            for &body_expr in &args[1..] {
+                match self.execute_expression(body_expr) {
+                    EvalResult::Value(val) => {
+                        if val.is_error() {
+                            self.call_stack.pop();
+                            return EvalResult::Value(val);
+                        }
+                        result = val;
+                        
+                        // Check if this is a recur call result
+                        if self.is_recur_signal(val) {
+                            // Recur updates bindings and continues loop
+                            break;
+                        }
+                    }
+                    suspended => return suspended,
+                }
+            }
+            
+            // If we get here without recur, exit loop
+            if !self.is_recur_signal(result) {
+                self.call_stack.pop();
+                return EvalResult::Value(result);
+            }
+        }
+    }
+    
+    /// Execute recur special form: (recur & args)
+    pub fn execute_recur(&mut self, args: &[ValueRef]) -> EvalResult {
+        // Find the nearest loop frame
+        let loop_frame_idx = self.call_stack.iter().rposition(|frame| {
+            matches!(frame.func, FunctionRef::SpecialForm(SpecialFormId::Loop))
+        });
+        
+        let loop_frame_idx = if let Some(idx) = loop_frame_idx {
+            idx
+        } else {
+            return EvalResult::Value(self.vm.eval_error("recur used outside of loop"));
+        };
+        
+        // Evaluate new values for loop bindings
+        let mut new_values = Vec::new();
+        for &arg in args {
+            match self.execute_expression(arg) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    new_values.push(val);
+                }
+                suspended => return suspended,
+            }
+        }
+        
+        // Update loop bindings with new values
+        let loop_frame = &self.call_stack[loop_frame_idx];
+        let binding_count = loop_frame.symbol_bindings.len();
+        
+        if new_values.len() != binding_count {
+            return EvalResult::Value(self.vm.eval_error(&format!(
+                "recur expects {} arguments, got {}", binding_count, new_values.len()
+            )));
+        }
+        
+        // Update registers with new values
+        for (i, value) in new_values.into_iter().enumerate() {
+            self.register_stack[loop_frame.reg_start + i] = value;
+        }
+        
+        // Return a special recur signal
+        EvalResult::Value(self.create_recur_signal())
+    }
+    
+    /// Execute eval special form: (eval expr)
+    pub fn execute_eval(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 1 {
+            return EvalResult::Value(self.vm.eval_error("eval expects 1 argument"));
+        }
+        
+        // First evaluate the argument to get the code to eval
+        let code = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Then evaluate the result again
+        self.execute_expression(code)
+    }
+    
+    /// Execute rmac (reader macro) special form: (rmac char function)
+    pub fn execute_rmac(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() != 2 {
+            return EvalResult::Value(self.vm.eval_error("rmac expects 2 arguments: character and function"));
+        }
+        
+        // Get character
+        let char_val = match self.execute_expression(args[0]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        let char_str = if let Some(s) = char_val.get_string() {
+            s
+        } else {
+            return EvalResult::Value(self.vm.eval_error("rmac first argument must be a string"));
+        };
+        
+        if char_str.len() != 1 {
+            return EvalResult::Value(self.vm.eval_error("rmac character must be a single character"));
+        }
+        
+        let ch = char_str.chars().next().unwrap();
+        
+        // Get function
+        let func = match self.execute_expression(args[1]) {
+            EvalResult::Value(val) => {
+                if val.is_error() {
+                    return EvalResult::Value(val);
+                }
+                val
+            }
+            suspended => return suspended,
+        };
+        
+        // Register reader macro with VM
+        self.vm.register_reader_macro(ch, func);
+        
+        EvalResult::Value(ValueRef::nil())
+    }
+    
+    // Helper methods
+    fn is_recur_signal(&self, val: ValueRef) -> bool {
+        // Check if this is a special recur signal
+        // You'd implement this based on how you represent the recur signal
+        false // Placeholder
+    }
+    
+    fn create_recur_signal(&self) -> ValueRef {
+        // Create a special value that indicates recur
+        // Could be a special keyword or tagged value
+        ValueRef::keyword_from_str("__recur__") // Placeholder
+    }
+    
+    /// Update the main dispatch to include all special forms
+    pub fn execute_special_form_direct(&mut self, form_id: SpecialFormId, args: &[ValueRef]) -> EvalResult {
+        match form_id {
+            SpecialFormId::Def => self.execute_def(args),
+            SpecialFormId::If => self.execute_if(args),
+            SpecialFormId::Quote => self.execute_quote(args),
+            SpecialFormId::Do => self.execute_do(args),
+            SpecialFormId::Let => self.execute_let(args),
+            SpecialFormId::And => self.execute_and(args),
+            SpecialFormId::Or => self.execute_or(args),
+            SpecialFormId::Fn => self.execute_fn(args),
+            SpecialFormId::Apply => self.execute_apply(args),
+            SpecialFormId::Try => self.execute_try(args),
+            SpecialFormId::Imp => self.execute_imp(args),
+            SpecialFormId::Mod => self.execute_mod(args),
+            SpecialFormId::Load => self.execute_load(args),
+            SpecialFormId::Macro => self.execute_macro(args),
+            SpecialFormId::Loop => self.execute_loop(args),
+            SpecialFormId::Recur => self.execute_recur(args),
+            SpecialFormId::Eval => self.execute_eval(args),
+            SpecialFormId::Rmac => self.execute_rmac(args),
+            SpecialFormId::Quasiquote => todo!(),
+            SpecialFormId::Unquote => todo!(),
+            SpecialFormId::UnquoteSplicing => todo!(),
+            SpecialFormId::Go => todo!(),
+            SpecialFormId::Deref => todo!(),
+        }
+    }
+}
+
+
+
+// Let bindings
+impl ExecutionContext {
+    
+    pub fn execute_let(&mut self, args: &[ValueRef]) -> EvalResult {
+        if args.len() < 2 {
+            return EvalResult::Value(self.vm.eval_error("let expects at least 2 arguments: bindings vector and body"));
+        }
+        
+        // Parse bindings vector
+        let bindings = if let Some(bindings_vec) = args[0].get_vec() {
+            bindings_vec
+        } else {
+            return EvalResult::Value(self.vm.eval_error("let first argument must be a vector of bindings"));
+        };
+        
+        if bindings.len() % 2 != 0 {
+            return EvalResult::Value(self.vm.eval_error("let bindings must be pairs of symbol and value"));
+        }
+        
+        let binding_count = bindings.len() / 2;
+        
+        // Extend current frame registers for let bindings
+        let let_register_start = match self.extend_current_frame_registers(binding_count) {
+            Ok(start) => start,
+            Err(e) => return EvalResult::Value(self.vm.eval_error(&e)),
+        };
+        
+        // Evaluate and bind let variables
+        let mut let_bindings = Vec::new();
+        for i in 0..binding_count {
+            let symbol_idx = i * 2;
+            let value_idx = i * 2 + 1;
+            
+            // Extract symbol ID
+            let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
+                if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                    id
+                } else {
+                    self.cleanup_let_frame(let_bindings, binding_count);
+                    return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+                }
+            } else {
+                self.cleanup_let_frame(let_bindings, binding_count);
+                return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+            };
+            
+            // Evaluate binding value
+            let value = match self.execute_expression(bindings[value_idx]) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        self.cleanup_let_frame(let_bindings, binding_count);
+                        return EvalResult::Value(val);
+                    }
+                    val
+                }
+                EvalResult::Suspended { future, resume } => {
+                    // Suspension during binding evaluation
+                    let partial_bindings = let_bindings.clone();
+                    let current_binding_index = i;
+                    
+                    return EvalResult::Suspended {
+                        future,
+                        resume: Box::new(move |result, ctx| {
+                            if result.is_error() {
+                                ctx.cleanup_let_frame(partial_bindings, binding_count);
+                                return EvalResult::Value(result);
+                            }
+                            
+                            // Continue binding evaluation from where we left off
+                            ctx.continue_let_binding_evaluation(
+                                args, 
+                                current_binding_index, 
+                                result, 
+                                partial_bindings, 
+                                binding_count, 
+                                let_register_start
+                            )
+                        })
+                    };
+                }
+            };
+            
+            // Store value in register
+            let reg_index = let_register_start + i;
+            self.register_stack[reg_index] = value;
+            
+            // Add to symbol bindings
+            let relative_reg = (reg_index - self.current_frame().reg_start) as u8;
+            let_bindings.push((symbol_id, relative_reg));
+        }
+        
+        // Add let bindings to current frame's symbol table
+        self.push_symbol_bindings(let_bindings.clone());
+        
+        // Execute body expressions
+        self.execute_let_body(&args[1..], let_bindings, binding_count)
+    }
+    
+    fn continue_let_binding_evaluation(
+        &mut self,
+        args: &[ValueRef],
+        current_binding_index: usize,
+        binding_value: ValueRef,
+        mut partial_bindings: Vec<(u32, u8)>,
+        binding_count: usize,
+        let_register_start: usize,
+    ) -> EvalResult {
+        // Get bindings vector
+        let bindings = args[0].get_vec().unwrap(); // We know this is valid from initial call
+        
+        // Store the current binding value
+        let reg_index = let_register_start + current_binding_index;
+        self.register_stack[reg_index] = binding_value;
+        
+        // Add current binding to symbol table
+        let symbol_id = if let ValueRef::Immediate(packed) = bindings[current_binding_index * 2] {
+            if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                id
+            } else {
+                self.cleanup_let_frame(partial_bindings, binding_count);
+                return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+            }
+        } else {
+            self.cleanup_let_frame(partial_bindings, binding_count);
+            return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+        };
+        
+        let relative_reg = (reg_index - self.current_frame().reg_start) as u8;
+        partial_bindings.push((symbol_id, relative_reg));
+        
+        // Continue with remaining bindings
+        for i in (current_binding_index + 1)..binding_count {
+            let symbol_idx = i * 2;
+            let value_idx = i * 2 + 1;
+            
+            // Extract symbol
+            let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
+                if let ImmediateValue::Symbol(id) = unpack_immediate(packed) {
+                    id
+                } else {
+                    self.cleanup_let_frame(partial_bindings, binding_count);
+                    return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+                }
+            } else {
+                self.cleanup_let_frame(partial_bindings, binding_count);
+                return EvalResult::Value(self.vm.eval_error("let binding names must be symbols"));
+            };
+            
+            // Evaluate binding value
+            let value = match self.execute_expression(bindings[value_idx]) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        self.cleanup_let_frame(partial_bindings, binding_count);
+                        return EvalResult::Value(val);
+                    }
+                    val
+                }
+                EvalResult::Suspended { future, resume } => {
+                    // Another suspension during binding evaluation
+                    let current_partial = partial_bindings.clone();
+                    
+                    return EvalResult::Suspended {
+                        future,
+                        resume: Box::new(move |result, ctx| {
+                            if result.is_error() {
+                                ctx.cleanup_let_frame(current_partial, binding_count);
+                                return EvalResult::Value(result);
+                            }
+                            
+                            ctx.continue_let_binding_evaluation(
+                                args, 
+                                i, 
+                                result, 
+                                current_partial, 
+                                binding_count, 
+                                let_register_start
+                            )
+                        })
+                    };
+                }
+            };
+            
+            // Store value in register
+            let reg_index = let_register_start + i;
+            self.register_stack[reg_index] = value;
+            
+            // Add to symbol bindings
+            let relative_reg = (reg_index - self.current_frame().reg_start) as u8;
+            partial_bindings.push((symbol_id, relative_reg));
+        }
+        
+        // All bindings evaluated, now execute body
+        self.push_symbol_bindings(partial_bindings.clone());
+        self.execute_let_body(&args[1..], partial_bindings, binding_count)
+    }
+    
+    fn execute_let_body(
+        &mut self,
+        body_exprs: &[ValueRef],
+        let_bindings: Vec<(u32, u8)>,
+        binding_count: usize,
+    ) -> EvalResult {
+        let mut result = ValueRef::nil();
+        
+        for (i, &body_expr) in body_exprs.iter().enumerate() {
+            match self.execute_expression(body_expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        self.cleanup_let_frame(let_bindings, binding_count);
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                }
+                
+                EvalResult::Suspended { future, resume } => {
+                    // Suspension during body execution - capture state for resumption
+                    let snapshot = self.snapshot();
+                    let remaining_exprs = body_exprs[i + 1..].to_vec(); // Expressions after current one
+                    let current_bindings = let_bindings.clone();
+                    
+                    return EvalResult::Suspended {
+                        future,
+                        resume: Box::new(move |resumed_result, ctx| {
+                            if resumed_result.is_error() {
+                                return EvalResult::Value(resumed_result);
+                            }
+                            
+                            // Restore state and continue with remaining expressions
+                            ctx.restore_snapshot(snapshot);
+                            ctx.continue_let_execution(remaining_exprs, current_bindings, binding_count, resumed_result)
+                        })
+                    };
+                }
+            }
+        }
+        
+        // All body expressions completed - cleanup and return
+        self.cleanup_let_frame(let_bindings, binding_count);
+        EvalResult::Value(result)
+    }
+    
+    fn continue_let_execution(
+        &mut self,
+        remaining_exprs: Vec<ValueRef>,
+        let_bindings: Vec<(u32, u8)>,
+        binding_count: usize,
+        last_result: ValueRef,
+    ) -> EvalResult {
+        // The snapshot has already restored our register state and symbol bindings
+        // We just need to continue executing the remaining expressions
+        
+        let mut result = last_result;
+        
+        for (i, &body_expr) in remaining_exprs.iter().enumerate() {
+            match self.execute_expression(body_expr) {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        self.cleanup_let_frame(let_bindings.clone(), binding_count);
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                }
+                
+                EvalResult::Suspended { future, resume } => {
+                    // Another suspension - capture state again
+                    let snapshot = self.snapshot();
+                    let next_remaining = remaining_exprs[i + 1..].to_vec();
+                    let current_bindings = let_bindings.clone();
+                    
+                    return EvalResult::Suspended {
+                        future,
+                        resume: Box::new(move |resumed_result, ctx| {
+                            if resumed_result.is_error() {
+                                return EvalResult::Value(resumed_result);
+                            }
+                            
+                            ctx.restore_snapshot(snapshot);
+                            ctx.continue_let_execution(next_remaining, current_bindings, binding_count, resumed_result)
+                        })
+                    };
+                }
+            }
+        }
+        
+        // All remaining expressions completed
+        self.cleanup_let_frame(let_bindings, binding_count);
+        EvalResult::Value(result)
+    }
+    
+    // Helper methods
+    
+    fn extend_current_frame_registers(&mut self, count: usize) -> Result<usize, String> {
+        if self.call_stack.is_empty() {
+            return Err("No frame to extend".to_string());
+        }
+        
+        let frame_idx = self.call_stack.len() - 1;
+        let frame = &self.call_stack[frame_idx];
+        
+        // Calculate where new registers start
+        let current_end = frame.reg_start + frame.reg_count as usize;
+        let needed_space = current_end + count;
+        
+        // Extend register stack if needed
+        if needed_space > self.register_stack.len() {
+            self.register_stack.resize(needed_space, ValueRef::nil());
+        }
+        
+        // Update frame register count
+        self.call_stack[frame_idx].reg_count = (frame.reg_count as usize + count) as u8;
+        
+        Ok(current_end)
+    }
+    
+    fn push_symbol_bindings(&mut self, bindings: Vec<(u32, u8)>) {
+        if let Some(frame) = self.call_stack.last_mut() {
+            frame.symbol_bindings.extend(bindings);
+        }
+    }
+    
+    fn pop_symbol_bindings(&mut self, count: usize) {
+        if let Some(frame) = self.call_stack.last_mut() {
+            let new_len = frame.symbol_bindings.len().saturating_sub(count);
+            frame.symbol_bindings.truncate(new_len);
+        }
+    }
+    
+    fn cleanup_let_frame(&mut self, let_bindings: Vec<(u32, u8)>, binding_count: usize) {
+        // Remove let bindings from symbol table
+        self.pop_symbol_bindings(let_bindings.len());
+        
+        // Shrink frame register count
+        if let Some(frame) = self.call_stack.last_mut() {
+            frame.reg_count = frame.reg_count.saturating_sub(binding_count as u8);
+        }
+        
+        // Note: We don't shrink the register_stack vector itself for performance
+        // The space will be reused by future allocations
+    }
+    
+    fn current_frame(&self) -> &CallFrame {
+        self.call_stack.last().expect("No current frame")
+    }
+}d

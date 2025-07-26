@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use libloading::Library;
 use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
-use crate::{env::Env, runtime::BlinkVM};
+use crate::{env::Env, runtime::BlinkVM, ValueRef};
 
 /// Module source specification
 /// // For heap storage, serialize to a simpler enum
@@ -23,8 +23,8 @@ pub enum SerializedModuleSource {
 #[derive(Clone, Debug)]
 pub struct Module {
     pub name: u32,
-    pub env: ObjectReference,
-    pub exports: Vec<u32>,              // Sorted
+    pub imports: HashMap<u32, (u32, u32)>, // alias -> (module_id, symbol_id)
+    pub exports: HashMap<u32, ValueRef>,
     pub source: SerializedModuleSource, // Simplified for heap storage
     pub ready: bool,
 }
@@ -33,7 +33,7 @@ pub struct Module {
 #[derive(Debug)]
 pub struct ModuleRegistry {
     /// All modules by ID
-    pub modules: HashMap<u32, ObjectReference>,
+    pub modules: HashMap<u32, Module>,
     
     /// Files that have been evaluated (for Blink modules)
     evaluated_files: HashSet<u32>,
@@ -70,22 +70,22 @@ impl ModuleRegistry {
         self.loaded_libraries.insert(path.clone(), lib);
     }
     
-    pub fn register_module(&mut self, module: &Module, vm: Arc<BlinkVM>) -> ObjectReference {
+    pub fn register_module(&mut self, module: Module) {
         let name = module.name; // Get name before moving module
         
-        let module_ref = vm.alloc_module(module);
-        self.modules.insert(name, module_ref);
-        module_ref
+        
+        self.modules.insert(name, module);
+        
+    }
+
+    pub fn get_module(&self, module_id: u32) -> Option<&Module> {
+        self.modules.get(&module_id)
     }
  
     pub fn find_module_file(&self, module_name: u32) -> Option<u32> {
         self.module_files.get(&module_name).copied()
     }
     
-    /// Get module by ID
-    pub fn get_module(&self, name: u32) -> Option<ObjectReference> {
-        self.modules.get(&name).copied()
-    }
     
     pub fn mark_file_evaluated(&mut self, path: u32) {
         
@@ -100,14 +100,23 @@ impl ModuleRegistry {
     pub fn modules_in_file(&self, file: u32) -> Vec<u32> {
         self.file_modules.get(&file).cloned().unwrap_or_default()
     }
+
+    pub fn update_module(&mut self, module_id: u32, symbol_id: u32, value: ValueRef) {
+        let module = self.modules.get_mut(&module_id).unwrap();
+        module.exports.insert(symbol_id, value);
+    }
+    
+
+    pub fn resolve_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {
+        let module = self.modules.get(&module_id)?;
+        match module.exports.get(&symbol_id) {
+            Some(val) => Some(*val),
+            None => {
+                let module = self.modules.get(&module_id)?;
+                module.imports.get(&symbol_id).and_then(|(module_id, symbol_id)| self.resolve_symbol(*module_id, *symbol_id))
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum ImportType {
-    File(String),                       // (imp "module-name") -> module name as symbol ID
-    Symbols { 
-        symbols: Vec<u32>,           // Symbol IDs to import
-        module: u32,                 // Module name as symbol ID
-        aliases: HashMap<u32, u32>,  // original symbol ID -> alias symbol ID
-    },                               // (imp [sym1 sym2] :from module)
-}
+

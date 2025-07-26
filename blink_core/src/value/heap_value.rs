@@ -16,7 +16,6 @@ pub enum HeapValue {
     Macro(Callable),
     Future(BlinkFuture),
     Env(Env),
-    Module(Module),
 }
 
 impl Display for HeapValue {
@@ -75,10 +74,6 @@ impl Display for HeapValue {
                                 write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
                                 Ok(())
                             },
-            HeapValue::Module(_module) => {
-                write!(f, "module")?;
-                Ok(())
-            },
         }
     }
 }
@@ -152,11 +147,6 @@ impl Hash for HeapValue {
                             value.hash(state);
                         }
                     }
-            HeapValue::Module(module) => {
-                "module".hash(state);
-                module.name.hash(state);
-                // TODO should the entire module be hashed?
-            },
         }
     }
 }
@@ -211,7 +201,6 @@ impl HeapValue {
             HeapValue::Macro(_) => "macro",
             HeapValue::Future(_) => "future",
             HeapValue::Env(_) => "env",
-            HeapValue::Module(_) => "module",
         }
     }
 

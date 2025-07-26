@@ -1,12 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use crate::{
-    error::BlinkError,
-    eval::EvalContext,
-    value::{
-        pack_bool, pack_nil, pack_number, unpack_immediate, ImmediateValue, IsolatedValue, ValueRef,
-    },
-    value::HeapValue,
+    error::BlinkError, eval::EvalContext, runtime::BlinkVM, value::{
+        pack_bool, pack_nil, pack_number, unpack_immediate, HeapValue, ImmediateValue, IsolatedValue, ValueRef
+    }
 };
 
 pub trait ValueBoundary {
@@ -43,17 +40,17 @@ pub trait ValueBoundary {
 }
 
 // Current implementation
-pub struct ContextualBoundary<'a> {
-    pub context: &'a mut EvalContext,
+pub struct ContextualBoundary {
+    pub vm: Arc<BlinkVM>,
 }
 
-impl<'a> ContextualBoundary<'a> {
-    pub fn new(context: &'a mut EvalContext) -> Self {
-        Self { context }
+impl ContextualBoundary {
+    pub fn new(vm: Arc<BlinkVM>) -> Self {
+        Self { vm }
     }
 }
 
-impl<'a> ValueBoundary for ContextualBoundary<'a> {
+impl ValueBoundary for ContextualBoundary {
     fn extract_isolated(&self, value: ValueRef) -> Result<IsolatedValue, String> {
         match value {
             ValueRef::Immediate(packed) => {
@@ -63,8 +60,8 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                     ImmediateValue::Bool(b) => Ok(IsolatedValue::Bool(b)),
                     ImmediateValue::Nil => Ok(IsolatedValue::Nil),
                     ImmediateValue::Symbol(s) => {
-                        let vm = self.context.vm.clone();
-                        let symbol_name = vm
+                        
+                        let symbol_name = self.vm
                             .symbol_table
                             .read()
                             .get_symbol(s)
@@ -74,7 +71,7 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                     }
                     ImmediateValue::Keyword(k) => {
                         let keyword_name = self
-                            .context
+                            .vm
                             .get_keyword_name(ValueRef::Immediate(k as u64))
                             .ok_or_else(|| format!("Keyword not found: {}", k))?;
                         Ok(IsolatedValue::Keyword(keyword_name))
@@ -130,23 +127,21 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                                                 Ok(IsolatedValue::Error(error.to_string()))
                                             }
                         HeapValue::Function(callable) => {
-                                                let handle = self.context.register_function(value);
+                                                let handle = self.vm.handle_registry.write().register_function(value);
                                                 Ok(IsolatedValue::Function(handle))
                                             }
                         HeapValue::Macro(callable) => {
-                                                let handle = self.context.register_function(value);
+                                                let handle = self.vm.handle_registry.write().register_function(value);
                                                 Ok(IsolatedValue::Macro(handle))
                                             }
                         HeapValue::Future(blink_future) => {
-                                                let handle = self.context.register_future(value);
+                                                let handle = self.vm.handle_registry.write().register_future(value);
                                                 Ok(IsolatedValue::Future(handle))
                                             }
                         HeapValue::Env(env) => {
                                                 Err(format!("Env is not supported for boundary crossing"))
                                             }
-                        HeapValue::Module(module) => {
-                            Err(format!("Module is not supported for boundary crossing"))
-                        }
+
                     }
                 } else {
                     Err(format!("Unsupported value type for boundary crossing"))
@@ -160,22 +155,22 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
         match value {
             IsolatedValue::Number(n) => ValueRef::Immediate(pack_number(n)),
             IsolatedValue::Bool(b) => ValueRef::Immediate(pack_bool(b)),
-            IsolatedValue::Symbol(s) => self.context.intern_symbol(&s),
-            IsolatedValue::Keyword(k) => self.context.intern_keyword(&k),
-            IsolatedValue::String(s) => self.context.string_value(&s),
+            IsolatedValue::Symbol(s) => self.vm.intern_symbol(&s),
+            IsolatedValue::Keyword(k) => self.vm.intern_keyword(&k),
+            IsolatedValue::String(s) => self.vm.string_value(&s),
             IsolatedValue::List(items) => {
                 let value_refs: Vec<ValueRef> = items
                     .into_iter()
                     .map(|item| self.alloc_from_isolated(item))
                     .collect();
-                self.context.list_value(value_refs)
+                self.vm.list_value(value_refs)
             }
             IsolatedValue::Vector(items) => {
                 let value_refs: Vec<ValueRef> = items
                     .into_iter()
                     .map(|item| self.alloc_from_isolated(item))
                     .collect();
-                self.context.vector_value(value_refs)
+                self.vm.vector_value(value_refs)
             }
             IsolatedValue::Map(map) => {
                 let pairs: Vec<(ValueRef, ValueRef)> = map
@@ -183,30 +178,30 @@ impl<'a> ValueBoundary for ContextualBoundary<'a> {
                     .map(|(k, v)| (self.alloc_from_isolated(k), self.alloc_from_isolated(v)))
                     .collect();
 
-                self.context.map_value(pairs)
+                self.vm.map_value(pairs)
             }
             IsolatedValue::Set(set) => {
                 let value_refs: Vec<ValueRef> = set
                     .into_iter()
                     .map(|item| self.alloc_from_isolated(item))
                     .collect();
-                self.context.set_value(value_refs)
+                self.vm.set_value(value_refs)
             }
             IsolatedValue::Function(handle) => self
-                .context
+                .vm
                 .resolve_function(handle)
                 .unwrap_or(ValueRef::Immediate(pack_nil())),
             IsolatedValue::Macro(handle) => self
-                .context
+                .vm
                 .resolve_function(handle)
                 .unwrap_or(ValueRef::Immediate(pack_nil())),
             IsolatedValue::Future(handle) => self
-                .context
+                .vm
                 .resolve_future(handle)
                 .unwrap_or(ValueRef::Immediate(pack_nil())),
             IsolatedValue::Error(msg) => {
                 let error = BlinkError::eval(msg);
-                self.context.error_value(error)
+                self.vm.error_value(error)
             }
             IsolatedValue::Nil => ValueRef::Immediate(pack_nil()),
         }

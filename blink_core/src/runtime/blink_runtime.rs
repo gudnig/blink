@@ -6,10 +6,11 @@ use parking_lot::RwLock;
 use crate::{
     env::Env,
     eval::{EvalContext, EvalResult},
-    runtime::{BlinkVM, GoroutineId, GoroutineScheduler, SingleThreadScheduler},
+    runtime::{BlinkVM, ExecutionContext, GoroutineId, GoroutineScheduler, SingleThreadScheduler},
 };
 
 pub static TOKIO_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+pub static GLOBAL_RUNTIME: std::sync::OnceLock<Arc<BlinkRuntime<SingleThreadScheduler>>> = std::sync::OnceLock::new();
 
 
 pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
@@ -22,15 +23,10 @@ pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
 pub struct BlinkRuntime<S: GoroutineScheduler> {
     pub vm: Arc<BlinkVM>,
     pub scheduler: S, // Concrete type, not trait object
+    pub execution_context: ExecutionContext,
 }
 
 impl<S: GoroutineScheduler> BlinkRuntime<S> {
-    pub fn create_context(&self) -> EvalContext {
-        EvalContext::new(self.vm.global_env.unwrap(), self.vm.clone())
-    }
-    pub fn create_context_with_env(&self, env: ObjectReference) -> EvalContext {
-        EvalContext::new(env, self.vm.clone())
-    }
 
     pub fn init(&self) {
         let handle = tokio::runtime::Handle::current();
@@ -45,12 +41,12 @@ impl<S: GoroutineScheduler> BlinkRuntime<S> {
 
     pub fn spawn_goroutine<F>(&self, task: F) -> GoroutineId
     where
-        F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static,
+        F: FnOnce(Arc<BlinkVM>) -> EvalResult + Send + 'static,
     {
         let vm = self.vm.clone();
-        let ctx = EvalContext::new(self.vm.global_env.unwrap(), vm);
+        //let ctx = EvalContext::new(self.vm.global_env.unwrap(), vm);
 
         // Pass the task directly - the scheduler will call it with &mut EvalContext
-        self.scheduler.spawn(ctx, task)
+        self.scheduler.spawn(vm, task)
     }
 }

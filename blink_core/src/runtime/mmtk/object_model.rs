@@ -24,7 +24,6 @@ pub enum TypeTag {
     Macro = 7,
     Future = 8,
     Env = 9,
-    Module = 10,
 }
 
 impl TypeTag {
@@ -40,7 +39,6 @@ impl TypeTag {
             TypeTag::Macro => "macro",
             TypeTag::Future => "future",
             TypeTag::Env => "env",
-            TypeTag::Module => "module",
         }
     }
 }

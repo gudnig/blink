@@ -1,57 +1,58 @@
 use crate::{
     eval::{EvalContext, EvalResult},
     native_functions::{
-        native_add, native_complete_future, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
+        native_add, native_complete_future, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
     },
     runtime::BlinkVM,
-    value::{pack_number, Callable, GcPtr, NativeFn, ValueRef},
+    value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}, Env,
 };
 
 impl BlinkVM {
-    pub fn register_builtins(&mut self) {
-        let mut current_env = GcPtr::new(self.global_env()).read_env();
+    pub fn register_builtins(&mut self, module: u32) {
+        
 
         let mut reg =
-            |s: &str, f: fn(Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult| -> ValueRef {
+            |s: &str, f: fn(Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult, module: u32| -> ValueRef {
                 let sym = self.symbol_table.write().intern(s);
                 let boxed = Box::new(f);
                 let val = ValueRef::contextual_native_fn(boxed);
-                current_env.set(sym, val);
+                let empty_env = self.alloc_env(Env::new());
+                self.update_module(module, sym, val);
+
                 val
             };
 
-        reg("+", native_add);
-        reg("-", native_sub);
-        reg("*", native_mul);
-        reg("/", native_div);
-        reg("=", native_eq);
-        reg("not", native_not);
+        reg("+", native_add, module);
+        reg("-", native_sub, module);
+        reg("*", native_mul, module);
+        reg("/", native_div, module);
+        reg("=", native_eq, module);
+        reg("not", native_not, module);
 
-        reg("list", native_list);
-        reg("vector", native_vector);
-        reg("hash-map", native_map_construct);
-        reg("map", native_map);
-        reg("print", native_print);
-        reg("type-of", native_type_of);
-        reg("cons", native_cons);
-        reg("first", native_first);
-        reg("rest", native_rest);
-        reg("get", native_get);
-        reg("report-gc-stats", native_report_gc_stats);
-        reg("gc-stress", native_gc_stress);
+        reg("list", native_list, module);
+        reg("vector", native_vector, module);
+        reg("hash-map", native_map_construct, module);
+        //reg("map", native_map); // TODO need to do a map fn
+        reg("print", native_print, module);
+        reg("type-of", native_type_of, module);
+        reg("cons", native_cons, module);
+        reg("first", native_first, module);
+        reg("rest", native_rest, module);
+        reg("get", native_get, module);
+        reg("report-gc-stats", native_report_gc_stats, module);
+        reg("gc-stress", native_gc_stress, module);
         // TODO: Error module
-        reg("err", native_error);
+        reg("err", native_error, module);
 
         // TODO: async module
-        reg("future", native_future);
-        reg("complete", native_complete_future);
+        reg("future", native_future, module);
+        reg("complete", native_complete_future, module);
 
-        let new_env = self.alloc_env(current_env);
-        self.global_env = Some(new_env);
+        
     }
 
-    pub fn register_builtin_macros(&mut self) {
-        let mut current_env = GcPtr::new(self.global_env()).read_env();
+    pub fn register_builtin_macros(&mut self, module: u32) {
+        
         let mut symbol_table = self.symbol_table.write();
 
         let if_sym_val = ValueRef::symbol(symbol_table.intern("if"));
@@ -92,30 +93,36 @@ impl BlinkVM {
             self.alloc_vec_or_list(vec![cons_sym_val, do_sym_val, body_sym_val], true),
         ));
         let when_body = vec![if_sym_val, condition_sym_val, cons_expr];
+        let empty_env = self.alloc_env(Env::new());
 
         let when_macro = Callable {
             params: vec![condition_sym],
             is_variadic: true,
             body: when_body,
-            env: self.global_env.unwrap(),
+            env: empty_env,
+            module: module,
         };
 
         let macro_value = self.alloc_macro(when_macro);
-        current_env.set(when_sym, ValueRef::Heap(GcPtr::new(macro_value)));
+        let value = ValueRef::Heap(GcPtr::new(macro_value));
+        self.update_module(module, when_sym, value);
 
         // unless - expands to (if (not condition) (do ...))
         let not_expr = ValueRef::Heap(GcPtr::new(
             self.alloc_vec_or_list(vec![not_sym_val, condition_sym_val], true),
         ));
         let unless_body = vec![if_sym_val, not_expr, cons_expr];
+        let empty_env = self.alloc_env(Env::new());
         let unless_macro = Callable {
             params: vec![condition_sym],
             is_variadic: true,
             body: unless_body,
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
         let macro_value = self.alloc_macro(unless_macro);
-        current_env.set(unless_sym, ValueRef::Heap(GcPtr::new(macro_value)));
+        let value = ValueRef::Heap(GcPtr::new(macro_value));
+        self.update_module(module, unless_sym, value);
 
         // and - expands to nested ifs
         let empty_check = ValueRef::Heap(GcPtr::new(
@@ -154,15 +161,19 @@ impl BlinkVM {
             self.alloc_vec_or_list(vec![if_sym_val, empty_check, true_sym_val, middle_if], true),
         ));
 
+        let empty_env = self.alloc_env(Env::new());
+
         let and_macro = Callable {
             params: vec![forms_sym],
             is_variadic: true,
             body: vec![and_body], // Single expansion expression
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let macro_value = self.alloc_macro(and_macro);
-        current_env.set(and_sym, ValueRef::Heap(GcPtr::new(macro_value)));
+        let value = ValueRef::Heap(GcPtr::new(macro_value));
+        self.update_module(module, and_sym, value);
 
         // or - expands to nested ifs: (if (empty? forms) nil (if (first forms) (first forms) (or (rest forms))))
         let first_form = ValueRef::Heap(GcPtr::new(
@@ -190,25 +201,28 @@ impl BlinkVM {
             true,
         )));
 
+        let empty_env = self.alloc_env(Env::new());
+
         let or_macro = Callable {
             params: vec![forms_sym],
             is_variadic: true,
             body: vec![or_body],
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let macro_value = self.alloc_macro(or_macro);
-        current_env.set(or_sym, ValueRef::Heap(GcPtr::new(macro_value)));
+        let value = ValueRef::Heap(GcPtr::new(macro_value));
+        self.update_module(module, or_sym, value);
 
-        let new_env = self.alloc_env(current_env);
-        self.global_env = Some(new_env);
+        
         // cond - expands to nested ifs
         // defn - expands to (def name (fn ...))
         // -> and ->> - threading macros
     }
 
-    pub fn register_complex_macros(&mut self) {
-        let mut current_env = GcPtr::new(self.global_env()).read_env();
+    pub fn register_complex_macros(&mut self, module: u32) {
+        
         let mut symbol_table = self.symbol_table.write();
 
         // Pre-allocate all the symbols and values we'll need
@@ -270,15 +284,19 @@ impl BlinkVM {
             true,
         )));
 
+        let empty_env = self.alloc_env(Env::new());
+
         let cond_macro = Callable {
             params: vec![clauses_sym],
             is_variadic: true,
             body: vec![cond_body],
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let cond_macro_val = self.alloc_macro(cond_macro);
-        current_env.set(cond_sym, ValueRef::Heap(GcPtr::new(cond_macro_val)));
+        let value = ValueRef::Heap(GcPtr::new(cond_macro_val));
+        self.update_module(module, cond_sym, value);
 
         // defn macro - complete implementation with quasiquote/unquote
         let defn_sym_val = ValueRef::symbol(symbol_table.intern("defn"));
@@ -337,16 +355,20 @@ impl BlinkVM {
             self.alloc_vec_or_list(vec![quasiquote_sym_val, def_expr], true),
         ));
 
+        let empty_env = self.alloc_env(Env::new());
+
         // Create the macro
         let defn_macro = Callable {
             params: vec![name_sym, args_sym, body_sym],
             is_variadic: true, // body can have multiple forms
             body: vec![defn_body],
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let defn_macro_val = self.alloc_macro(defn_macro);
-        current_env.set(defn_sym, ValueRef::Heap(GcPtr::new(defn_macro_val)));
+        let value = ValueRef::Heap(GcPtr::new(defn_macro_val));
+        self.update_module(module, defn_sym, value);
 
         // -> (thread-first) macro
 
@@ -442,18 +464,19 @@ impl BlinkVM {
             true,
         )));
 
+        let empty_env = self.alloc_env(Env::new());
+
         let thread_first_macro = Callable {
             params: vec![x_sym, forms_sym],
             is_variadic: true,
             body: vec![thread_first_body],
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let thread_first_macro_val = self.alloc_macro(thread_first_macro);
-        current_env.set(
-            thread_first_sym,
-            ValueRef::Heap(GcPtr::new(thread_first_macro_val)),
-        );
+        let value = ValueRef::Heap(GcPtr::new(thread_first_macro_val));
+        self.update_module(module, thread_first_sym, value);
 
         // ->> (thread-last) macro - similar but threads as last argument
         let thread_last_sym_val = ValueRef::symbol(symbol_table.intern("->>"));
@@ -533,20 +556,18 @@ impl BlinkVM {
             true,
         )));
 
+        let empty_env = self.alloc_env(Env::new());
+
         let thread_last_macro = Callable {
             params: vec![x_sym, forms_sym],
             is_variadic: true,
             body: vec![thread_last_body],
-            env: self.global_env(),
+            env: empty_env,
+            module: module,
         };
 
         let thread_last_macro_val = self.alloc_macro(thread_last_macro);
-        current_env.set(
-            thread_last_sym,
-            ValueRef::Heap(GcPtr::new(thread_last_macro_val)),
-        );
-
-        let new_env = self.alloc_env(current_env);
-        self.global_env = Some(new_env);
+        let value = ValueRef::Heap(GcPtr::new(thread_last_macro_val));
+        self.update_module(module, thread_last_sym, value);
     }
 }

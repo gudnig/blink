@@ -10,6 +10,7 @@ use crate::value::{GcPtr, ParsedValue, ParsedValueWithPos, ValueRef};
 use parking_lot::RwLock;
 use rustyline::history::FileHistory;
 use rustyline::{CompletionType, Config, EditMode, Editor};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread::Thread;
 use std::time::Duration;
@@ -54,21 +55,20 @@ pub async fn start_repl() {
 
     let mut ctx = EvalContext::new(vm_arc.global_env(), vm_arc.clone());
     let user_module_name = ctx.vm.symbol_table.write().intern("user");
-    let user_module_env = ctx.vm.alloc_env(Env::with_parent(vm_arc.global_env()));
 
     let user_module = Module {
         name: user_module_name,
-        env: user_module_env,
-        exports: vec![],
+        exports: HashMap::new(),
         source: SerializedModuleSource::Repl,
         ready: true,
+        imports: HashMap::new(),
     };
-    let _user_module_ref = ctx.register_module(&user_module);
+    let _user_module_ref = ctx.register_module(user_module);
     ctx.current_module = user_module_name;
-    ctx.env = user_module_env;
+    
 
     println!("Global env: {}", vm_arc.global_env());
-    println!("User module env: {}", user_module_env);
+    
 
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");

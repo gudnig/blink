@@ -148,6 +148,9 @@ pub fn eval_list(list: &Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
                 "mod" => return eval_mod(&list[1..], ctx),
                 "load" => return eval_load(&list[1..], ctx),
                 "macro" => return eval_macro(&list[1..], ctx),
+                "loop" => todo!(),
+                "recur" => todo!(),
+                "eval" => todo!(),
                 "rmac" => return eval_def_reader_macro(&list[1..], ctx),
                 "quasiquote" => return eval_quasiquote(&list[1..], ctx),
                 "unquote" => {
@@ -301,43 +304,43 @@ fn eval_macro_body_inline(
     }
 }
 
-fn eval_function_body_inline(
-    body: Vec<ValueRef>,
-    mut index: usize,
-    mut result: ValueRef,
-    original_env: ObjectReference,
-    mut ctx: EvalContext,
-) -> EvalResult {
-    loop {
-        if index >= body.len() {
-            // Restore environment and return result
-            ctx.env = original_env;
-            return EvalResult::Value(result);
-        }
-
-        let eval_result = trace_eval(body[index].clone(), &mut ctx);
-        match eval_result {
-            EvalResult::Value(val) => {
-                if val.is_error() {
-                    return EvalResult::Value(val);
-                }
-                result = val;
-                index += 1;
+    fn eval_function_body(
+        body: Vec<ValueRef>,
+        mut index: usize,
+        mut result: ValueRef,
+        original_env: ObjectReference,
+        mut ctx: EvalContext,
+    ) -> EvalResult {
+        loop {
+            if index >= body.len() {
+                
+                
+                return EvalResult::Value(result);
             }
-            EvalResult::Suspended { future, resume: _ } => {
-                return EvalResult::Suspended {
-                    future,
-                    resume: Box::new(move |v, ctx| {
-                        if v.is_error() {
-                            return EvalResult::Value(v);
-                        }
-                        eval_function_body_inline(body, index + 1, v, original_env, ctx.clone())
-                    }),
-                };
+
+            let eval_result = trace_eval(body[index].clone(), &mut ctx);
+            match eval_result {
+                EvalResult::Value(val) => {
+                    if val.is_error() {
+                        return EvalResult::Value(val);
+                    }
+                    result = val;
+                    index += 1;
+                }
+                EvalResult::Suspended { future, resume: _ } => {
+                    return EvalResult::Suspended {
+                        future,
+                        resume: Box::new(move |v, ctx| {
+                            if v.is_error() {
+                                return EvalResult::Value(v);
+                            }
+                            eval_function_body(body, index + 1, v, original_env, ctx.clone())
+                        }),
+                    };
+                }
             }
         }
     }
-}
 
 pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
     match &func {
@@ -398,22 +401,15 @@ pub fn eval_func(func: ValueRef, args: Vec<ValueRef>, ctx: &mut EvalContext) -> 
                     result
                 }
 
-                HeapValue::Function(Callable { params, body, env, is_variadic }) => {
+                HeapValue::Function(Callable { params, body, env, is_variadic, module }) => {
                     if params.len() != args.len() {
                         return EvalResult::Value(ctx.arity_error(params.len(), args.len(), "fn"));
                     }
 
-                    let mut local_env = Env::with_parent(env);
                     
-                    for (param, val) in params.iter().zip(args) {
-                        local_env.set(*param, val);
-                    }
-                    let local_env_ref = ctx.vm.alloc_env(local_env);
-
-                    let old_env = ctx.env;
-                    let local_ctx = ctx.with_env(local_env_ref);
-
-                    eval_function_body_inline(body.clone(), 0, ctx.nil_value(), old_env, local_ctx)
+                    
+                    
+                    eval_function_body(body.clone(), 0, ctx.nil_value(), old_env, local_ctx)
                 }
                 _ => EvalResult::Value(ctx.eval_error("Not a function")),
             }

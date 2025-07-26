@@ -36,6 +36,7 @@ pub struct ModuleRef {
 pub struct Callable {
     pub params: Vec<u32>,
     pub body: Vec<ValueRef>,
+    pub module: u32,
     pub env: ObjectReference,
     pub is_variadic: bool,
 }
@@ -144,12 +145,6 @@ impl ValueRef {
         }
     }
 
-    pub fn is_module(&self) -> bool {
-        match self {
-            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Module,
-            _ => false,
-        }
-    }
 
     pub fn is_symbol(&self) -> bool {
         match self {
@@ -415,40 +410,5 @@ impl ValueRef {
         }
     }
 
-    pub fn call_native(&self, args: Vec<ValueRef>, ctx: &mut EvalContext) -> EvalResult {
-        match self {
-            ValueRef::Native(tagged_ptr) => {
-                let ptr = tagged_ptr & !1; // Clear the tag bit
 
-                if tagged_ptr & 1 == 0 {
-                    // Tag 0 = Isolated function
-                    let boxed_fn_ptr = ptr as *const IsolatedNativeFn;
-                    let boxed_fn = unsafe { &*boxed_fn_ptr };
-
-                    // Convert args and call
-                    let mut boundary = ContextualBoundary::new(ctx);
-                    let isolated_args: Result<Vec<_>, _> = args
-                        .iter()
-                        .map(|arg| boundary.extract_isolated(*arg))
-                        .collect();
-
-                    match isolated_args {
-                        Ok(isolated_args) => match boxed_fn(isolated_args) {
-                            Ok(result) => EvalResult::Value(boundary.alloc_from_isolated(result)),
-                            Err(e) => EvalResult::Value(ctx.error_value(BlinkError::eval(e))),
-                        },
-                        Err(e) => EvalResult::Value(ctx.error_value(BlinkError::eval(e))),
-                    }
-                } else {
-                    // Tag 1 = Contextual function
-                    let boxed_fn_ptr = ptr as *const ContextualNativeFn;
-                    let boxed_fn = unsafe { &*boxed_fn_ptr };
-
-                    // Call directly
-                    boxed_fn(args, ctx)
-                }
-            }
-            _ => EvalResult::Value(ctx.error_value(BlinkError::eval("Not a native function"))),
-        }
-    }
 }

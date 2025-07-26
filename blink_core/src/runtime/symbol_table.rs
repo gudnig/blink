@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+// TODO: strategic symbol assignment for array index access
 pub struct SymbolTable {
     // Simple symbols: "foo", "bar", "add"
     strings: Vec<String>,
@@ -24,7 +25,7 @@ impl SymbolTable {
             lookup: HashMap::new(),
             qualified_lookup: HashMap::new(),
             qualified_symbols: Vec::new(),
-            next_simple_id: 0,
+            next_simple_id: 32,
             next_qualified_id: Self::QUALIFIED_ID_OFFSET,
         }
     }
@@ -74,6 +75,12 @@ impl SymbolTable {
             self.lookup.insert(name.to_string(), id);
             id
         }
+    }
+
+    pub fn intern_special_form(&mut self, id: u32, name: &str) -> u32 {
+        self.strings.push(name.to_string());
+        self.lookup.insert(name.to_string(), id);
+        id
     }
     
     pub fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32 {

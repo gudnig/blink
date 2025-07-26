@@ -18,21 +18,21 @@ pub type GoroutineId = u64;
 // Box the context to avoid lifetime issues
 pub struct GoroutineTask {
     pub id: GoroutineId,
-    pub context: EvalContext,
+    pub vm: Arc<BlinkVM>,
     pub state: GoroutineState,
 }
 
 pub enum GoroutineState {
     Ready {
-        task: Box<dyn FnOnce(&mut EvalContext) -> EvalResult + Send>,
+        task: Box<dyn FnOnce(Arc<BlinkVM>) -> EvalResult + Send>,
     },
     Suspended {
         future: BlinkFuture,
-        resume: Box<dyn FnOnce(ValueRef, &mut EvalContext) -> EvalResult + Send>,
+        resume: Box<dyn FnOnce(ValueRef, Arc<BlinkVM>) -> EvalResult + Send>,
     },
     WaitingForTokio {
         receiver: oneshot::Receiver<ValueRef>,
-        resume: Box<dyn FnOnce(ValueRef, &mut EvalContext) -> EvalResult + Send>,
+        resume: Box<dyn FnOnce(ValueRef, Arc<BlinkVM>) -> EvalResult + Send>,
     },
     Completed,
 }
@@ -44,9 +44,9 @@ pub trait GoroutineScheduler {
     fn shutdown(&mut self);  
 
     // Goroutine management  
-    fn spawn<F>(&self, ctx: EvalContext, task: F) -> GoroutineId
+    fn spawn<F>(&self, vm: Arc<BlinkVM>, task: F) -> GoroutineId
     where 
-        F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static;
+        F: FnOnce(Arc<BlinkVM>) -> EvalResult + Send + 'static;
     
 
     // GC coordination

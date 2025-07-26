@@ -5,7 +5,6 @@ use crate::value::{GcPtr, ValueRef};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlinkSlot {
     ObjectRef(Address),   // Points to raw ObjectReference
-    OptionObjectRef(Address), // Points to Option<ObjectReference>
     ValueRef(Address),    // Points to ValueRef enum
 }
 
@@ -18,12 +17,6 @@ impl Slot for BlinkSlot {
                 let obj_ref_ptr = addr.as_usize() as *const ObjectReference;
                 let obj_ref = unsafe { std::ptr::read(obj_ref_ptr) };
                 Some(obj_ref)
-            },
-            BlinkSlot::OptionObjectRef(addr) => {  // ← NEW!
-                println!("BlinkSlot::OptionObjectRef::load called for {:?}", addr);
-                let obj_ref_ptr = addr.as_usize() as *const Option<ObjectReference>;
-                let obj_ref = unsafe { std::ptr::read(obj_ref_ptr) };
-                obj_ref  // Returns Option<ObjectReference> directly
             },
             BlinkSlot::ValueRef(addr) => {
                 let value_ref_ptr = addr.as_usize() as *const ValueRef;
@@ -44,11 +37,6 @@ impl Slot for BlinkSlot {
                     // FIXED: Use std::ptr::write instead of (*addr).store()
                     let obj_ref_ptr = addr.as_usize() as *mut ObjectReference;
                     std::ptr::write(obj_ref_ptr, object);
-                },
-                BlinkSlot::OptionObjectRef(addr) => {
-                    // FIXED: Use std::ptr::write instead of (*addr).store()
-                    let opt_ref_ptr = addr.as_usize() as *mut Option<ObjectReference>;
-                    std::ptr::write(opt_ref_ptr, Some(object));
                 },
                 BlinkSlot::ValueRef(addr) => {
                     // FIXED: Use std::ptr::write instead of (*addr).store()

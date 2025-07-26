@@ -10,7 +10,8 @@ mod blink_vm;
 mod mmtk;
 mod blink_runtime;
 mod builtins;
-
+mod execution_context;
+mod instruction;
 
 pub use boundary::*;
 pub use goroutines::*;
@@ -23,3 +24,5 @@ pub use gc::*;
 pub use blink_vm::*;
 pub use mmtk::*;
 pub use blink_runtime::*;
+pub use execution_context::*;
+pub use instruction::*;

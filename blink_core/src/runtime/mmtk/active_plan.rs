@@ -88,13 +88,30 @@ impl BlinkActivePlan {
     pub fn alloc(mutator: &mut Mutator<BlinkVM>, type_tag: &TypeTag, data_size: &usize) -> ObjectReference {
         let total_size = (ObjectHeader::SIZE + data_size + 7) & !7;
         
-        let start = mmtk::memory_manager::alloc_slow(
+        // Try fast path
+        let mut start = mmtk::memory_manager::alloc(
             mutator,
             total_size,
             8,
             0,
             mmtk::AllocationSemantics::Default,
         );
+
+        // If it fails, fall back to slow path
+        if start.is_zero() {
+            start = mmtk::memory_manager::alloc_slow(
+                mutator,
+                total_size,
+                8,
+                0,
+                mmtk::AllocationSemantics::Default,
+            );
+        }
+
+        // Now continue as before
+        if start.is_zero() {
+            panic!("Failed to allocate object of size {}", total_size);
+        }
 
         if total_size <= 0 {
             println!("🔧 ALLOC: Failed to allocate object");

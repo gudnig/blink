@@ -7,23 +7,78 @@ use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, HandleRegistry, SymbolTable, ValueMetadataStore
-    }, telemetry::TelemetryEvent, value::{Callable, GcPtr, ValueRef}
+        BlinkActivePlan, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
+    }, telemetry::TelemetryEvent, value::{Callable, FunctionHandle, FutureHandle, GcPtr, SourceRange, ValueRef}
 };
 
 pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
 pub static GLOBAL_MMTK: OnceLock<Box<MMTK<BlinkVM>>> = OnceLock::new(); 
 
+#[derive(Clone, Copy, Debug)]
+pub enum SpecialFormId {
+    Apply = 0,
+    If = 1,
+    Def = 2,
+    Fn = 3,
+    Do = 4,
+    Let = 5,
+    And = 6,
+    Or = 7,
+    Try = 8,
+    Imp = 9,
+    Mod = 10,
+    Load = 11,
+    Macro = 12,
+    Loop = 13,
+    Recur = 14,
+    Eval = 15,
+    Rmac = 16,
+    Quasiquote = 17,
+    Unquote = 18,
+    UnquoteSplicing = 19,
+    Go = 20,
+    Deref = 21,
+    Quote = 22,
+}
+
+impl SpecialFormId {
+    pub fn from_u32(id: u32) -> Self {
+        match id {
+            0 => SpecialFormId::Apply,
+            1 => SpecialFormId::If,
+            2 => SpecialFormId::Def,
+            3 => SpecialFormId::Fn,
+            4 => SpecialFormId::Do,
+            5 => SpecialFormId::Let,
+            6 => SpecialFormId::And,    
+            7 => SpecialFormId::Or,
+            8 => SpecialFormId::Try,
+            9 => SpecialFormId::Imp,
+            10 => SpecialFormId::Mod,
+            11 => SpecialFormId::Load,
+            12 => SpecialFormId::Macro,
+            13 => SpecialFormId::Loop,
+            14 => SpecialFormId::Recur,
+            15 => SpecialFormId::Eval,
+            16 => SpecialFormId::Rmac,
+            17 => SpecialFormId::Quasiquote,
+            18 => SpecialFormId::Unquote,
+            19 => SpecialFormId::UnquoteSplicing,
+            20 => SpecialFormId::Go,
+            21 => SpecialFormId::Deref,
+            _ => panic!("Invalid special form id: {}", id),
+        }
+    }
+}
+
 pub struct BlinkVM {
     // pub mmtk: Box<MMTK<BlinkVM>>,
     pub symbol_table: RwLock<SymbolTable>,
-    pub global_env: Option<ObjectReference>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub module_registry: RwLock<ModuleRegistry>,
     pub file_to_modules: RwLock<HashMap<PathBuf, Vec<String>>>,
     pub reader_macros: RwLock<ReaderContext>,
     pub value_metadata: RwLock<ValueMetadataStore>,
-
     pub gc_roots: RwLock<Vec<ObjectReference>>,  // Track all roots
     pub handle_registry: RwLock<HandleRegistry>,
 }
@@ -31,7 +86,6 @@ pub struct BlinkVM {
 impl std::fmt::Debug for BlinkVM {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlinkVM")
-            .field("global_env", &self.global_env)
             .field("gc_roots_count", &self.gc_roots.read().len())
             .finish()
     }
@@ -60,10 +114,11 @@ impl BlinkVM {
         Self {
             // Remove mmtk field
             symbol_table: RwLock::new(SymbolTable::new()),
-            global_env: None,
+            
             telemetry_sink: None,
             module_registry: RwLock::new(ModuleRegistry::new()),
             file_to_modules: RwLock::new(HashMap::new()),
+            
             reader_macros: RwLock::new(ReaderContext::new()),
             value_metadata: RwLock::new(ValueMetadataStore::new()),
             handle_registry: RwLock::new(HandleRegistry::new()),
@@ -83,13 +138,25 @@ impl BlinkVM {
         
         let mut vm = Self::construct_vm();
 
+        let core_module_id = vm.symbol_table.write().intern("core");
+
+        let core_module = Module {
+            name: core_module_id,
+            imports: HashMap::new(),
+            exports: HashMap::new(),
+            source: SerializedModuleSource::Repl,
+            ready: true,
+        };
+
+        vm.module_registry.write().register_module(core_module);
+
 
         vm.register_special_forms();
         vm.init_global_env();
-        vm.preload_builtin_reader_macros();
-        vm.register_builtins();
-        vm.register_builtin_macros();
-        vm.register_complex_macros();
+        vm.preload_builtin_reader_macros(core_module_id);
+        vm.register_builtins(core_module_id);
+        vm.register_builtin_macros(core_module_id);
+        vm.register_complex_macros(core_module_id);
 
         vm
     }
@@ -103,22 +170,63 @@ impl BlinkVM {
 
     fn init_global_env(&mut self) -> ObjectReference {
         let global_env = self.alloc_env(Env::new());
-        self.global_env = Some(global_env);
         
 
-        // Register as GC root
-        self.add_gc_root(global_env);
         
         global_env
     }
 
-    pub fn global_env(&self) -> ObjectReference {
-        self.global_env.unwrap()
+    pub fn register_function(&self, handle: ValueRef) -> FunctionHandle {
+        self.handle_registry.write().register_function(handle)
     }
 
-    pub fn modules(&self) -> Vec<ObjectReference> {
-        let modules = self.module_registry.read();
-        modules.modules.values().map(|m| *m).collect()
+    pub fn resolve_function(&self, handle: FunctionHandle) -> Option<ValueRef> {
+        self.handle_registry.read().resolve_function(&handle)
+    }
+
+    pub fn register_future(&self, handle: ValueRef) -> FutureHandle {
+        self.handle_registry.write().register_future(handle)
+    }
+
+    pub fn resolve_future(&self, handle: FutureHandle) -> Option<ValueRef> {
+        self.handle_registry.read().resolve_future(&handle)
+    }
+
+    pub fn intern_keyword(&self, name: &str) -> ValueRef {
+        let keyword_id = self.symbol_table.write().intern(name);
+        ValueRef::keyword(keyword_id)
+    }
+
+    pub fn intern_symbol(&self, name: &str) -> ValueRef {
+        let symbol_id = self.symbol_table.write().intern(name);
+        ValueRef::symbol(symbol_id)
+    }
+
+    pub fn intern_symbol_id(&self, name: &str) -> u32 {
+        self.symbol_table.write().intern(name)
+    }
+
+    pub fn get_pos(&self, value: ValueRef) -> Option<SourceRange> {
+        value.get_or_create_id().and_then(|id| self.value_metadata.read().get_position(id))
+    }
+
+    pub fn get_roots(&self) -> Vec<ObjectReference> {
+        let mut roots = vec![];
+        // TODO: Possible optimzation we can maintain roots in gc_roots and not have to scan the module registry
+        for module in self.module_registry.read().modules.values() {
+            for (_, value) in module.exports.iter() {
+                if let ValueRef::Heap(gc_ptr) = value {
+                    roots.push(gc_ptr.0);
+                }
+            }
+        }
+        roots.append(&mut self.gc_roots.read().clone());
+        roots
+    }
+
+    pub fn update_module(&self, module_id: u32, symbol_id: u32, value: ValueRef) {
+        let mut binding = self.module_registry.write();
+        binding.update_module(module_id, symbol_id, value);
     }
 
 
@@ -153,62 +261,59 @@ impl BlinkVM {
 
     fn register_special_forms(&mut self) {
         let mut st = self.symbol_table.write();
-        st.intern("if");
-        st.intern("def");
-        st.intern("mac");
-        st.intern("rmac");
-        st.intern("quasiquote");
-        st.intern("unquote");
-        st.intern("unquote-splicing");
-        st.intern("deref");
-        st.intern("go");
-        st.intern("imp");
-        st.intern("mod");
-        st.intern("load");
-        st.intern("try");
-        st.intern("imp");
-        st.intern("mod");
-        st.intern("load");
-        st.intern("macro");
+        st.intern_special_form(SpecialFormId::If as u32,"if");
+        st.intern_special_form(SpecialFormId::Def as u32,"def");
+        st.intern_special_form(SpecialFormId::Macro as u32,"mac");
+        st.intern_special_form(SpecialFormId::Rmac as u32,"rmac");
+        st.intern_special_form(SpecialFormId::Quasiquote as u32,"quasiquote");
+        st.intern_special_form(SpecialFormId::Unquote as u32,"unquote");
+        st.intern_special_form(SpecialFormId::UnquoteSplicing as u32,"unquote-splicing");
+        st.intern_special_form(SpecialFormId::Deref as u32,"deref");
+        st.intern_special_form(SpecialFormId::Go as u32,"go");
+        st.intern_special_form(SpecialFormId::Imp as u32,"imp"); 
+        st.intern_special_form(SpecialFormId::Mod as u32,"mod");
+        st.intern_special_form(SpecialFormId::Load as u32,"load");
+        st.intern_special_form(SpecialFormId::Try as u32,"try");
+        st.intern_special_form(SpecialFormId::Imp as u32,"imp");
+        st.intern_special_form(SpecialFormId::Mod as u32,"mod");
+        st.intern_special_form(SpecialFormId::Load as u32,"load");
+        st.intern_special_form(SpecialFormId::Macro as u32,"macro");
     }
 
 
-    fn build_simple_macro(&mut self,name: &str) -> u32 {
+    fn build_simple_macro(&mut self,name: &str, module: u32) -> u32 {
+        
         let symbol_id = self.symbol_table.write().intern(name);
         let list = self.alloc_vec_or_list(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)], true);
         let body = vec![ValueRef::Heap(GcPtr::new(list))];
+        let empty_env = self.alloc_env(Env::new());
         let call = Callable {
-            
+            module: module,
             is_variadic: false,
             body: body,
-            env: self.global_env.unwrap(),
+            env: empty_env,
             params: vec![symbol_id],
 
         };
 
-        let mut global_env = GcPtr::new(self.global_env.unwrap()).read_env();
+        
         
         let macro_ref = self.alloc_macro(call);
-
-        global_env.set(symbol_id, ValueRef::Heap(GcPtr::new(macro_ref)));
-
-        // realloc global env TODO optimize
-        let global_env_ref = self.alloc_env(global_env);
-
-        self.global_env = Some(global_env_ref);
-        
+        let value = ValueRef::Heap(GcPtr::new(macro_ref));
+        self.update_module(module, symbol_id, value);
         symbol_id
 
     }
 
-    pub fn preload_builtin_reader_macros(&mut self) {
+    pub fn preload_builtin_reader_macros(&mut self, module: u32) {
         
         
-        let quote = self.build_simple_macro("quo");
-        let quasiquote = self.build_simple_macro("quasiquote");
-        let unquote = self.build_simple_macro("unquote");
-        let unquote_splicing = self.build_simple_macro("unquote-splicing");
-        let deref = self.build_simple_macro("deref");
+        let quote = self.build_simple_macro("quo", module);
+    
+        let quasiquote = self.build_simple_macro("quasiquote", module);
+        let unquote = self.build_simple_macro("unquote", module);
+        let unquote_splicing = self.build_simple_macro("unquote-splicing", module);
+        let deref = self.build_simple_macro("deref", module);
 
         let mut rm = self.reader_macros.write();
 

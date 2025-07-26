@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 
 use crate::env::Env;
 use crate::module::Module;
+use crate::runtime::execution_context::ExecutionContext;
 use crate::value::{FunctionHandle, FutureHandle, GcPtr};
 use crate::value::HeapValue;
 use crate::{
@@ -26,8 +27,7 @@ use crate::{
 #[derive(Clone)]
 pub struct EvalContext {
     pub vm: Arc<BlinkVM>,
-    pub env: ObjectReference,
-
+    pub exec_ctx: ExecutionContext,
     pub current_file: Option<u32>,
     pub current_module: u32,
     pub async_ctx: AsyncContext,
@@ -106,38 +106,7 @@ impl EvalContext {
     }
 
     pub fn resolve_symbol(&self, symbol_id: u32) -> Result<ValueRef, BlinkError> {
-        
-        let env = GcPtr::new(self.env).read_env();
-        let symbol_table = self.vm.symbol_table.read();
-        let module_registry = self.vm.module_registry.read();
-        
-
-        let result = env.resolve_symbol(symbol_id, &symbol_table, &module_registry);
-
-        // might want explicit module env lookup
-        match result {
-            Some(val) => Ok(val),
-            None => {
-                if let Some(module_ref) = self.get_module(self.current_module) {
-                    let module = GcPtr::new(module_ref).read_module();
-                    let module_env = GcPtr::new(module.env).read_env();
-                    let module_symbol = module_env.resolve_symbol(symbol_id, &symbol_table, &module_registry);
-                    match module_symbol {
-                        Some(val) => Ok(val),
-                        None => {
-                            let symbol_str = self.get_symbol_name(ValueRef::symbol(symbol_id)).unwrap_or("unknown".to_string());
-                            Err(BlinkError::eval(format!("Symbol not found: {}", symbol_str)))
-                        },
-                    }
-                } else {
-                    let symbol_str = self.get_symbol_name(ValueRef::symbol(symbol_id)).unwrap_or("unknown".to_string());
-                    Err(BlinkError::eval(format!("Symbol not found: {}", symbol_str)))
-                }
-            }
-        }
-
-
-
+        self.exec_ctx.resolve_symbol(symbol_id)
     }
 
 
@@ -155,7 +124,8 @@ impl EvalContext {
         let current_module = vm.symbol_table.write().intern("global");
         EvalContext {
             vm: vm.clone(),
-            env: env,
+            
+            exec_ctx: ExecutionContext::new(vm.clone(), current_module),
             current_module: current_module,
             current_file: None,
             async_ctx: AsyncContext::default(),
@@ -167,12 +137,12 @@ impl EvalContext {
         self.vm.global_env()
     }
 
-    pub fn get_module(&self, module_id: u32) -> Option<ObjectReference> {
+    pub fn get_module(&self, module_id: u32) -> Option<Module> {
         self.vm.module_registry.read().get_module(module_id)
     }
 
-    pub fn register_module(&self, module: &Module) -> ObjectReference {
-        self.vm.module_registry.write().register_module(module, self.vm.clone())
+    pub fn register_module(&self, module: Module) {
+        self.vm.module_registry.write().register_module(module)
     }
 
     pub fn remove_module(&self, module_id: u32) {

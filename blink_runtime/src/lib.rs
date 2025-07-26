@@ -42,7 +42,7 @@ impl PluginBuilder {
 
 
 // Registration function signature that plugins export
-pub type PluginRegisterFn = extern "C" fn() -> Plugin;
+//pub type PluginRegisterFn = extern "C" fn() -> Plugin; 
 
 #[macro_export]
 macro_rules! blink_plugin {

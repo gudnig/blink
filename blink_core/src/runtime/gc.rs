@@ -84,6 +84,7 @@ impl BlinkVM {
             
             // GC-FRIENDLY LAYOUT: All ObjectReferences first!
             // [env_ref: ObjectReference]           <- ObjectReference #1
+            // [module_id: u32]                     <- Non-reference data
             // [body_count: u32]                    <- Count for ObjectReference array
             // [body_exprs: ValueRef...]            <- ObjectReferences #2 to #(body_count+1)
             // [params_count: u32]                  <- Non-reference data
@@ -110,6 +111,10 @@ impl BlinkVM {
                 // Write env reference FIRST (ObjectReference #1)
                 std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, function.env);
                 offset += std::mem::size_of::<ObjectReference>();
+
+                // Write module ID
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, function.module);
+                offset += std::mem::size_of::<u32>();
                 
                 // Write body count (needed for scanning)
                 std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, body_count as u32);
@@ -131,58 +136,6 @@ impl BlinkVM {
                 }
                 
                 std::ptr::write_unaligned(data_ptr.add(offset) as *mut bool, function.is_variadic);
-            }
-            
-            data_start
-        })
-    }
-
-    pub fn alloc_module(&self, module: &Module) -> ObjectReference {
-        self.with_mutator(|mutator| {
-            let exports_count = module.exports.len();
-            
-            // GC-FRIENDLY LAYOUT: ObjectReferences first!
-            // [env_ref: ObjectReference]     <- ObjectReference #1 (easy to scan)
-            // [name: u32]                    <- Non-reference data
-            // [exports_count: u32]           <- Non-reference data  
-            // [exports: u32...]              <- Non-reference data
-            // [source_data: SerializedModuleSource] <- Non-reference data
-            // [ready: bool]                  <- Non-reference data
-            
-            let env_size = std::mem::size_of::<ObjectReference>();
-            let name_size = std::mem::size_of::<u32>();
-            let exports_size = std::mem::size_of::<u32>() + // count
-                              (exports_count * std::mem::size_of::<u32>()); // exports
-            let source_size = std::mem::size_of::<SerializedModuleSource>();
-            let ready_size = std::mem::size_of::<bool>();
-            let total_size = env_size + name_size + exports_size + source_size + ready_size;
-            
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Module, &total_size);
-            
-            unsafe {
-                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
-                let mut offset = 0;
-                
-                // Write env reference FIRST (ObjectReference #1)
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, module.env);
-                offset += std::mem::size_of::<ObjectReference>();
-                
-                // Write all non-reference data
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, module.name);
-                offset += std::mem::size_of::<u32>();
-                
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, exports_count as u32);
-                offset += std::mem::size_of::<u32>();
-                
-                for export in &module.exports {
-                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *export);
-                    offset += std::mem::size_of::<u32>();
-                }
-                
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut SerializedModuleSource, module.source.clone());
-                offset += std::mem::size_of::<SerializedModuleSource>();
-                
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut bool, module.ready);
             }
             
             data_start
@@ -289,28 +242,18 @@ impl BlinkVM {
 pub fn alloc_env(&self, env: Env) -> ObjectReference {
     self.with_mutator(|mutator| {
         let vars_count = env.vars.len();
-        let symbol_aliases_count = env.symbol_aliases.len();
-        let module_aliases_count = env.module_aliases.len();
         
         // NEW LAYOUT: All ObjectReferences at the beginning for easy scanning
-        // [parent_ref: Option<ObjectReference>]  <- ObjectReference #1
         // [vars_count: u32]
         // [valueref_array: ValueRef...]          <- ObjectReferences #2 to #(vars_count+1)  
-        // [symbol_aliases_count: u32]
-        // [module_aliases_count: u32]
         // [var_keys: u32...]                     <- No ObjectReferences
-        // [symbol_alias_data: (u32,u32,u32)...] <- No ObjectReferences  
-        // [module_alias_data: (u32,u32)...]     <- No ObjectReferences
+         
         
-        let parent_size = std::mem::size_of::<Option<ObjectReference>>();
         let refs_size = vars_count * std::mem::size_of::<ValueRef>();
         let counts_size = 3 * std::mem::size_of::<u32>(); // 3 counts
         let keys_size = vars_count * std::mem::size_of::<u32>();
-        let symbol_aliases_size = symbol_aliases_count * std::mem::size_of::<u32>() * 3;
-        let module_aliases_size = module_aliases_count * std::mem::size_of::<u32>() * 2;
         
-        let total_size = parent_size + counts_size + refs_size + keys_size + 
-                        symbol_aliases_size + module_aliases_size;
+        let total_size = counts_size + refs_size + keys_size;
         
         let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Env, &total_size);
         
@@ -318,16 +261,9 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
             let mut offset = 0;
             
-            // Write parent reference FIRST (ObjectReference #1)
-            std::ptr::write_unaligned(data_ptr.add(offset) as *mut Option<ObjectReference>, env.parent);
-            offset += parent_size;
             
             // Write counts
             std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, vars_count as u32);
-            offset += std::mem::size_of::<u32>();
-            std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, symbol_aliases_count as u32);
-            offset += std::mem::size_of::<u32>();
-            std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, module_aliases_count as u32);
             offset += std::mem::size_of::<u32>();
             
             // Write ALL ValueRefs together (ObjectReferences #2 to #(vars_count+1))
@@ -346,27 +282,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                 offset += std::mem::size_of::<u32>();
             }
             
-            // Write symbol aliases (no ObjectReferences)
-            let mut sorted_symbol_aliases: Vec<_> = env.symbol_aliases.iter().collect();
-            sorted_symbol_aliases.sort_by_key(|(k, _)| *k);
-            for (alias, (module_id, symbol_id)) in sorted_symbol_aliases {
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *alias);
-                offset += std::mem::size_of::<u32>();
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module_id);
-                offset += std::mem::size_of::<u32>();
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *symbol_id);
-                offset += std::mem::size_of::<u32>();
-            }
-            
-            // Write module aliases (no ObjectReferences)
-            let mut sorted_module_aliases: Vec<_> = env.module_aliases.iter().collect();
-            sorted_module_aliases.sort_by_key(|(k, _)| *k);
-            for (alias, module_id) in sorted_module_aliases {
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *alias);
-                offset += std::mem::size_of::<u32>();
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *module_id);
-                offset += std::mem::size_of::<u32>();
-            }
+
         }
         
         data_start
@@ -743,7 +659,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             HeapValue::Macro(mac) => self.alloc_macro(mac),
             HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => self.alloc_env(env),
-            HeapValue::Module(module) => self.alloc_module(&module),
         }
     }
     

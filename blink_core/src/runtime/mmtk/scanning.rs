@@ -1,6 +1,6 @@
 use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, RootsWorkFactory, Scanning, VMBinding}, Mutator};
 
-use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader , TypeTag, GLOBAL_VM}, value::{SourceRange, ValueRef}};
+use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader, TypeTag, GLOBAL_RUNTIME, GLOBAL_VM}, value::{SourceRange, ValueRef}};
 
 use mmtk::vm::slot::Slot;
 
@@ -21,7 +21,6 @@ impl Scanning<BlinkVM> for BlinkScanning {
         
         
         match type_tag {
-            TypeTag::Module => Self::scan_module_object(slot_visitor, object),
             TypeTag::Macro | TypeTag::UserDefinedFunction => Self::scan_callable_object(slot_visitor, object),
             TypeTag::Env => Self::scan_env_object(slot_visitor, object),
             TypeTag::List => Self::scan_vec_or_list_object(slot_visitor, object),
@@ -57,12 +56,23 @@ impl Scanning<BlinkVM> for BlinkScanning {
     ) {
         println!("Scanning VM specific roots - MINIMAL VERSION");
         
-        let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+        let runtime = GLOBAL_RUNTIME.get().expect("BlinkRuntime not initialized");
         let mut root_slots = Vec::new();
+
+        let vm = runtime.vm.clone();
     
         // ONLY scan the global_env field for now
-        root_slots.push(BlinkSlot::OptionObjectRef(Address::from_ptr(&vm.global_env)));
-        println!("Added global_env field at address: {:?}", Address::from_ptr(&vm.global_env));
+
+        let binding = vm.get_roots();
+        let vm_roots = binding.iter().map(|root| BlinkSlot::ObjectRef(root.to_raw_address()));
+        root_slots.extend(vm_roots);
+        let binding = runtime.execution_context.get_stack_roots();
+        let execution_context_roots = binding.iter().map(|root| BlinkSlot::ObjectRef(root.to_raw_address()));
+        root_slots.extend(execution_context_roots);
+        
+        
+
+
     
         if !root_slots.is_empty() {
             println!("Enqueuing {} root slots", root_slots.len());
@@ -84,13 +94,7 @@ impl Scanning<BlinkVM> for BlinkScanning {
 
 impl BlinkScanning {
 
-    fn scan_module_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
-        slot_visitor: &mut SV,
-        object: ObjectReference) {
-        // Only need to scan the first ObjectReference!
-        let env_slot = BlinkSlot::ObjectRef(object.to_raw_address()); // Points to env_ref
-        slot_visitor.visit_slot(env_slot);
-    }
+
 
     fn scan_callable_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
         slot_visitor: &mut SV,
@@ -224,11 +228,6 @@ impl BlinkScanning {
             let data_ptr = object.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Scan parent reference (Option<ObjectReference>)
-            let parent_addr = Address::from_usize(data_ptr.add(offset) as usize);
-            let parent_slot = BlinkSlot::OptionObjectRef(parent_addr); 
-            slot_visitor.visit_slot(parent_slot);
-            offset += std::mem::size_of::<Option<ObjectReference>>();
             
             // Read vars count
             let vars_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
