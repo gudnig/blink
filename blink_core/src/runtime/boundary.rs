@@ -130,10 +130,6 @@ impl ValueBoundary for ContextualBoundary {
                                                 let handle = self.vm.handle_registry.write().register_function(value);
                                                 Ok(IsolatedValue::Function(handle))
                                             }
-                        HeapValue::Macro(callable) => {
-                                                let handle = self.vm.handle_registry.write().register_function(value);
-                                                Ok(IsolatedValue::Macro(handle))
-                                            }
                         HeapValue::Future(blink_future) => {
                                                 let handle = self.vm.handle_registry.write().register_future(value);
                                                 Ok(IsolatedValue::Future(handle))

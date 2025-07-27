@@ -327,25 +327,27 @@ impl BlinkVM {
 
     fn build_simple_macro(&mut self,name: &str, module: u32) -> u32 {
         
-        let symbol_id = self.symbol_table.write().intern(name);
-        let list = self.alloc_vec_or_list(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)], true);
-        let body = vec![ValueRef::Heap(GcPtr::new(list))];
-        let empty_env = self.alloc_env(Env::new());
-        let call = Callable {
-            module: module,
-            is_variadic: false,
-            body: body,
-            env: empty_env,
-            params: vec![symbol_id],
+        // let symbol_id = self.symbol_table.write().intern(name);
+        // let list = self.alloc_vec_or_list(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)], true);
+        // let body = vec![ValueRef::Heap(GcPtr::new(list))];
+        // let empty_env = self.alloc_env(Env::new());
+        // let call = CompiledFunction {
+        //     module: module,
+        //     is_variadic: false,
+        //     body: body,
+        //     env: empty_env,
+        //     params: vec![symbol_id],
 
-        };
+        // };
 
         
         
-        let macro_ref = self.alloc_macro(call);
-        let value = ValueRef::Heap(GcPtr::new(macro_ref));
-        self.update_module(module, symbol_id, value);
-        symbol_id
+        // let macro_ref = self.alloc_compiled_function(call);
+        // let value = ValueRef::Heap(GcPtr::new(macro_ref));
+        // self.update_module(module, symbol_id, value);
+        // symbol_id
+
+        0
 
     }
 

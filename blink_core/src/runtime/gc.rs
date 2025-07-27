@@ -2,7 +2,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkActivePlan, BlinkObjectModel, TypeTag, GLOBAL_MMTK};
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, CompiledFunction, TypeTag, GLOBAL_MMTK};
 use crate::value::{Callable, GcPtr, ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
@@ -68,79 +68,90 @@ impl BlinkVM {
         })
     }
 
-    pub fn alloc_macro(&self, mac: Callable) -> ObjectReference {
-        self.alloc_callable(mac, true)
-    }
-
-    pub fn alloc_user_defined_fn(&self, function: Callable) -> ObjectReference {
-        self.alloc_callable(function, false)
+    pub fn alloc_user_defined_fn(&self, function: CompiledFunction) -> ObjectReference {
+        self.alloc_callable(function)
     }
 
 
-    pub fn alloc_callable(&self, function: Callable, is_macro: bool) -> ObjectReference {
+    pub fn alloc_callable(&self, function: CompiledFunction) -> ObjectReference {
         self.with_mutator(|mutator| {
-            let params_count = function.params.len();
-            let body_count = function.body.len();
+
+            /* 
+            pub struct CompiledFunction {
+                pub bytecode: Bytecode,
+                pub constants: Vec<ValueRef>,  // Constant pool for complex values
+                pub parameter_count: u8,
+                pub register_count: u8,
+                pub module: u32,
+            }
+             */
+            let constants_count = function.constants.len();
+            let bytecode_len = function.bytecode.len();
             
             // GC-FRIENDLY LAYOUT: All ObjectReferences first!
-            // [env_ref: ObjectReference]           <- ObjectReference #1
-            // [module_id: u32]                     <- Non-reference data
-            // [body_count: u32]                    <- Count for ObjectReference array
-            // [body_exprs: ValueRef...]            <- ObjectReferences #2 to #(body_count+1)
-            // [params_count: u32]                  <- Non-reference data
-            // [param_ids: u32...]                  <- Non-reference data  
-            // [is_variadic: bool]                  <- Non-reference data
+            // [parameter_count: u8]
+            // [register_count: u8]
+            // [module_id: u32]
+            // [constants_count: u32]
+            // [constants: ValueRef...]
+            // [bytecode_count: u32]
+            // [bytecode: u8...]
             
-            let env_size = std::mem::size_of::<ObjectReference>();
-            let body_count_size = std::mem::size_of::<u32>();
-            let body_size = body_count * std::mem::size_of::<ValueRef>();
-            let params_count_size = std::mem::size_of::<u32>();
-            let params_size = params_count * std::mem::size_of::<u32>();
-            let variadic_size = std::mem::size_of::<bool>();
+            let total_size = 
+            std::mem::size_of::<u32>() +                              // constants_count
+            constants_count * std::mem::size_of::<ValueRef>() +       // constants
+            std::mem::size_of::<u8>() +                               // parameter_count
+            std::mem::size_of::<u8>() +                               // register_count  
+            std::mem::size_of::<u32>() +                              // module
+            std::mem::size_of::<u32>() +                              // bytecode_len
+            bytecode_len;                                             // bytecode data
             
-            let total_size = env_size + body_count_size + body_size + 
-                            params_count_size + params_size + variadic_size;
-
-            let type_tag = if is_macro { TypeTag::Macro } else { TypeTag::UserDefinedFunction };
+            
+            let type_tag = TypeTag::UserDefinedFunction;
             let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
+
+
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
                 let mut offset = 0;
                 
-                // Write env reference FIRST (ObjectReference #1)
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, function.env);
-                offset += std::mem::size_of::<ObjectReference>();
-
-                // Write module ID
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, function.module);
+                // Write constants count FIRST (needed for GC scanning)
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, constants_count as u32);
                 offset += std::mem::size_of::<u32>();
                 
-                // Write body count (needed for scanning)
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, body_count as u32);
-                offset += std::mem::size_of::<u32>();
-                
-                // Write ALL body expressions together (ObjectReferences #2 to #(body_count+1))
-                for expr in &function.body {
-                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut ValueRef, *expr);
+                // Write ALL constants together (ObjectReferences that GC needs to scan)
+                for constant in &function.constants {
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut ValueRef, *constant);
                     offset += std::mem::size_of::<ValueRef>();
                 }
                 
-                // Now write all non-reference data
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, params_count as u32);
+                // Now write all non-reference data (GC won't scan past this point)
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, function.parameter_count);
+                offset += std::mem::size_of::<u8>();
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, function.register_count);
+                offset += std::mem::size_of::<u8>();
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, function.module);
                 offset += std::mem::size_of::<u32>();
                 
-                for param_id in &function.params {
-                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *param_id);
-                    offset += std::mem::size_of::<u32>();
-                }
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, bytecode_len as u32);
+                offset += std::mem::size_of::<u32>();
                 
-                std::ptr::write_unaligned(data_ptr.add(offset) as *mut bool, function.is_variadic);
+                // Write bytecode data
+                std::ptr::copy_nonoverlapping(
+                    function.bytecode.as_ptr(),
+                    data_ptr.add(offset),
+                    bytecode_len
+                );
             }
             
             data_start
         })
     }
+
+
 
     pub fn alloc_parsed_value(&self, parsed: ParsedValueWithPos) -> ValueRef {
         let value_ref = match parsed.value {
@@ -709,7 +720,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
-            HeapValue::Macro(mac) => self.alloc_macro(mac),
             HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => self.alloc_env(env),
         }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, CompiledFunction, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
 use crate::env::Env;
 
 impl BlinkVM {
@@ -107,16 +107,10 @@ impl BlinkVM {
         }
     }
 
-    pub fn user_defined_function_value( &self, function: Callable) -> ValueRef {
+    pub fn user_defined_function_value( &self, function: CompiledFunction) -> ValueRef {
         let object_ref = self.alloc_user_defined_fn(function);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
-
-    pub fn macro_value( &self, mac: Callable) -> ValueRef {
-        let object_ref = self.alloc_macro(mac);
-        ValueRef::Heap(GcPtr::new(object_ref))
-    }
-
 
     pub fn empty_map_value( &self) -> ValueRef {
         let map = BlinkHashMap::new();
@@ -260,66 +254,5 @@ impl BlinkVM {
         }
         Err(BlinkError::eval(format!("{} expects vector at position {}", fn_name, index)))
     }
-
-    // ============================================================================
-    // FORMATTING
-    // ============================================================================
-    
-    pub fn format_value(&self, val: ValueRef) -> String {
-        match val {
-            ValueRef::Immediate(packed) => {
-                match unpack_immediate(packed) {
-                    ImmediateValue::Number(n) => n.to_string(),
-                    ImmediateValue::Bool(b) => b.to_string(),
-                    ImmediateValue::Symbol(id) => {
-                                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>".to_string())
-                                                    }
-                    ImmediateValue::Nil => "nil".to_string(),
-                    ImmediateValue::Keyword(id) => {
-                                        self.symbol_table.read().get_symbol(id).unwrap_or("<unknown>".to_string())
-                                    }
-
-                }
-            }
-            ValueRef::Heap(gc_ptr) => {
-                self.format_heap_value(&gc_ptr.to_heap_value())
-            }
-            ValueRef::Native(native) => {
-                format!("#<native fn {:?}>", native)
-            }
-        }
-    }
-    
-    fn format_heap_value(&self, val: &HeapValue) -> String {
-        match val {
-            HeapValue::Str(s) => format!("\"{}\"", s),
-            HeapValue::List(items) => {
-                                        let formatted: Vec<String> = items.iter()
-                                            .map(|item| self.format_value(*item))
-                                            .collect();
-                                        format!("({})", formatted.join(" "))
-                                    }
-            HeapValue::Vector(items) => {
-                                        let formatted: Vec<String> = items.iter()
-                                            .map(|item| self.format_value(*item))
-                                            .collect();
-                                        format!("[{}]", formatted.join(" "))
-                                    }
-            HeapValue::Map(map) => {
-                                        let formatted: Vec<String> = map.iter()
-                                            .map(|(k, v)| format!("{} {}", self.format_value(*k), self.format_value(*v)))
-                                            .collect();
-                                        format!("{{{}}}", formatted.join(", "))
-                                    }
-            HeapValue::Error(e) => format!("#<error: {}>", e),
-            HeapValue::Function(f) => format!("#<fn {:?}>", f.params),
-            HeapValue::Set(hash_set) => format!("#<set {:?}>", hash_set),
-            HeapValue::Future(blink_future) => format!("#<future {:?}>", blink_future),
-            HeapValue::Macro(mac) => format!("#<macro {:?}>", mac),
-            HeapValue::Env(env) => format!("#<env {:?}>", env),
-
-        }
-    }
-
 
 }

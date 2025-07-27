@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use mmtk::util::ObjectReference;
 
-use crate::{compiler::BytecodeCompiler, runtime::{BlinkVM, CompiledFunction, Opcode}, value::unpack_immediate, value::ImmediateValue, ValueRef};
+use crate::{compiler::BytecodeCompiler, runtime::{BlinkVM, CompiledFunction, Opcode, TypeTag}, value::{unpack_immediate, ImmediateValue}, ValueRef};
 
 // Updated call frame for byte-sized bytecode
 #[derive(Clone, Debug)]
@@ -13,11 +13,17 @@ pub struct CallFrame {
     pub current_module: u32,
 }
 
+#[derive(Debug)]
+enum InstructionResult {
+    Continue,
+    Return,
+    Call(CallFrame),
+}
+
 #[derive(Clone, Debug)]
 pub enum FunctionRef {
-    CompiledFunction(ObjectReference),
+    CompiledFunction(CompiledFunction, Option<ObjectReference>),
     Native(usize),
-    CompiledMacro(ObjectReference),
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +32,7 @@ pub struct ExecutionContext {
     current_module: u32,
     register_stack: Vec<ValueRef>,
     call_stack: Vec<CallFrame>,
+    arg_staging: Vec<ValueRef>,
 }
 
 impl ExecutionContext {
@@ -35,21 +42,21 @@ impl ExecutionContext {
             current_module: 0,
             register_stack: Vec::new(),
             call_stack: Vec::new(),
+            arg_staging: Vec::new(),
         }
     }
 
     pub fn get_stack_roots(&self) -> Vec<ObjectReference> {
         let mut roots = Vec::new();
         for frame in self.call_stack.iter() {
-            match frame.func {
-                FunctionRef::CompiledFunction(func) => {
-                    roots.push(func);
+            match &frame.func {
+                FunctionRef::CompiledFunction(_func, obj_ref) => {
+                    if let Some(obj_ref) = obj_ref {
+                        roots.push(*obj_ref);
+                    }
                 },
                 FunctionRef::Native(_func) => {
                     // no op
-                },
-                FunctionRef::CompiledMacro(func) => {
-                    roots.push(func);
                 },
                 
             }
@@ -65,220 +72,411 @@ impl ExecutionContext {
         roots
     }
     
-    /// Compile and execute expression immediately (for REPL)
     pub fn compile_and_execute(&mut self, expr: ValueRef) -> Result<ValueRef, String> {
         let mut compiler = BytecodeCompiler::new(self.vm.clone());
         let compiled = compiler.compile_for_storage(expr)?;
-        self.execute_compiled_function(&compiled, &[])
-    }
-    
-    /// Execute compiled function with arguments
-    fn execute_compiled_function(&mut self, compiled_fn: &CompiledFunction, args: &[ValueRef]) -> Result<ValueRef, String> {
-        if args.len() != compiled_fn.parameter_count as usize {
-            return Err(format!("Function expects {} arguments, got {}", compiled_fn.parameter_count, args.len()));
+        
+        let reg_count = compiled.register_count;
+        // Setup initial frame
+        let initial_frame = CallFrame {
+            func: FunctionRef::CompiledFunction(compiled, None), // No GC object for REPL
+            pc: 0,
+            reg_start: self.register_stack.len(),
+            reg_count: reg_count,
+            current_module: 0,
+        };
+        
+        // Allocate registers for the expression
+        for _ in 0..reg_count {
+            self.register_stack.push(ValueRef::nil());
         }
         
-        let reg_start = self.register_stack.len();
-        let total_registers = reg_start + compiled_fn.register_count as usize;
-        self.register_stack.resize(total_registers, ValueRef::nil());
+        self.call_stack.push(initial_frame);
         
-        // Place arguments in parameter registers
-        for (i, &arg) in args.iter().enumerate() {
-            self.register_stack[reg_start + i] = arg;
-        }
-        
-        // Execute bytecode
-        let result = self.execute_bytecode(&compiled_fn.bytecode, &compiled_fn.constants, reg_start);
-        
-        // Clean up registers
-        self.register_stack.truncate(reg_start);
-        
-        result
+        // Execute frame loop
+        self.execute()
     }
     
-    /// Execute raw bytecode with register base offset
-    fn execute_bytecode(&mut self, bytecode: &[u8], constants: &[ValueRef], reg_base: usize) -> Result<ValueRef, String> {
-        let mut pc = 0;
-        
-        while pc < bytecode.len() {
-            let opcode = Opcode::from_u8(bytecode[pc])?;
-            pc += 1;
+    // Main execution loop - processes all frames until stack is empty
+    pub fn execute(&mut self) -> Result<ValueRef, String> {
+        while !self.call_stack.is_empty() {
+            // Get current frame (don't pop yet)
+            let mut current_frame = if let Some(frame) = self.call_stack.last().cloned() {
+                frame
+            } else {
+                break;
+            };
             
-            match opcode {
-                Opcode::LoadImm8 => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let value = self.read_u8(bytecode, &mut pc)?;
-                    self.register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                }
-                
-                Opcode::LoadImm16 => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let value = self.read_u16(bytecode, &mut pc)?;
-                    self.register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                }
-                
-                Opcode::LoadImm32 => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let value = self.read_u32(bytecode, &mut pc)?;
-                    self.register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                }
-                
-                Opcode::LoadImmConst => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let const_idx = self.read_u8(bytecode, &mut pc)?;
-                    if (const_idx as usize) < constants.len() {
-                        self.register_stack[reg_base + reg as usize] = constants[const_idx as usize];
-                    } else {
-                        return Err(format!("Constant index {} out of bounds", const_idx));
+            if let FunctionRef::CompiledFunction(compiled_fn, _) = &current_frame.func {
+                // Check for end of function
+                if current_frame.pc >= compiled_fn.bytecode.len() {
+                    // Function completed naturally
+                    let completed_frame = self.call_stack.pop().unwrap();
+                    let return_value = self.register_stack[completed_frame.reg_start];
+                    
+                    // Clean up registers
+                    self.register_stack.truncate(completed_frame.reg_start);
+                    
+                    if self.call_stack.is_empty() {
+                        return Ok(return_value);
                     }
+                    
+                    // Store return value in caller's register 0
+                    if let Some(caller_frame) = self.call_stack.last() {
+                        self.register_stack[caller_frame.reg_start] = return_value;
+                    }
+                    continue;
                 }
                 
-                Opcode::LoadLocal => {
-                    let dest_reg = self.read_u8(bytecode, &mut pc)?;
-                    let src_reg = self.read_u8(bytecode, &mut pc)?;
-                    let value = self.register_stack[reg_base + src_reg as usize];
-                    self.register_stack[reg_base + dest_reg as usize] = value;
-                }
+                let opcode = Opcode::from_u8(compiled_fn.bytecode[current_frame.pc])?;
+                current_frame.pc += 1;
                 
-                Opcode::LoadGlobal => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let symbol_id = self.read_u32(bytecode, &mut pc)?;
-                    let module_id = self.call_stack[self.call_stack.len() - 1].current_module;
-                    match self.vm.resolve_global_symbol(module_id, symbol_id) {
-                        Some(value) => {
-                            self.register_stack[reg_base + reg as usize] = value;
-                        }
-                        None => {
-                            return Err(format!("Global symbol {} not found", symbol_id));
+                let instruction_result = Self::execute_instruction(
+                    &mut self.register_stack, 
+                    &self.vm.as_ref(), 
+                    current_frame.current_module, 
+                    opcode, 
+                    &compiled_fn.bytecode, 
+                    &compiled_fn.constants, 
+                    current_frame.reg_start, 
+                    &mut current_frame.pc
+                )?;
+                
+                match instruction_result {
+                    InstructionResult::Continue => {
+                        // Update the frame in the stack
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
                         }
                     }
-                }
-                
-                Opcode::StoreGlobal => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    let symbol_id = self.read_u32(bytecode, &mut pc)?;
-                    let value = self.register_stack[reg_base + reg as usize];
-                    let module_id = self.call_stack[self.call_stack.len() - 1].current_module;
-                    self.vm.update_module(module_id, symbol_id, value);
-                }
-                
-                Opcode::Add => {
-                    let result_reg = self.read_u8(bytecode, &mut pc)?;
-                    let left_reg = self.read_u8(bytecode, &mut pc)?;
-                    let right_reg = self.read_u8(bytecode, &mut pc)?;
-                    
-                    let left = self.register_stack[reg_base + left_reg as usize];
-                    let right = self.register_stack[reg_base + right_reg as usize];
-                    
-                    match self.perform_addition(left, right) {
-                        Ok(result) => {
-                            self.register_stack[reg_base + result_reg as usize] = result;
+                    InstructionResult::Return => {
+                        // Get return value from register 0 of completed frame
+                        let completed_frame = self.call_stack.pop().unwrap();
+                        let return_value = self.register_stack[completed_frame.reg_start];
+                        
+                        // Clean up registers used by completed frame
+                        self.register_stack.truncate(completed_frame.reg_start);
+                        
+                        // If no more frames, we're done
+                        if self.call_stack.is_empty() {
+                            return Ok(return_value);
                         }
-                        Err(e) => return Err(e),
-                    }
-                }
-                
-                Opcode::Sub => {
-                    let result_reg = self.read_u8(bytecode, &mut pc)?;
-                    let left_reg = self.read_u8(bytecode, &mut pc)?;
-                    let right_reg = self.read_u8(bytecode, &mut pc)?;
-                    
-                    let left = self.register_stack[reg_base + left_reg as usize];
-                    let right = self.register_stack[reg_base + right_reg as usize];
-                    
-                    match self.perform_subtraction(left, right) {
-                        Ok(result) => {
-                            self.register_stack[reg_base + result_reg as usize] = result;
+                        
+                        // Store return value in caller's register 0
+                        if let Some(caller_frame) = self.call_stack.last() {
+                            self.register_stack[caller_frame.reg_start] = return_value;
                         }
-                        Err(e) => return Err(e),
                     }
-                }
-                
-                Opcode::Mul => {
-                    let result_reg = self.read_u8(bytecode, &mut pc)?;
-                    let left_reg = self.read_u8(bytecode, &mut pc)?;
-                    let right_reg = self.read_u8(bytecode, &mut pc)?;
-                    
-                    let left = self.register_stack[reg_base + left_reg as usize];
-                    let right = self.register_stack[reg_base + right_reg as usize];
-                    
-                    match self.perform_multiplication(left, right) {
-                        Ok(result) => {
-                            self.register_stack[reg_base + result_reg as usize] = result;
+                    InstructionResult::Call(new_frame) => {
+                        // Update current frame PC, then push new frame
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
                         }
-                        Err(e) => return Err(e),
+                        self.call_stack.push(new_frame);
                     }
                 }
-                
-                Opcode::Div => {
-                    let result_reg = self.read_u8(bytecode, &mut pc)?;
-                    let left_reg = self.read_u8(bytecode, &mut pc)?;
-                    let right_reg = self.read_u8(bytecode, &mut pc)?;
-                    
-                    let left = self.register_stack[reg_base + left_reg as usize];
-                    let right = self.register_stack[reg_base + right_reg as usize];
-                    
-                    match self.perform_division(left, right) {
-                        Ok(result) => {
-                            self.register_stack[reg_base + result_reg as usize] = result;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                
-                Opcode::Jump => {
-                    let offset = self.read_i16(bytecode, &mut pc)?;
-                    pc = (pc as i32 + offset as i32) as usize;
-                }
-                
-                Opcode::JumpIfTrue => {
-                    let test_reg = self.read_u8(bytecode, &mut pc)?;
-                    let offset = self.read_i16(bytecode, &mut pc)?;
-                    let test_value = self.register_stack[reg_base + test_reg as usize];
-                    if test_value.is_truthy() {
-                        pc = (pc as i32 + offset as i32) as usize;
-                    }
-                }
-                
-                Opcode::JumpIfFalse => {
-                    let test_reg = self.read_u8(bytecode, &mut pc)?;
-                    let offset = self.read_i16(bytecode, &mut pc)?;
-                    let test_value = self.register_stack[reg_base + test_reg as usize];
-                    if !test_value.is_truthy() {
-                        pc = (pc as i32 + offset as i32) as usize;
-                    }
-                }
-                
-                Opcode::Call => {
-                    let func_reg = self.read_u8(bytecode, &mut pc)?;
-                    let arg_count = self.read_u8(bytecode, &mut pc)?;
-                    let result_reg = self.read_u8(bytecode, &mut pc)?;
-                    
-                    // For now, return error - function calls need frame management
-                    return Err("Function calls not implemented in simple executor".to_string());
-                }
-                
-                Opcode::Return => {
-                    let reg = self.read_u8(bytecode, &mut pc)?;
-                    return Ok(self.register_stack[reg_base + reg as usize]);
-                }
-                
-                Opcode::ReturnNil => {
-                    return Ok(ValueRef::nil());
-                }
-                
-                _ => {
-                    return Err(format!("Unimplemented opcode: {:?}", opcode));
-                }
+            } else {
+                // TODO: Implement native function calls
+                todo!()
             }
         }
         
         Ok(ValueRef::nil())
     }
     
+    fn execute_instruction(
+        register_stack: &mut Vec<ValueRef>,
+        vm: &BlinkVM,
+        current_module: u32,
+        opcode: Opcode,
+        bytecode: &[u8],
+        constants: &[ValueRef],
+        reg_base: usize,
+        pc: &mut usize,
+    ) -> Result<InstructionResult, String> {
+        match opcode {
+            Opcode::LoadImm8 => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let value = Self::read_u8(bytecode, pc)?;
+                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::LoadImm16 => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let value = Self::read_u16(bytecode, pc)?;
+                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::LoadImm32 => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let value = Self::read_u32(bytecode, pc)?;
+                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::LoadImmConst => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let const_idx = Self::read_u8(bytecode, pc)?;
+                if (const_idx as usize) < constants.len() {
+                    register_stack[reg_base + reg as usize] = constants[const_idx as usize];
+                } else {
+                    return Err(format!("Constant index {} out of bounds", const_idx));
+                }
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::LoadLocal => {
+                let dest_reg = Self::read_u8(bytecode, pc)?;
+                let src_reg = Self::read_u8(bytecode, pc)?;
+                let value = register_stack[reg_base + src_reg as usize];
+                register_stack[reg_base + dest_reg as usize] = value;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::LoadGlobal => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let symbol_id = Self::read_u32(bytecode, pc)?;
+                let module_id = current_module; // Use context module
+                match vm.resolve_global_symbol(module_id, symbol_id) {
+                    Some(value) => {
+                        register_stack[reg_base + reg as usize] = value;
+                    }
+                    None => {
+                        return Err(format!("Global symbol {} not found", symbol_id));
+                    }
+                }
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::StoreGlobal => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                let symbol_id = Self::read_u32(bytecode, pc)?;
+                let value = register_stack[reg_base + reg as usize];
+                let module_id = current_module;
+                vm.update_module(module_id, symbol_id, value);
+                Ok(InstructionResult::Continue)
+            }
+            
+            // Arithmetic operations
+            Opcode::Add => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                let left_num = Self::extract_number(left)?;
+                let right_num = Self::extract_number(right)?;
+                let result = ValueRef::number(left_num + right_num);
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::Sub => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                let left_num = Self::extract_number(left)?;
+                let right_num = Self::extract_number(right)?;
+                let result = ValueRef::number(left_num - right_num);
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::Mul => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                let left_num = Self::extract_number(left)?;
+                let right_num = Self::extract_number(right)?;
+                let result = ValueRef::number(left_num * right_num);
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::Div => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                let left_num = Self::extract_number(left)?;
+                let right_num = Self::extract_number(right)?;
+                
+                if right_num == 0.0 {
+                    return Err("Division by zero".to_string());
+                }
+                
+                let result = ValueRef::number(left_num / right_num);
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            // Control flow
+            Opcode::Jump => {
+                let offset = Self::read_i16(bytecode, pc)?;
+                *pc = (*pc as i32 + offset as i32) as usize;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::JumpIfTrue => {
+                let test_reg = Self::read_u8(bytecode, pc)?;
+                let offset = Self::read_i16(bytecode, pc)?;
+                let test_value = register_stack[reg_base + test_reg as usize];
+                if test_value.is_truthy() {
+                    *pc = (*pc as i32 + offset as i32) as usize;
+                }
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::JumpIfFalse => {
+                let test_reg = Self::read_u8(bytecode, pc)?;
+                let offset = Self::read_i16(bytecode, pc)?;
+                let test_value = register_stack[reg_base + test_reg as usize];
+                if !test_value.is_truthy() {
+                    *pc = (*pc as i32 + offset as i32) as usize;
+                }
+                Ok(InstructionResult::Continue)
+            }
+            
+            // Function operations
+            Opcode::Call => {
+                let func_reg = Self::read_u8(bytecode, pc)?;
+                let arg_count = Self::read_u8(bytecode, pc)?;
+                let _result_reg = Self::read_u8(bytecode, pc)?; // Ignored - always use reg 0
+                
+                let func_value = register_stack[reg_base + func_reg as usize];
+                
+                let frame = Self::setup_function_call(register_stack, current_module,func_value, arg_count, reg_base)?;
+                Ok(InstructionResult::Call(frame))
+            }
+            
+            Opcode::Return => {
+                let reg = Self::read_u8(bytecode, pc)?;
+                // Move return value to register 0 of current frame
+                let return_value = register_stack[reg_base + reg as usize];
+                register_stack[reg_base] = return_value;
+                Ok(InstructionResult::Return)
+            }
+            
+            Opcode::ReturnNil => {
+                register_stack[reg_base] = ValueRef::nil();
+                Ok(InstructionResult::Return)
+            }
+            
+            // Comparison operations
+            Opcode::Lt => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                
+                let left_num = Self::extract_number(left)?;
+                let right_num = Self::extract_number(right)?;
+                
+                let result = if left_num < right_num {
+                    ValueRef::boolean(true)
+                } else {
+                    ValueRef::boolean(false)
+                };
+                
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            Opcode::Eq => {
+                let result_reg = Self::read_u8(bytecode, pc)?;
+                let left_reg = Self::read_u8(bytecode, pc)?;
+                let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                let left = register_stack[reg_base + left_reg as usize];
+                let right = register_stack[reg_base + right_reg as usize];
+                
+                let result = if left == right {
+                    ValueRef::boolean(true)
+                } else {
+                    ValueRef::boolean(false)
+                };
+                
+                register_stack[reg_base + result_reg as usize] = result;
+                Ok(InstructionResult::Continue)
+            }
+            
+            _ => {
+                Err(format!("Unimplemented opcode: {:?}", opcode))
+            }
+        }
+    }
+    
+    fn setup_function_call(register_stack: &mut Vec<ValueRef>, current_module: u32, func_value: ValueRef, arg_count: u8, caller_reg_base: usize) -> Result<CallFrame, String> {
+        let (func_ref, module) = match func_value {
+            ValueRef::Heap(heap) => {
+                let type_tag = heap.type_tag();
+                let obj_ref = heap.0;
+                match type_tag {
+                    TypeTag::UserDefinedFunction => {
+                        let compiled_func = heap.read_callable();
+                        let module = compiled_func.module;
+                        (FunctionRef::CompiledFunction(compiled_func, Some(obj_ref)), module)
+                    },
+                    _ => return Err(format!("Invalid function value: {:?}", func_value)),
+                }
+            }
+            ValueRef::Native(native) => {
+                (FunctionRef::Native(native), current_module)
+            }
+            _ => return Err(format!("Invalid function value: {:?}", func_value)),
+        };
+        
+        match func_ref {
+            FunctionRef::CompiledFunction(compiled_fn, obj_ref) => {
+                // Allocate registers for new frame
+                let reg_start = register_stack.len();
+                let reg_count = compiled_fn.register_count;
+                
+                // Resize register stack - include register 0 for return value
+                for _ in 0..reg_count {
+                    register_stack.push(ValueRef::nil());
+                }
+                
+                // Copy arguments to parameter registers (starting from register 1)
+                for i in 0..arg_count.min(compiled_fn.parameter_count) {
+                    let arg_value = register_stack[caller_reg_base + 1 + i as usize];
+                    register_stack[reg_start + 1 + i as usize] = arg_value; // Parameters start at reg 1
+                }
+                
+                let frame = CallFrame {
+                    func: FunctionRef::CompiledFunction(compiled_fn, obj_ref),
+                    pc: 0,
+                    reg_start,
+                    reg_count,
+                    current_module: module,
+                };
+                
+                Ok(frame)
+            }
+            FunctionRef::Native(native_fn) => {
+                // Execute native function immediately
+                // TODO: Implement native function calls
+                Err("Native functions not implemented".to_string())
+            }
+        }
+    }
+    
     // BYTECODE READING HELPERS
     
-    fn read_u8(&self, bytecode: &[u8], pc: &mut usize) -> Result<u8, String> {
+    fn read_u8(bytecode: &[u8], pc: &mut usize) -> Result<u8, String> {
         if *pc >= bytecode.len() {
             return Err("Unexpected end of bytecode".to_string());
         }
@@ -287,7 +485,7 @@ impl ExecutionContext {
         Ok(value)
     }
     
-    fn read_u16(&self, bytecode: &[u8], pc: &mut usize) -> Result<u16, String> {
+    fn read_u16(bytecode: &[u8], pc: &mut usize) -> Result<u16, String> {
         if *pc + 1 >= bytecode.len() {
             return Err("Unexpected end of bytecode".to_string());
         }
@@ -296,7 +494,7 @@ impl ExecutionContext {
         Ok(u16::from_le_bytes(bytes))
     }
     
-    fn read_u32(&self, bytecode: &[u8], pc: &mut usize) -> Result<u32, String> {
+    fn read_u32(bytecode: &[u8], pc: &mut usize) -> Result<u32, String> {
         if *pc + 3 >= bytecode.len() {
             return Err("Unexpected end of bytecode".to_string());
         }
@@ -305,7 +503,7 @@ impl ExecutionContext {
         Ok(u32::from_le_bytes(bytes))
     }
     
-    fn read_i16(&self, bytecode: &[u8], pc: &mut usize) -> Result<i16, String> {
+    fn read_i16(bytecode: &[u8], pc: &mut usize) -> Result<i16, String> {
         if *pc + 1 >= bytecode.len() {
             return Err("Unexpected end of bytecode".to_string());
         }
@@ -314,39 +512,9 @@ impl ExecutionContext {
         Ok(i16::from_le_bytes(bytes))
     }
     
-    // ARITHMETIC HELPERS (same as before)
     
-    fn perform_addition(&self, left: ValueRef, right: ValueRef) -> Result<ValueRef, String> {
-        // Same implementation as before
-        let left_num = self.extract_number(left)?;
-        let right_num = self.extract_number(right)?;
-        Ok(ValueRef::number(left_num + right_num))
-    }
     
-    fn perform_subtraction(&self, left: ValueRef, right: ValueRef) -> Result<ValueRef, String> {
-        let left_num = self.extract_number(left)?;
-        let right_num = self.extract_number(right)?;
-        Ok(ValueRef::number(left_num - right_num))
-    }
-    
-    fn perform_multiplication(&self, left: ValueRef, right: ValueRef) -> Result<ValueRef, String> {
-        let left_num = self.extract_number(left)?;
-        let right_num = self.extract_number(right)?;
-        Ok(ValueRef::number(left_num * right_num))
-    }
-    
-    fn perform_division(&self, left: ValueRef, right: ValueRef) -> Result<ValueRef, String> {
-        let left_num = self.extract_number(left)?;
-        let right_num = self.extract_number(right)?;
-        
-        if right_num == 0.0 {
-            return Err("Division by zero".to_string());
-        }
-        
-        Ok(ValueRef::number(left_num / right_num))
-    }
-    
-    fn extract_number(&self, value: ValueRef) -> Result<f64, String> {
+    fn extract_number(value: ValueRef) -> Result<f64, String> {
         match value {
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Number(n) = unpack_immediate(packed) {
@@ -357,7 +525,7 @@ impl ExecutionContext {
             }
             _ => Err("Value is not a number".to_string()),
         }
-    }
+    }    
 }
 
 

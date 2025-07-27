@@ -22,6 +22,10 @@ pub enum Opcode {
     Sub = 0x21,             // Subtract two registers
     Mul = 0x22,             // Multiply two registers
     Div = 0x23,             // Divide two registers
+    AddImm8 = 0x24,         // Add 8-bit immediate to register
+    SubImm8 = 0x25,         // Subtract 8-bit immediate from register
+    MulImm8 = 0x26,         // Multiply 8-bit immediate by register
+    DivImm8 = 0x27,         // Divide register by 8-bit immediate
     
     // Comparison operations
     Eq = 0x30,              // Equal comparison
@@ -38,11 +42,23 @@ pub enum Opcode {
     TailCall = 0x51,        // Tail call function
     Return = 0x52,          // Return from function
     ReturnNil = 0x53,       // Return nil
+    CallDynamic = 0x54,     // Call function with prepared arguments
+    TailCallDynamic = 0x55, // Tail call with prepared arguments
+    PrepareArgs = 0x56,     // Prepare argument registers for function call
     
     // Scope operations
     BeginScope = 0x60,      // Begin new scope
     EndScope = 0x61,        // End current scope
     Bind = 0x62,            // Bind value to symbol
+
+    // Collection operations
+    GetLength = 0x70,       // Get length of list/vector
+    GetElement = 0x71,      // Get element at index
+    
+    // Loop operations  
+    InitLoop = 0x80,        // Initialize loop counter
+    LoopTest = 0x81,        // Test loop condition and jump
+    LoopIncr = 0x82,        // Increment loop counter
 }
 
 impl Opcode {

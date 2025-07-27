@@ -21,7 +21,7 @@ impl Scanning<BlinkVM> for BlinkScanning {
         
         
         match type_tag {
-            TypeTag::Macro | TypeTag::UserDefinedFunction => Self::scan_callable_object(slot_visitor, object),
+            TypeTag::UserDefinedFunction => Self::scan_callable(slot_visitor, object),
             TypeTag::Env => Self::scan_env_object(slot_visitor, object),
             TypeTag::List => Self::scan_vec_or_list_object(slot_visitor, object),
             TypeTag::Vector => Self::scan_vec_or_list_object(slot_visitor, object),
@@ -96,26 +96,26 @@ impl BlinkScanning {
 
 
 
-    fn scan_callable_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
-        slot_visitor: &mut SV,
-        object: ObjectReference
-    ) {
+    pub fn scan_callable<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(slot_visitor: &mut SV, obj_ref: ObjectReference) {
         unsafe {
-            let data_ptr = object.to_raw_address().as_usize() as *const u8;
+            let data_ptr = obj_ref.to_raw_address().as_usize() as *const u8;
             let mut offset = 0;
             
-            // Scan env reference (raw ObjectReference)
-            let env_addr = Address::from_usize(data_ptr.add(offset) as usize);
-            let env_slot = BlinkSlot::ObjectRef(env_addr);
-            slot_visitor.visit_slot(env_slot);
-            offset += std::mem::size_of::<ObjectReference>();
-            
-            // Read body count
-            let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            // Read constants count
+            let constants_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
             
-            // Scan body expressions using helper
-            Self::scan_value_ref_seq(slot_visitor, data_ptr, body_count, offset);
+            // Scan all constants for ObjectReferences
+            for _ in 0..constants_count {
+                let constant_ptr = data_ptr.add(offset) as *const ValueRef;
+                let constant = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
+                if let ValueRef::Heap(heap_ref) = constant {
+                    slot_visitor.visit_slot(BlinkSlot::ValueRef(Address::from_ptr(constant_ptr)));
+                }
+                offset += std::mem::size_of::<ValueRef>();
+            }
+            
+            // Don't need to scan the rest - no more ObjectReferences after constants
         }
     }
 

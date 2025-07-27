@@ -6,7 +6,7 @@ use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::module::{Module, SerializedModuleSource};
-use crate::runtime::BlinkObjectModel;
+use crate::runtime::{BlinkObjectModel, CompiledFunction};
 use crate::value::{Callable, SourceRange};
 use crate::env::Env;
 use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
@@ -31,7 +31,6 @@ impl PartialEq for GcPtr {
             // ref equality for error, user defined function, macro, future, env
             TypeTag::Error => self.0 == other.0,
             TypeTag::UserDefinedFunction => self.0 == other.0,
-            TypeTag::Macro => self.0 == other.0,
             TypeTag::Future => self.0 == other.0,
             TypeTag::Env => self.0 == other.0,
             _ => {
@@ -72,9 +71,8 @@ impl GcPtr {
                                     HeapValue::Map(self.read_blink_hash_map())
                                 }
             TypeTag::Set => HeapValue::Set(self.read_blink_hash_set()),
-            TypeTag::Error => HeapValue::Error(self.read_error()),
+            TypeTag::Error => HeapValue::Error(self.read_error()),  
             TypeTag::UserDefinedFunction => HeapValue::Function(self.read_callable()),
-            TypeTag::Macro => HeapValue::Macro(self.read_callable()),
             TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
         }
@@ -332,53 +330,56 @@ impl GcPtr {
 
 
     
-pub fn read_callable(&self) -> Callable {
-    unsafe {
-        let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
-        let mut offset = 0;
-        
-        // Read env reference FIRST
-        let env = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
-        offset += std::mem::size_of::<ObjectReference>();
-        
-        // Read module ID
-        let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-        offset += std::mem::size_of::<u32>();
-        
-        // Read body count
-        let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-        offset += std::mem::size_of::<u32>();
-        
-        // Read all body expressions
-        let mut body = Vec::with_capacity(body_count);
-        for _ in 0..body_count {
-            let expr = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
-            body.push(expr);
-            offset += std::mem::size_of::<ValueRef>();
-        }
-        
-        // Read params count
-        let params_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
-        offset += std::mem::size_of::<u32>();
-        
-        // Read parameter IDs
-        let mut params = Vec::with_capacity(params_count);
-        for _ in 0..params_count {
-            let param_id = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
-            params.push(param_id);
+    pub fn read_callable(&self) -> CompiledFunction {
+        unsafe {
+            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
+            
+            // Read constants count FIRST
+            let constants_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
-        }
-        
-        // Read variadic flag
-        let is_variadic = std::ptr::read_unaligned(data_ptr.add(offset) as *const bool);
-        
-        Callable {
-            params,
-            body,
-            env,
-            is_variadic,
-            module,
+            
+            // Read constants array
+            let mut constants = Vec::with_capacity(constants_count);
+            for _ in 0..constants_count {
+                let constant = std::ptr::read_unaligned(data_ptr.add(offset) as *const ValueRef);
+                constants.push(constant);
+                offset += std::mem::size_of::<ValueRef>();
+            }
+            
+            // Read parameter count
+            let parameter_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+            
+            // Read register count
+            let register_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+            
+            // Read module
+            let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            offset += std::mem::size_of::<u32>();
+            
+            // Read bytecode length
+            let bytecode_len = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+            
+            // Read bytecode data
+            let mut bytecode = Vec::with_capacity(bytecode_len);
+            std::ptr::copy_nonoverlapping(
+                data_ptr.add(offset),
+                bytecode.as_mut_ptr(),
+                bytecode_len
+            );
+            bytecode.set_len(bytecode_len);
+            
+            CompiledFunction {
+                bytecode,
+                constants,
+                parameter_count,
+                register_count,
+                module,
+            }
         }
     }
-}
+    
 }

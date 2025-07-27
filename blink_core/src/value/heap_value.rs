@@ -1,7 +1,7 @@
 use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
+    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, runtime::CompiledFunction, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
 };
 
 #[derive(Debug)]
@@ -12,8 +12,7 @@ pub enum HeapValue {
     Str(String),
     Set(BlinkHashSet),
     Error(BlinkError),
-    Function(Callable),
-    Macro(Callable),
+    Function(CompiledFunction), // Encompasses functions and expanded macros
     Future(BlinkFuture),
     Env(Env),
 }
@@ -56,10 +55,6 @@ impl Display for HeapValue {
                             },
             HeapValue::Function(callable) => {
                                 write!(f, "function")?;
-                                Ok(())
-                            },
-            HeapValue::Macro(callable) => {
-                                write!(f, "macro")?;
                                 Ok(())
                             },
             HeapValue::Future(blink_future) => {
@@ -121,21 +116,15 @@ impl Hash for HeapValue {
                     }
             HeapValue::Function(user_defined_fn) => {
                         "user-defined-function".hash(state);
-                        user_defined_fn.params.hash(state);
-                        user_defined_fn.body.len().hash(state);
-                        for expr in &user_defined_fn.body {
-                            expr.hash(state);
+                        user_defined_fn.parameter_count.hash(state);
+                        user_defined_fn.bytecode.len().hash(state);
+                        user_defined_fn.constants.len().hash(state);
+                        for constant in &user_defined_fn.constants {
+                            constant.hash(state);
                         }
+                        user_defined_fn.bytecode.hash(state);
                     }
-            HeapValue::Macro(mac) => {
-                        "macro".hash(state);
-                        mac.params.hash(state);
-                        mac.is_variadic.hash(state);
-                        mac.body.len().hash(state);
-                        for expr in &mac.body {
-                            expr.hash(state);
-                        }
-                    }
+            
             HeapValue::Future(blink_future) => {
                         todo!()
                     }
@@ -172,9 +161,6 @@ impl PartialEq for HeapValue {
                 panic!("Should have happened already")
                 
             },
-            (HeapValue::Macro(_), HeapValue::Macro(_)) => {
-                panic!("Should have happened already")
-            },
             (HeapValue::Future(_), HeapValue::Future(_)) => {
                 panic!("Should have happened already")
             }
@@ -198,7 +184,6 @@ impl HeapValue {
             HeapValue::Set(_) => "set",
             HeapValue::Error(_) => "error",
             HeapValue::Function(_) => "function",
-            HeapValue::Macro(_) => "macro",
             HeapValue::Future(_) => "future",
             HeapValue::Env(_) => "env",
         }
