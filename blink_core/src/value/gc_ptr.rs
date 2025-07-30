@@ -6,7 +6,7 @@ use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::module::{Module, SerializedModuleSource};
-use crate::runtime::{BlinkObjectModel, CompiledFunction};
+use crate::runtime::{BlinkObjectModel, ClosureObject, CompiledFunction};
 use crate::value::{Callable, SourceRange};
 use crate::env::Env;
 use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
@@ -59,22 +59,23 @@ impl GcPtr {
         
         match type_tag {
             TypeTag::Str => {
-                                    HeapValue::Str(self.read_string(data_size))
-                                }
+                                                    HeapValue::Str(self.read_string(data_size))
+                                                }
             TypeTag::List => {
-                                    HeapValue::List(self.read_vec(data_size))
-                                }
+                                                    HeapValue::List(self.read_vec(data_size))
+                                                }
             TypeTag::Vector => {
-                                    HeapValue::Vector(self.read_vec(data_size))
-                                }
+                                                    HeapValue::Vector(self.read_vec(data_size))
+                                                }
             TypeTag::Map => {
-                                    HeapValue::Map(self.read_blink_hash_map())
-                                }
+                                                    HeapValue::Map(self.read_blink_hash_map())
+                                                }
             TypeTag::Set => HeapValue::Set(self.read_blink_hash_set()),
-            TypeTag::Error => HeapValue::Error(self.read_error()),  
+            TypeTag::Error => HeapValue::Error(self.read_error()),
             TypeTag::UserDefinedFunction => HeapValue::Function(self.read_callable()),
             TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
+            TypeTag::Closure => HeapValue::Closure(self.read_closure()),
         }
     }
 
@@ -248,6 +249,16 @@ impl GcPtr {
         }
     }
 
+ 
+
+    pub fn set_upvalue_at_index(&self, index: usize, value: ValueRef) {
+        unsafe {
+            let data_ptr = self.0.to_raw_address().as_usize() as *mut u8;
+            let items_ptr = data_ptr.add(std::mem::size_of::<ObjectHeader>()) as *mut ValueRef;
+            std::ptr::write(items_ptr.add(index), value);
+        }
+    }
+
 
 
     // Fast lookup without reconstructing HashMap
@@ -359,6 +370,12 @@ impl GcPtr {
             let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
             offset += std::mem::size_of::<u32>();
             
+            let register_start = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+
+            let has_self_reference = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+
             // Read bytecode length
             let bytecode_len = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
@@ -378,8 +395,50 @@ impl GcPtr {
                 parameter_count,
                 register_count,
                 module,
+                register_start,
+                has_self_reference: has_self_reference == 1,
             }
         }
     }
-    
+
+    pub fn set_upvalue(&self, index: usize, value: ValueRef) -> Result<(), String> {
+        let data_ptr = self.0.to_raw_address().as_usize() as *mut u8;
+        unsafe {
+            let mut offset = std::mem::size_of::<ObjectReference>();  // Skip template
+            let upvalues_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            
+            if index >= upvalues_count {
+                return Err(format!("Upvalue index {} out of bounds", index));
+            }
+            
+            offset += std::mem::size_of::<u32>();  // Skip count
+            let upvalues_ptr = data_ptr.add(offset) as *mut ValueRef;
+            
+            // Direct write to the specific upvalue slot
+            std::ptr::write(upvalues_ptr.add(index), value);
+        }
+        Ok(())
+    }
+
+    pub fn read_closure(&self) -> ClosureObject {
+        let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+        let mut offset = 0;
+
+        unsafe {
+
+            let template = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
+            offset += std::mem::size_of::<ObjectReference>();
+
+            let upvalues_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+
+            let upvalues_ptr = data_ptr.add(offset) as *const ValueRef;
+            let upvalues = std::slice::from_raw_parts(upvalues_ptr, upvalues_count);
+
+            ClosureObject {
+                template,
+                upvalues: upvalues.to_vec(),
+            }
+        }
+    }
 }

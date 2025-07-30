@@ -1,27 +1,40 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{error::BlinkError, runtime::{BlinkVM, Bytecode, CompiledFunction, LabelPatch, Opcode}, value::unpack_immediate, ImmediateValue, ValueRef};
+use crate::{error::BlinkError, runtime::{BlinkVM, Bytecode, CompiledFunction, LabelPatch, Opcode}, value::{unpack_immediate, GcPtr}, ImmediateValue, ValueRef};
 
 // The main bytecode compiler
 pub struct BytecodeCompiler {
     vm: Arc<BlinkVM>,
-    bytecode: Bytecode,
+    bytecode: Vec<u8>,
     constants: Vec<ValueRef>,
     next_register: u8,
-    scope_stack: Vec<HashMap<u32, u8>>, // symbol_id -> register mapping
-    next_label_id: u16,
+    scope_stack: Vec<HashMap<u32, u8>>,  // symbol_id -> register
+    current_module: u32,  // Add this field
+    
+    // For closure support
+    upvalue_stack: Vec<HashMap<u32, u8>>,  // symbol_id -> upvalue_index
+    captured_symbols: Vec<u32>,            // symbols captured as upvalues
+    
+    // Label management
+    next_label: u16,
+    label_positions: HashMap<u16, usize>,
     label_patches: Vec<LabelPatch>,
 }
 
+
 impl BytecodeCompiler {
-    pub fn new(vm: Arc<BlinkVM>) -> Self {
+    pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         Self {
             vm,
             bytecode: Vec::new(),
             constants: Vec::new(),
-            next_register: 0,
-            scope_stack: vec![HashMap::new()], // Global scope
-            next_label_id: 0,
+            next_register: 1, // Register 0 reserved for return value
+            scope_stack: Vec::new(),
+            current_module,
+            upvalue_stack: Vec::new(),
+            captured_symbols: Vec::new(),
+            next_label: 0,
+            label_positions: HashMap::new(),
             label_patches: Vec::new(),
         }
     }
@@ -32,7 +45,7 @@ impl BytecodeCompiler {
         self.next_register = 0;
         self.scope_stack.clear();
         self.scope_stack.push(HashMap::new());
-        self.next_label_id = 0;
+        self.next_label = 0;
         self.label_patches.clear();
     }
     
@@ -123,8 +136,8 @@ impl BytecodeCompiler {
     // LABEL MANAGEMENT
     
     fn alloc_label(&mut self) -> u16 {
-        let label = self.next_label_id;
-        self.next_label_id += 1;
+        let label = self.next_label;
+        self.next_label += 1;
         label
     }
 
@@ -209,10 +222,19 @@ impl BytecodeCompiler {
     
     fn compile_expression(&mut self, expr: ValueRef) -> Result<u8, String> {
         match expr {
-            ValueRef::Immediate(_) => {
-                let reg = self.alloc_register();
-                self.emit_load_immediate(reg, expr);
-                Ok(reg)
+            ValueRef::Immediate(packed) => {
+                let imm = unpack_immediate(packed);
+                match imm {
+                    ImmediateValue::Symbol(symbol_id) => {
+                        self.compile_symbol_reference(symbol_id)
+                        
+                    }
+                    _ => {
+                        let reg = self.alloc_register();
+                        self.emit_load_immediate(reg, expr);
+                        Ok(reg)
+                    }
+                }
             }
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
@@ -230,9 +252,411 @@ impl BytecodeCompiler {
             }
         }
     }
+
+    fn compile_fn(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        
+        if args.len() < 2 {
+            return Err("fn expects at least 2 arguments: [name] parameters and body".to_string());
+        }
+        
+        // Parse name vs anonymous function
+        let (function_name, params_index) = if args.len() >= 3 {
+            // Check if first arg is a symbol (potential function name)
+            if let ValueRef::Immediate(packed) = args[0] {
+                if let ImmediateValue::Symbol(name_symbol) = unpack_immediate(packed) {
+                    // First arg is a symbol, treat as named function
+                    (Some(name_symbol), 1)
+                } else {
+                    // First arg is not a symbol, treat as anonymous
+                    (None, 0)
+                }
+            } else {
+                // First arg is not immediate, treat as anonymous
+                (None, 0)
+            }
+        } else {
+            // Only 2 args, must be anonymous: (fn [params] body)
+            (None, 0)
+        };
+        
+        // Parse parameter list
+        let params = args[params_index].get_vec()
+            .ok_or("fn parameter list must be a vector")?;
+        
+        let param_symbols: Result<Vec<u32>, String> = params.iter()
+            .map(|p| match p {
+                ValueRef::Immediate(packed) => {
+                    if let ImmediateValue::Symbol(sym_id) = unpack_immediate(*packed) {
+                        Ok(sym_id)
+                    } else {
+                        Err("fn parameters must be symbols".to_string())
+                    }
+                }
+                _ => Err("fn parameters must be symbols".to_string())
+            })
+            .collect();
+        let param_symbols = param_symbols?;
+        
+        // Validate parameter count
+        if param_symbols.len() > 255 {
+            return Err("fn cannot have more than 255 parameters".to_string());
+        }
+        
+        // Save current compilation state
+        let saved_bytecode = std::mem::take(&mut self.bytecode);
+        let saved_constants = std::mem::take(&mut self.constants);
+        let saved_register_count = self.next_register;
+        let saved_labels = std::mem::take(&mut self.label_positions);
+        let saved_patches = std::mem::take(&mut self.label_patches);
+        let saved_next_label = self.next_label;
+        
+        // Reset for function compilation
+        self.next_register = 1; // Register 0 reserved for return value
+        self.next_label = 0;
+        
+        // Enter function scope
+        
+        self.enter_scope();
+        
+        
+        // If named function, bind the name to itself for recursion
+        // We'll use a special register slot that gets set up at function call time
+        if let Some(name_symbol) = function_name {
+            // Reserve a register for the function self-reference
+            let self_ref_reg = self.alloc_register();
+            self.bind_local_symbol(name_symbol, self_ref_reg);
+            
+            // At function entry, the function object will be loaded into this register
+            // This happens in the VM when the function is called
+        }
+        
+        // Bind parameters to registers (params start after self-reference if named)
+        let param_start_reg = if function_name.is_some() { 2 } else { 1 };
+        for (i, &param_symbol) in param_symbols.iter().enumerate() {
+            let target_reg = (param_start_reg + i) as u8;
+            println!("Binding parameter symbol {} to register {}", param_symbol, target_reg);
+            self.bind_local_symbol(param_symbol, target_reg);
+        }
+
+
+        self.next_register = (param_start_reg + param_symbols.len()) as u8;
+        
+        // Analyze closure requirements - no need for upvalue array register anymore
+        let body_exprs = &args[(params_index + 1)..];
+        self.analyze_closures(body_exprs)?;
+        
+        // For named functions, emit instruction to load self-reference
+        if let Some(_name_symbol) = function_name {
+            // The VM will handle setting up the self-reference register
+            // when the function is called. We emit a special opcode here.
+            self.emit_u8(Opcode::SetupSelfReference as u8);  // Use enum
+            self.emit_u8(1); // Self-reference register
+        }
+        
+        // Compile function body expressions
+        let mut result_reg = self.alloc_register(); // Default return value
+        
+        for (i, &expr) in body_exprs.iter().enumerate() {
+            result_reg = self.compile_expression(expr)?;
+            
+            // Check for tail call optimization on final expression
+            if i == body_exprs.len() - 1 {
+                if let Some(_tail_call_reg) = self.check_tail_call(expr)? {
+                    // Already emitted TailCall - function will return
+                    self.exit_scope();
+                    
+                    // Extract function compilation results
+                    let function_bytecode = std::mem::take(&mut self.bytecode);
+                    let function_constants = std::mem::take(&mut self.constants);
+                    let function_registers = self.next_register;
+                    
+                    // Restore parent compilation state
+                    self.bytecode = saved_bytecode;
+                    self.constants = saved_constants;
+                    self.next_register = saved_register_count;
+                    self.label_positions = saved_labels;
+                    self.label_patches = saved_patches;
+                    self.next_label = saved_next_label;
+                    
+                    let compiled_fn = CompiledFunction {
+                        bytecode: function_bytecode,
+                        constants: function_constants,
+                        parameter_count: param_symbols.len() as u8,
+                        register_count: function_registers,
+                        module: self.current_module,
+                        register_start: param_start_reg as u8,
+                        has_self_reference: function_name.is_some(),
+                    };
+                    
+                    return self.create_closure_object(compiled_fn);
+                }
+            }
+        }
+        
+        // Regular return
+        self.emit_u8(Opcode::Return as u8);
+        self.emit_u8(result_reg);
+        self.exit_scope();
+        
+        // Extract function compilation results
+        let function_bytecode = std::mem::take(&mut self.bytecode);
+        let function_constants = std::mem::take(&mut self.constants);
+        let function_registers = self.next_register;
+        
+        // Restore parent compilation state
+        self.bytecode = saved_bytecode;
+        self.constants = saved_constants;
+        self.next_register = saved_register_count;
+        self.label_positions = saved_labels;
+        self.label_patches = saved_patches;
+        self.next_label = saved_next_label;
+        
+        let compiled_fn = CompiledFunction {
+            bytecode: function_bytecode,
+            constants: function_constants,
+            parameter_count: param_symbols.len() as u8,
+            register_count: function_registers,
+            module: self.current_module,
+            register_start: param_start_reg as u8,
+            has_self_reference: function_name.is_some(),
+        };
+        
+        self.create_closure_object(compiled_fn)
+    }
+    
+    fn analyze_closures(&mut self, exprs: &[ValueRef]) -> Result<(), String> {
+        // Walk the AST to find free variables that need to be captured as upvalues
+        for &expr in exprs {
+            self.find_free_variables(expr)?;
+        }
+        
+        // Emit upvalue capture instructions
+        let captured_symbols = self.captured_symbols.clone();
+        for (i, &symbol_id) in captured_symbols.iter().enumerate() {
+            if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
+                // Symbol is in a parent scope - capture as upvalue
+                self.emit_u8(0xF0); // Custom opcode: CaptureUpvalue
+                self.emit_u8(i as u8);
+                self.emit_u8(parent_reg);
+                self.emit_u32(symbol_id);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn find_free_variables(&mut self, expr: ValueRef) -> Result<(), String> {
+        match expr {
+            ValueRef::Immediate(packed) => {
+                if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                    // Check if this symbol is free (not bound locally)
+                    if self.resolve_local_symbol(symbol_id).is_none() {
+                        // Not in local scope - might be an upvalue
+                        if self.resolve_in_parent_scopes(symbol_id).is_some() {
+                            if !self.captured_symbols.contains(&symbol_id) {
+                                self.captured_symbols.push(symbol_id);
+                            }
+                        }
+                    }
+                }
+            }
+            ValueRef::Heap(_) => {
+                if let Some(list_items) = expr.get_list() {
+                    // Recursively analyze list elements
+                    for &item in list_items.iter() {
+                        self.find_free_variables(item)?;
+                    }
+                }
+            }
+            _ => {} // Literals don't capture anything
+        }
+        Ok(())
+    }
+    
+    fn resolve_in_parent_scopes(&self, symbol_id: u32) -> Option<u8> {
+        // Look through upvalue stack to find symbol in parent scopes
+        for upvalue_scope in self.upvalue_stack.iter().rev() {
+            if let Some(&upvalue_idx) = upvalue_scope.get(&symbol_id) {
+                return Some(upvalue_idx);
+            }
+        }
+        None
+    }
+    
+   
+    
+    fn resolve_upvalue(&self, symbol_id: u32) -> Option<u8> {
+        self.captured_symbols.iter()
+            .position(|&sym| sym == symbol_id)
+            .map(|pos| pos as u8)
+    }
+    
+    fn create_closure_object(&mut self, compiled_fn: CompiledFunction) -> Result<u8, String> {
+        if self.captured_symbols.is_empty() {
+            // Simple function - no upvalues
+            let func_obj = self.vm.alloc_user_defined_fn(compiled_fn);
+            let result_reg = self.alloc_register();
+            self.emit_load_immediate(result_reg, ValueRef::Heap(GcPtr::new(func_obj)));
+            Ok(result_reg)
+        } else {
+            // Closure - emit single instruction with all upvalue capture info
+            
+            // First, allocate the template CompiledFunction
+            let template_obj = self.vm.alloc_user_defined_fn(compiled_fn);
+            let template_reg = self.alloc_register();
+            self.emit_load_immediate(template_reg, ValueRef::Heap(GcPtr::new(template_obj)));
+            
+            // Collect upvalue capture information
+            let mut upvalue_captures = Vec::new();
+            for symbol_id in &self.captured_symbols {
+                if let Some(parent_reg) = self.resolve_in_parent_scopes(*symbol_id) {
+                    upvalue_captures.push((parent_reg, *symbol_id));
+                }
+            }
+            
+            let result_reg = self.alloc_register();
+            
+            // Emit single instruction with all capture info
+            self.emit_u8(Opcode::CreateClosure as u8);
+            self.emit_u8(result_reg);                           // destination register
+            self.emit_u8(template_reg);                         // template function register
+            self.emit_u8(upvalue_captures.len() as u8);         // number of upvalues
+            
+            // Emit capture info for each upvalue
+            for (parent_reg, symbol_id) in upvalue_captures {
+                self.emit_u8(parent_reg);                       // where to get the value
+                self.emit_u32(symbol_id);                       // symbol for debugging
+            }
+            
+            Ok(result_reg)
+        }
+    }
+    
+    // Update resolve_local_symbol to handle upvalues
+    fn compile_symbol_reference(&mut self, symbol_id: u32) -> Result<u8, String> {
+        let result_reg = self.alloc_register();
+        
+        // Try local scope first
+        if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
+            self.emit_u8(Opcode::LoadLocal as u8);
+            self.emit_u8(result_reg);
+            self.emit_u8(local_reg);
+            return Ok(result_reg);
+        }
+        
+        // Try upvalues
+        if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
+            self.emit_u8(Opcode::LoadUpvalue as u8);
+            self.emit_u8(result_reg);
+            self.emit_u8(upvalue_idx);
+            return Ok(result_reg);
+        }
+        
+        // Fall back to global
+        self.emit_u8(Opcode::LoadGlobal as u8);
+        self.emit_u8(result_reg);
+        self.emit_u32(symbol_id);
+        Ok(result_reg)
+    }
+    
+    
+    
+    fn check_tail_call(&mut self, expr: ValueRef) -> Result<Option<u8>, String> {
+        // Check if expression is a function call that can be tail-optimized
+        if let Some(list_items) = expr.get_list() {
+            if !list_items.is_empty() {
+                if let ValueRef::Immediate(packed) = list_items[0] {
+                    if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                        // Don't tail-optimize special forms
+                        if !self.is_special_form(symbol_id) {
+                            // This is a regular function call - emit as tail call
+                            let func_reg = self.alloc_register();
+                            
+                            // Load function
+                            if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
+                                self.emit_u8(Opcode::LoadLocal as u8);
+                                self.emit_u8(func_reg);
+                                self.emit_u8(local_reg);
+                            } else if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
+                                self.emit_u8(Opcode::LoadUpvalue as u8);
+                                self.emit_u8(func_reg);
+                                self.emit_u8(upvalue_idx);
+                            } else {
+                                self.emit_u8(Opcode::LoadGlobal as u8);
+                                self.emit_u8(func_reg);
+                                self.emit_u32(symbol_id);
+                            }
+                            
+                            // Compile arguments
+                            let args = &list_items[1..];
+                            for arg in args {
+                                self.compile_expression(*arg)?;
+                            }
+                            
+                            // Emit tail call (no result register - direct return)
+                            self.emit_u8(Opcode::TailCall as u8);
+                            self.emit_u8(func_reg);
+                            self.emit_u8(args.len() as u8);
+                            
+                            return Ok(Some(func_reg));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+    
+    
+    
+    
+    // Add to compile_special_form match
+    fn compile_special_form(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<u8, String> {
+        let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id)
+            .ok_or("Unknown symbol")?;
+            
+        match symbol_name.as_str() {
+            "def" => self.compile_def(args),
+            "if" => self.compile_if(args),
+            "let" => self.compile_let(args),
+            "do" => self.compile_do(args),
+            "quote" => self.compile_quote(args),
+            "fn" => self.compile_fn(args),  // Add this line
+            _ => Err(format!("Special form '{}' not implemented", symbol_name)),
+        }
+    }
+
+    fn compile_def(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() != 2 {
+            return Err("def expects exactly 2 arguments: name and value".to_string());
+        }
+        
+        // First argument must be a symbol (the name to define)
+        let symbol_id = if let ValueRef::Immediate(packed) = args[0] {
+            if let ImmediateValue::Symbol(sym_id) = unpack_immediate(packed) {
+                sym_id
+            } else {
+                return Err("def: first argument must be a symbol".to_string());
+            }
+        } else {
+            return Err("def: first argument must be a symbol".to_string());
+        };
+        
+        // Compile the value expression
+        let value_reg = self.compile_expression(args[1])?;
+        
+        // Store the value globally
+        self.emit_u8(Opcode::StoreGlobal as u8);
+        self.emit_u8(value_reg);       // register first
+        self.emit_u32(symbol_id);      // symbol_id second
+        
+        // Return the value that was stored
+        Ok(value_reg)
+    }
     
     fn compile_function_call(&mut self, items: &[ValueRef]) -> Result<u8, String> {
         if items.is_empty() {
+            // TODO empty should return nil
             return Err("Empty function call".to_string());
         }
         
@@ -255,19 +679,6 @@ impl BytecodeCompiler {
         }
         
         Err("Unsupported function call".to_string())
-    }
-    
-    fn compile_special_form(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<u8, String> {
-        let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id)
-            .ok_or("Unknown symbol")?;
-            
-        match symbol_name.as_str() {
-            "if" => self.compile_if(args),
-            "let" => self.compile_let(args),
-            "do" => self.compile_do(args),
-            "quote" => self.compile_quote(args),
-            _ => Err(format!("Special form '{}' not implemented", symbol_name)),
-        }
     }
     
     fn compile_if(&mut self, args: &[ValueRef]) -> Result<u8, String> {
@@ -467,14 +878,31 @@ impl BytecodeCompiler {
         self.emit_u8(func_reg);
         self.emit_u32(symbol_id);
         
-        // Compile arguments
+        // Compile arguments into consecutive registers
+        let mut arg_registers = Vec::new();
         for arg in args {
-            self.compile_expression(*arg)?;
+            let arg_reg = self.compile_expression(*arg)?;
+            arg_registers.push(arg_reg);
+        }
+        
+        // Now move arguments to consecutive positions if they're not already
+        let first_arg_reg = self.next_register;  // Where args should start
+        
+        for (i, &arg_reg) in arg_registers.iter().enumerate() {
+            let target_reg = first_arg_reg + i as u8;
+            if arg_reg != target_reg {
+                // Need to move the argument to the correct position
+                self.emit_u8(Opcode::LoadLocal as u8);
+                self.emit_u8(target_reg);
+                self.emit_u8(arg_reg);
+            }
+            // Reserve the target register
+            self.next_register = target_reg + 1;
         }
         
         let result_reg = self.alloc_register();
         
-        // Emit call
+        // Emit call - arguments are now in consecutive registers starting at first_arg_reg
         self.emit_u8(Opcode::Call as u8);
         self.emit_u8(func_reg);
         self.emit_u8(args.len() as u8);
@@ -507,6 +935,8 @@ impl BytecodeCompiler {
             parameter_count: 0,
             register_count: self.next_register,
             module: 0,
+            register_start: 0,
+            has_self_reference: false,
         })
     }
 

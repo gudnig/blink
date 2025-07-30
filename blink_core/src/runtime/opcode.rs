@@ -1,3 +1,5 @@
+use mmtk::util::ObjectReference;
+
 use crate::value::ValueRef;
 
 // Opcodes - each fits in a single byte
@@ -45,6 +47,10 @@ pub enum Opcode {
     CallDynamic = 0x54,     // Call function with prepared arguments
     TailCallDynamic = 0x55, // Tail call with prepared arguments
     PrepareArgs = 0x56,     // Prepare argument registers for function call
+    SetupSelfReference = 0x57, // Setup self reference for function
+    
+    CreateClosure = 0x58, // Create closure with upvalues
+    
     
     // Scope operations
     BeginScope = 0x60,      // Begin new scope
@@ -59,6 +65,8 @@ pub enum Opcode {
     InitLoop = 0x80,        // Initialize loop counter
     LoopTest = 0x81,        // Test loop condition and jump
     LoopIncr = 0x82,        // Increment loop counter
+
+    
 }
 
 impl Opcode {
@@ -78,6 +86,10 @@ impl Opcode {
             0x21 => Ok(Opcode::Sub),
             0x22 => Ok(Opcode::Mul),
             0x23 => Ok(Opcode::Div),
+            0x24 => Ok(Opcode::AddImm8),
+            0x25 => Ok(Opcode::SubImm8),
+            0x26 => Ok(Opcode::MulImm8),
+            0x27 => Ok(Opcode::DivImm8),
             0x30 => Ok(Opcode::Eq),
             0x31 => Ok(Opcode::Lt),
             0x32 => Ok(Opcode::Gt),
@@ -88,9 +100,19 @@ impl Opcode {
             0x51 => Ok(Opcode::TailCall),
             0x52 => Ok(Opcode::Return),
             0x53 => Ok(Opcode::ReturnNil),
+            0x54 => Ok(Opcode::CallDynamic),
+            0x55 => Ok(Opcode::TailCallDynamic),
+            0x56 => Ok(Opcode::PrepareArgs),
+            0x57 => Ok(Opcode::SetupSelfReference),
+            0x58 => Ok(Opcode::CreateClosure),
             0x60 => Ok(Opcode::BeginScope),
             0x61 => Ok(Opcode::EndScope),
             0x62 => Ok(Opcode::Bind),
+            0x70 => Ok(Opcode::GetLength),
+            0x71 => Ok(Opcode::GetElement),
+            0x80 => Ok(Opcode::InitLoop),
+            0x81 => Ok(Opcode::LoopTest),
+            0x82 => Ok(Opcode::LoopIncr),
             _ => Err(format!("Invalid opcode: 0x{:02x}", byte)),
         }
     }
@@ -107,6 +129,15 @@ pub struct CompiledFunction {
     pub parameter_count: u8,
     pub register_count: u8,
     pub module: u32,
+    pub register_start: u8,
+    pub has_self_reference: bool
+}
+
+// Add to your heap object types
+#[derive(Clone, Debug)]
+pub struct ClosureObject {
+    pub template: ObjectReference,    // Points to CompiledFunction template
+    pub upvalues: Vec<ValueRef>,      // Captured values for this instance
 }
 
 // Label patch for jump instructions

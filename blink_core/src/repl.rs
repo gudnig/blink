@@ -35,9 +35,11 @@ pub async fn start_repl() {
     vm_arc.symbol_table.read().print_all();
     
 
-    let mut ctx = ExecutionContext::new(vm_arc.clone());
     
-    let user_module_name = ctx.vm.symbol_table.write().intern("user");
+    let user_module_name = vm_arc.symbol_table.write().intern("user");
+    println!("user_module_name: {}", user_module_name);
+    
+    let mut ctx = ExecutionContext::new(vm_arc.clone(), user_module_name);
 
     let user_module = Module {
         name: user_module_name,
@@ -46,7 +48,9 @@ pub async fn start_repl() {
         ready: true,
         imports: HashMap::new(),
     };
-    let _user_module_ref = vm_arc.module_registry.write().register_module(user_module);
+
+    vm_arc.module_registry.write().register_module(user_module);
+    
     
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
@@ -65,16 +69,22 @@ pub async fn start_repl() {
                             }
                         }
                         let current_result = run_line(parsed, vm_arc.clone(), &mut ctx);
-                        let final_value = current_result.unwrap();
-                        println!("=> {}", final_value);
+                        match current_result {
+                            Ok(val) =>   println!("=> {}", val),
+                            Err(err) =>  println!("=> {}", err),
+                        }
+                     
                     },
                 
                     _ => {
                         let current_result = run_line(parsed, vm_arc.clone(), &mut ctx);
-                        let final_value = current_result.unwrap();
+                        match current_result {
+                            Ok(val) =>   println!("=> {}", val),
+                            Err(err) =>  println!("=> {}", err),
+                        }
                         
 
-                        println!("=> {}", final_value);
+                        
                     }
                 }
             },
@@ -134,7 +144,7 @@ fn run_line(
     parsed: ParsedValueWithPos,
     vm: Arc<BlinkVM>,
     ctx: &mut ExecutionContext,
-) -> Result<ValueRef, String> {
+) -> Result<ValueRef, BlinkError> {
 
     
     let ast =  vm.alloc_parsed_value(parsed);

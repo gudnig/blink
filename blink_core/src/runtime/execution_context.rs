@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use mmtk::util::ObjectReference;
 
-use crate::{compiler::BytecodeCompiler, runtime::{BlinkVM, CompiledFunction, Opcode, TypeTag}, value::{unpack_immediate, ImmediateValue}, ValueRef};
+use crate::{compiler::BytecodeCompiler, error::BlinkError, runtime::{BlinkVM, ClosureObject, CompiledFunction, Opcode, TypeTag}, value::{unpack_immediate, GcPtr, ImmediateValue}, ValueRef};
 
 // Updated call frame for byte-sized bytecode
 #[derive(Clone, Debug)]
@@ -14,17 +14,41 @@ pub struct CallFrame {
 }
 
 #[derive(Debug)]
+
 enum InstructionResult {
     Continue,
     Return,
     Call(CallFrame),
+    SetupSelfReference(u8),
+    CreateClosure {                    // Renamed from CreateClosureWithUpvalues
+        dest_register: u8,
+        template_register: u8,
+        captures: Vec<(u8, u32)>,      // Upvalue capture info included
+    },
+    LoadUpvalue {
+        dest_register: u8,
+        upvalue_index: u8,
+    },
+    StoreUpvalue {
+        upvalue_index: u8,
+        src_register: u8,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub enum FunctionRef {
+    Closure(ClosureObject, Option<ObjectReference>),
     CompiledFunction(CompiledFunction, Option<ObjectReference>),
     Native(usize),
 }
+
+#[derive(Clone, Debug)]
+struct PendingUpvalue {
+    index: u8,
+    value: ValueRef,
+    symbol_id: u32,
+}
+
 
 #[derive(Clone, Debug)]
 pub struct ExecutionContext {
@@ -32,17 +56,15 @@ pub struct ExecutionContext {
     current_module: u32,
     register_stack: Vec<ValueRef>,
     call_stack: Vec<CallFrame>,
-    arg_staging: Vec<ValueRef>,
 }
 
 impl ExecutionContext {
-    pub fn new(vm: Arc<BlinkVM>) -> Self {
+    pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         Self {
             vm,
-            current_module: 0,
+            current_module,
             register_stack: Vec::new(),
             call_stack: Vec::new(),
-            arg_staging: Vec::new(),
         }
     }
 
@@ -50,6 +72,11 @@ impl ExecutionContext {
         let mut roots = Vec::new();
         for frame in self.call_stack.iter() {
             match &frame.func {
+                FunctionRef::Closure(closure_object, obj_ref) => {
+                    if let Some(obj_ref) = obj_ref {
+                        roots.push(*obj_ref);
+                    }
+                },
                 FunctionRef::CompiledFunction(_func, obj_ref) => {
                     if let Some(obj_ref) = obj_ref {
                         roots.push(*obj_ref);
@@ -72,9 +99,9 @@ impl ExecutionContext {
         roots
     }
     
-    pub fn compile_and_execute(&mut self, expr: ValueRef) -> Result<ValueRef, String> {
-        let mut compiler = BytecodeCompiler::new(self.vm.clone());
-        let compiled = compiler.compile_for_storage(expr)?;
+    pub fn compile_and_execute(&mut self, expr: ValueRef) -> Result<ValueRef, BlinkError> {
+        let mut compiler = BytecodeCompiler::new(self.vm.clone(), self.current_module);
+        let compiled = compiler.compile_for_storage(expr).map_err(|e| BlinkError::eval(e))?;
         
         let reg_count = compiled.register_count;
         // Setup initial frame
@@ -83,7 +110,7 @@ impl ExecutionContext {
             pc: 0,
             reg_start: self.register_stack.len(),
             reg_count: reg_count,
-            current_module: 0,
+            current_module: self.current_module,
         };
         
         // Allocate registers for the expression
@@ -94,12 +121,15 @@ impl ExecutionContext {
         self.call_stack.push(initial_frame);
         
         // Execute frame loop
-        self.execute()
+        let res = self.execute().map_err(|e| BlinkError::eval(e));
+        println!("Before function call - register_stack.len(): {}", self.register_stack.len());
+        res
     }
     
     // Main execution loop - processes all frames until stack is empty
     pub fn execute(&mut self) -> Result<ValueRef, String> {
         while !self.call_stack.is_empty() {
+            println!("Before function call - register_stack.len(): {}", self.register_stack.len());
             // Get current frame (don't pop yet)
             let mut current_frame = if let Some(frame) = self.call_stack.last().cloned() {
                 frame
@@ -107,7 +137,7 @@ impl ExecutionContext {
                 break;
             };
             
-            if let FunctionRef::CompiledFunction(compiled_fn, _) = &current_frame.func {
+            if let FunctionRef::CompiledFunction(compiled_fn, obj_ref) = &current_frame.func {
                 // Check for end of function
                 if current_frame.pc >= compiled_fn.bytecode.len() {
                     // Function completed naturally
@@ -130,6 +160,8 @@ impl ExecutionContext {
                 
                 let opcode = Opcode::from_u8(compiled_fn.bytecode[current_frame.pc])?;
                 current_frame.pc += 1;
+
+                
                 
                 let instruction_result = Self::execute_instruction(
                     &mut self.register_stack, 
@@ -140,7 +172,20 @@ impl ExecutionContext {
                     &compiled_fn.constants, 
                     current_frame.reg_start, 
                     &mut current_frame.pc
-                )?;
+                );
+
+                // In the main execution loop, when an error occurs:
+                if let Err(error) = instruction_result {
+                    // Clean up incomplete function calls
+                    while !self.call_stack.is_empty() {
+                        let incomplete_frame = self.call_stack.pop().unwrap();
+                        self.register_stack.truncate(incomplete_frame.reg_start);
+                    }
+                    return Err(error);
+                };
+
+                let instruction_result = instruction_result?;
+
                 
                 match instruction_result {
                     InstructionResult::Continue => {
@@ -174,7 +219,101 @@ impl ExecutionContext {
                         }
                         self.call_stack.push(new_frame);
                     }
+                    InstructionResult::SetupSelfReference(reg) => {
+                        // Handle self-reference setup here where we have access to function context
+                        if let Some(obj_ref) = obj_ref {
+                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                            self.register_stack[current_frame.reg_start + reg as usize] = function_value;
+                        } else {
+                            return Err("SetupSelfReference: no function object available".to_string());
+                        }
+                        
+                        // Update frame PC and continue
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                   
+
+                    InstructionResult::SetupSelfReference(self_ref_reg) => {
+                        if let Some(obj_ref) = obj_ref {
+                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                            self.register_stack[current_frame.reg_start + self_ref_reg as usize] = function_value;
+                        } else {
+                            return Err("SetupSelfReference: no function object available".to_string());
+                        }
+                        
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    
+                
+                    
+                    InstructionResult::LoadUpvalue { dest_register, upvalue_index } => {
+                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {  // Changed here
+                            let closure = GcPtr(*obj_ref).read_closure();
+                            if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
+                                self.register_stack[current_frame.reg_start + dest_register as usize] = *upvalue;
+                            } else {
+                                return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                            }
+                        } else {
+                            return Err("LoadUpvalue called on non-closure function".to_string());
+                        }
+                        
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    
+                    InstructionResult::StoreUpvalue { upvalue_index, src_register } => {
+                        let value = self.register_stack[current_frame.reg_start + src_register as usize];
+                        
+                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {  // Changed here
+                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                        } else {
+                            return Err("StoreUpvalue called on non-closure function".to_string());
+                        }
+                        
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    
+                    
+                    InstructionResult::CreateClosure { dest_register, template_register, captures } => {
+                        // Get template
+                        let template_value = self.register_stack[current_frame.reg_start + template_register as usize];
+                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                            heap_ptr.0
+                        } else {
+                            return Err("Template must be a heap object".to_string());
+                        };
+                        
+                        // Capture upvalues directly from registers
+                        let mut upvalues = Vec::new();
+                        for (parent_reg, _symbol_id) in captures {
+                            let captured_value = self.register_stack[current_frame.reg_start + parent_reg as usize];
+                            upvalues.push(captured_value);
+                        }
+                        
+                        // Create closure
+                        let closure_obj = ClosureObject {
+                            template: template_obj_ref,
+                            upvalues,
+                        };
+                        
+                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                        self.register_stack[current_frame.reg_start + dest_register as usize] = 
+                            ValueRef::Heap(GcPtr::new(closure_ref));
+                        
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
                 }
+                
             } else {
                 // TODO: Implement native function calls
                 todo!()
@@ -192,7 +331,7 @@ impl ExecutionContext {
         bytecode: &[u8],
         constants: &[ValueRef],
         reg_base: usize,
-        pc: &mut usize,
+        pc: &mut usize
     ) -> Result<InstructionResult, String> {
         match opcode {
             Opcode::LoadImm8 => {
@@ -228,10 +367,37 @@ impl ExecutionContext {
             }
             
             Opcode::LoadLocal => {
+
                 let dest_reg = Self::read_u8(bytecode, pc)?;
                 let src_reg = Self::read_u8(bytecode, pc)?;
                 let value = register_stack[reg_base + src_reg as usize];
+                if let ValueRef::Immediate(packed) = value {
+                    let imm = unpack_immediate(packed);
+                    println!("LoadLocal: immediate value: {}", imm);
+                } else if let ValueRef::Heap(heap) = value {
+                    let type_tag = heap.type_tag();
+                    println!("LoadLocal: {:?} heap value: {}", type_tag, value);
+                    
+                }
+                println!("LoadLocal: copying from register {} to register {}, value: {:?}", 
+                src_reg, dest_reg, value);
                 register_stack[reg_base + dest_reg as usize] = value;
+                Ok(InstructionResult::Continue)
+            }
+
+            Opcode::LoadGlobal => {
+                let dest_reg = Self::read_u8(bytecode, pc)?;     // Register to store result
+                let symbol_id = Self::read_u32(bytecode, pc)?;   // Symbol ID to look up
+                
+                // Look up the global symbol (not use it as register index!)
+                match vm.resolve_global_symbol(current_module, symbol_id) {
+                    Some(value) => {
+                        register_stack[reg_base + dest_reg as usize] = value;  // Use dest_reg, not symbol_id
+                    }
+                    None => {
+                        return Err(format!("Global symbol {} not found", symbol_id));
+                    }
+                }
                 Ok(InstructionResult::Continue)
             }
             
@@ -412,6 +578,51 @@ impl ExecutionContext {
                 register_stack[reg_base + result_reg as usize] = result;
                 Ok(InstructionResult::Continue)
             }
+
+            Opcode::SetupSelfReference => {
+                let self_ref_reg = Self::read_u8(bytecode, pc)?;
+                Ok(InstructionResult::SetupSelfReference(self_ref_reg))
+            }
+
+             
+            Opcode::CreateClosure => {
+                let dest_reg = Self::read_u8(bytecode, pc)?;
+                let template_reg = Self::read_u8(bytecode, pc)?;
+                let upvalue_count = Self::read_u8(bytecode, pc)?;
+                
+                let mut captures = Vec::new();
+                for _ in 0..upvalue_count {
+                    let parent_reg = Self::read_u8(bytecode, pc)?;
+                    let symbol_id = Self::read_u32(bytecode, pc)?;
+                    captures.push((parent_reg, symbol_id));
+                }
+                
+                Ok(InstructionResult::CreateClosure {
+                    dest_register: dest_reg,
+                    template_register: template_reg,
+                    captures,
+                })
+            }
+            
+            Opcode::LoadUpvalue => {
+                let dest_reg = Self::read_u8(bytecode, pc)?;
+                let upvalue_index = Self::read_u8(bytecode, pc)?;
+                
+                Ok(InstructionResult::LoadUpvalue {
+                    dest_register: dest_reg,
+                    upvalue_index,
+                })
+            }
+            
+            Opcode::StoreUpvalue => {
+                let upvalue_index = Self::read_u8(bytecode, pc)?;
+                let src_reg = Self::read_u8(bytecode, pc)?;
+                
+                Ok(InstructionResult::StoreUpvalue {
+                    upvalue_index,
+                    src_register: src_reg,
+                })
+            }
             
             _ => {
                 Err(format!("Unimplemented opcode: {:?}", opcode))
@@ -441,36 +652,38 @@ impl ExecutionContext {
         
         match func_ref {
             FunctionRef::CompiledFunction(compiled_fn, obj_ref) => {
-                // Allocate registers for new frame
-                let reg_start = register_stack.len();
-                let reg_count = compiled_fn.register_count;
+                        // Allocate registers for new frame
+                        let reg_start = register_stack.len();
+                        let reg_count = compiled_fn.register_count;
                 
-                // Resize register stack - include register 0 for return value
-                for _ in 0..reg_count {
-                    register_stack.push(ValueRef::nil());
-                }
+                        // Resize register stack - include register 0 for return value
+                        for _ in 0..reg_count {
+                            register_stack.push(ValueRef::nil());
+                        }
                 
-                // Copy arguments to parameter registers (starting from register 1)
-                for i in 0..arg_count.min(compiled_fn.parameter_count) {
-                    let arg_value = register_stack[caller_reg_base + 1 + i as usize];
-                    register_stack[reg_start + 1 + i as usize] = arg_value; // Parameters start at reg 1
-                }
+                        let param_start = compiled_fn.register_start;
+                        for i in 0..arg_count.min(compiled_fn.parameter_count) {
+                            let arg_value = register_stack[caller_reg_base + 1 + i as usize];
+                            register_stack[reg_start + (param_start as usize) + i as usize] = arg_value;
+                        }
+                        
                 
-                let frame = CallFrame {
-                    func: FunctionRef::CompiledFunction(compiled_fn, obj_ref),
-                    pc: 0,
-                    reg_start,
-                    reg_count,
-                    current_module: module,
-                };
+                        let frame = CallFrame {
+                            func: FunctionRef::CompiledFunction(compiled_fn, obj_ref),
+                            pc: 0,
+                            reg_start,
+                            reg_count,
+                            current_module: module,
+                        };
                 
-                Ok(frame)
-            }
+                        Ok(frame)
+                    }
             FunctionRef::Native(native_fn) => {
-                // Execute native function immediately
-                // TODO: Implement native function calls
-                Err("Native functions not implemented".to_string())
-            }
+                        // Execute native function immediately
+                        // TODO: Implement native function calls
+                        Err("Native functions not implemented".to_string())
+                    }   
+            FunctionRef::Closure(closure_object, object_reference) => todo!(),
         }
     }
     
@@ -516,6 +729,7 @@ impl ExecutionContext {
     
     fn extract_number(value: ValueRef) -> Result<f64, String> {
         match value {
+            
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Number(n) = unpack_immediate(packed) {
                     Ok(n)
@@ -590,6 +804,8 @@ pub fn disassemble_bytecode(bytecode: &[u8], constants: &[ValueRef]) -> String {
                         pc += 2;
                     }
                 }
+
+                
                 
                 _ => {
                     // Add other instruction formats as needed

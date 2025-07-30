@@ -21,8 +21,9 @@ pub enum TypeTag {
     Set = 4,
     Error = 5,
     UserDefinedFunction = 6,
-    Future = 7, 
-    Env = 8,
+    Closure = 7,
+    Future = 8, 
+    Env = 9,
 }
 
 impl TypeTag {
@@ -37,6 +38,7 @@ impl TypeTag {
             TypeTag::UserDefinedFunction => "user-function",
             TypeTag::Future => "future",
             TypeTag::Env => "env",
+            TypeTag::Closure => "closure",
         }
     }
 }

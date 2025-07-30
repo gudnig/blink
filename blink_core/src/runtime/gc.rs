@@ -2,7 +2,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkActivePlan, BlinkObjectModel, CompiledFunction, TypeTag, GLOBAL_MMTK};
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, ClosureObject, CompiledFunction, TypeTag, GLOBAL_MMTK};
 use crate::value::{Callable, GcPtr, ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
@@ -83,6 +83,8 @@ impl BlinkVM {
                 pub parameter_count: u8,
                 pub register_count: u8,
                 pub module: u32,
+                pub register_start: u8,
+                pub has_self_reference: bool
             }
              */
             let constants_count = function.constants.len();
@@ -103,6 +105,8 @@ impl BlinkVM {
             std::mem::size_of::<u8>() +                               // parameter_count
             std::mem::size_of::<u8>() +                               // register_count  
             std::mem::size_of::<u32>() +                              // module
+            std::mem::size_of::<u8>() +                               // register_start
+            std::mem::size_of::<u8>() +                               // has_self_reference
             std::mem::size_of::<u32>() +                              // bytecode_len
             bytecode_len;                                             // bytecode data
             
@@ -135,6 +139,12 @@ impl BlinkVM {
                 
                 std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, function.module);
                 offset += std::mem::size_of::<u32>();
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, function.register_start);
+                offset += std::mem::size_of::<u8>();
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, function.has_self_reference as u8);
+                offset += std::mem::size_of::<u8>();
                 
                 std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, bytecode_len as u32);
                 offset += std::mem::size_of::<u32>();
@@ -711,6 +721,27 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         }
     }
 
+
+
+    pub fn alloc_closure(&self, closure_object: ClosureObject) -> ObjectReference {
+        self.with_mutator(|mutator| {
+            let total_size = std::mem::size_of::<ObjectReference>() + closure_object.upvalues.len() * std::mem::size_of::<ValueRef>();
+            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Closure, &total_size);
+            unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                std::ptr::write_unaligned(data_ptr.add(0) as *mut ObjectReference, closure_object.template);
+                let upvalues_ptr = data_ptr.add(std::mem::size_of::<ObjectReference>()) as *mut ValueRef;
+                for (i, upvalue) in closure_object.upvalues.iter().enumerate() {
+                    std::ptr::write(upvalues_ptr.add(i), *upvalue);
+                }
+            }
+            data_start
+        })
+    }
+
+
+    
+
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
             HeapValue::List(list) => self.alloc_vec_or_list(list, true),
@@ -722,6 +753,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
             HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => self.alloc_env(env),
+            HeapValue::Closure(closure_object) => self.alloc_closure(closure_object),
         }
     }
     

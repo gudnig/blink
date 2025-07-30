@@ -27,11 +27,13 @@ impl Scanning<BlinkVM> for BlinkScanning {
             TypeTag::Vector => Self::scan_vec_or_list_object(slot_visitor, object),
             TypeTag::Map => Self::scan_map_object(slot_visitor, object),
             TypeTag::Str => {
-                // No object references to scan - just raw string data
-            },
+                                // No object references to scan - just raw string data
+                            },
             TypeTag::Set => Self::scan_set_object(slot_visitor, object),
             TypeTag::Error => Self::scan_error_object(slot_visitor, object),
             TypeTag::Future => todo!(),
+            TypeTag::Closure => todo!(),
+            
         }
     }
 
@@ -40,6 +42,8 @@ impl Scanning<BlinkVM> for BlinkScanning {
         println!("notify_initial_thread_scan_complete called");
         
     }
+
+    
 
     fn scan_roots_in_mutator_thread(
         _tls: mmtk::util::VMWorkerThread,
@@ -240,6 +244,8 @@ impl BlinkScanning {
             Self::scan_value_ref_seq(slot_visitor, data_ptr, vars_count, offset);
         }
     }
+
+    
 
     fn scan_error_object<SV: mmtk::vm::SlotVisitor<<BlinkVM as VMBinding>::VMSlot>>(
         slot_visitor: &mut SV,

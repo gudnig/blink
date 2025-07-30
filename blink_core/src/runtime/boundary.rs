@@ -137,6 +137,10 @@ impl ValueBoundary for ContextualBoundary {
                         HeapValue::Env(env) => {
                                                 Err(format!("Env is not supported for boundary crossing"))
                                             }
+                        HeapValue::Closure(closure_object) => {
+                                                let handle = self.vm.handle_registry.write().register_function(value);
+                                                Ok(IsolatedValue::Function(handle))
+                                            }
 
                     }
                 } else {
