@@ -395,7 +395,8 @@ impl ExecutionContext {
                         register_stack[reg_base + dest_reg as usize] = value;  // Use dest_reg, not symbol_id
                     }
                     None => {
-                        return Err(format!("Global symbol {} not found", symbol_id));
+                        let symbol = vm.symbol_table.read().get_symbol(symbol_id);
+                        return Err(format!("Global symbol {} not found", symbol.unwrap_or("Unknown symbol.".to_string())));
                     }
                 }
                 Ok(InstructionResult::Continue)
@@ -410,7 +411,8 @@ impl ExecutionContext {
                         register_stack[reg_base + reg as usize] = value;
                     }
                     None => {
-                        return Err(format!("Global symbol {} not found", symbol_id));
+                        let symbol = vm.symbol_table.read().get_symbol(symbol_id);
+                        return Err(format!("Global symbol {} not found", symbol.unwrap_or("Unknown symbol.".to_string())));
                     }
                 }
                 Ok(InstructionResult::Continue)
@@ -436,6 +438,8 @@ impl ExecutionContext {
                 let left_num = Self::extract_number(left)?;
                 let right_num = Self::extract_number(right)?;
                 let result = ValueRef::number(left_num + right_num);
+                println!("Add: {} + {} = {}, storing in register {}", left_num, right_num, left_num + right_num, result_reg);
+    
                 register_stack[reg_base + result_reg as usize] = result;
                 Ok(InstructionResult::Continue)
             }
@@ -522,14 +526,14 @@ impl ExecutionContext {
                 
                 let func_value = register_stack[reg_base + func_reg as usize];
                 
-                let frame = Self::setup_function_call(register_stack, current_module,func_value, arg_count, reg_base)?;
+                let frame = Self::setup_function_call(register_stack, current_module,func_value, func_reg, arg_count, reg_base)?;
                 Ok(InstructionResult::Call(frame))
             }
             
             Opcode::Return => {
                 let reg = Self::read_u8(bytecode, pc)?;
-                // Move return value to register 0 of current frame
                 let return_value = register_stack[reg_base + reg as usize];
+                println!("Return: moving value from register {} to register 0: {:?}", reg, return_value);
                 register_stack[reg_base] = return_value;
                 Ok(InstructionResult::Return)
             }
@@ -630,7 +634,7 @@ impl ExecutionContext {
         }
     }
     
-    fn setup_function_call(register_stack: &mut Vec<ValueRef>, current_module: u32, func_value: ValueRef, arg_count: u8, caller_reg_base: usize) -> Result<CallFrame, String> {
+    fn setup_function_call(register_stack: &mut Vec<ValueRef>, current_module: u32, func_value: ValueRef, func_reg: u8, arg_count: u8, caller_reg_base: usize) -> Result<CallFrame, String> {
         let (func_ref, module) = match func_value {
             ValueRef::Heap(heap) => {
                 let type_tag = heap.type_tag();
@@ -663,7 +667,8 @@ impl ExecutionContext {
                 
                         let param_start = compiled_fn.register_start;
                         for i in 0..arg_count.min(compiled_fn.parameter_count) {
-                            let arg_value = register_stack[caller_reg_base + 1 + i as usize];
+                            let arg_value = register_stack[caller_reg_base + func_reg as usize + 1 + i as usize];
+                            println!("Copying argument {} from caller register {} to parameter register {}: {:?}", i, caller_reg_base + 1 + i as usize, reg_start + (param_start as usize) + i as usize, arg_value);
                             register_stack[reg_start + (param_start as usize) + i as usize] = arg_value;
                         }
                         

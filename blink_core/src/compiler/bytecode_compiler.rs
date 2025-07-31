@@ -567,8 +567,8 @@ impl BytecodeCompiler {
             if !list_items.is_empty() {
                 if let ValueRef::Immediate(packed) = list_items[0] {
                     if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
-                        // Don't tail-optimize special forms
-                        if !self.is_special_form(symbol_id) {
+                        // Don't tail-optimize special forms or arithmetic operators
+                        if !self.is_special_form(symbol_id) && !self.is_arithmetic_operator(symbol_id) {
                             // This is a regular function call - emit as tail call
                             let func_reg = self.alloc_register();
                             
@@ -908,12 +908,20 @@ impl BytecodeCompiler {
         self.emit_u8(args.len() as u8);
         self.emit_u8(result_reg);
         
-        Ok(result_reg)
+        Ok(0)  // ← Return register 0, where Call actually puts the result
     }
     
     fn is_special_form(&self, symbol_id: u32) -> bool {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(symbol_name.as_str(), "if" | "let" | "do" | "quote" | "def" | "fn")
+        } else {
+            false
+        }
+    }
+
+    fn is_arithmetic_operator(&self, symbol_id: u32) -> bool {
+        if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
+            matches!(symbol_name.as_str(), "+" | "-" | "*" | "/")
         } else {
             false
         }
