@@ -66,6 +66,13 @@ pub enum Opcode {
     LoopTest = 0x81,        // Test loop condition and jump
     LoopIncr = 0x82,        // Increment loop counter
 
+    // Logical operations
+    And = 0x90,             // Logical AND
+    Or = 0x91,              // Logical OR
+    Not = 0x92,             // Logical NOT
+    GtEq = 0x93,            // Greater than or equal to
+    LtEq = 0x94,            // Less than or equal to
+
     
 }
 
@@ -113,6 +120,11 @@ impl Opcode {
             0x80 => Ok(Opcode::InitLoop),
             0x81 => Ok(Opcode::LoopTest),
             0x82 => Ok(Opcode::LoopIncr),
+            0x90 => Ok(Opcode::And),
+            0x91 => Ok(Opcode::Or),
+            0x92 => Ok(Opcode::Not),
+            0x93 => Ok(Opcode::GtEq),
+            0x94 => Ok(Opcode::LtEq),
             _ => Err(format!("Invalid opcode: 0x{:02x}", byte)),
         }
     }

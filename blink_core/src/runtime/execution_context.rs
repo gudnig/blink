@@ -122,14 +122,14 @@ impl ExecutionContext {
         
         // Execute frame loop
         let res = self.execute().map_err(|e| BlinkError::eval(e));
-        println!("Before function call - register_stack.len(): {}", self.register_stack.len());
+        
         res
     }
     
     // Main execution loop - processes all frames until stack is empty
     pub fn execute(&mut self) -> Result<ValueRef, String> {
         while !self.call_stack.is_empty() {
-            println!("Before function call - register_stack.len(): {}", self.register_stack.len());
+            
             // Get current frame (don't pop yet)
             let mut current_frame = if let Some(frame) = self.call_stack.last().cloned() {
                 frame
@@ -335,303 +335,370 @@ impl ExecutionContext {
     ) -> Result<InstructionResult, String> {
         match opcode {
             Opcode::LoadImm8 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u8(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u8(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImm16 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u16(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u16(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImm32 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u32(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u32(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImmConst => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let const_idx = Self::read_u8(bytecode, pc)?;
-                if (const_idx as usize) < constants.len() {
-                    register_stack[reg_base + reg as usize] = constants[const_idx as usize];
-                } else {
-                    return Err(format!("Constant index {} out of bounds", const_idx));
-                }
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let const_idx = Self::read_u8(bytecode, pc)?;
+                        if (const_idx as usize) < constants.len() {
+                            register_stack[reg_base + reg as usize] = constants[const_idx as usize];
+                        } else {
+                            return Err(format!("Constant index {} out of bounds", const_idx));
+                        }
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadLocal => {
 
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let src_reg = Self::read_u8(bytecode, pc)?;
-                let value = register_stack[reg_base + src_reg as usize];
-                if let ValueRef::Immediate(packed) = value {
-                    let imm = unpack_immediate(packed);
-                    println!("LoadLocal: immediate value: {}", imm);
-                } else if let ValueRef::Heap(heap) = value {
-                    let type_tag = heap.type_tag();
-                    println!("LoadLocal: {:?} heap value: {}", type_tag, value);
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let src_reg = Self::read_u8(bytecode, pc)?;
+                        let value = register_stack[reg_base + src_reg as usize];
+                        if let ValueRef::Immediate(packed) = value {
+                            let imm = unpack_immediate(packed);
+                            
+                        } else if let ValueRef::Heap(heap) = value {
+                            let type_tag = heap.type_tag();
+                            
                     
-                }
-                println!("LoadLocal: copying from register {} to register {}, value: {:?}", 
-                src_reg, dest_reg, value);
-                register_stack[reg_base + dest_reg as usize] = value;
-                Ok(InstructionResult::Continue)
-            }
-
+                        }
+                        
+                        register_stack[reg_base + dest_reg as usize] = value;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadGlobal => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;     // Register to store result
-                let symbol_id = Self::read_u32(bytecode, pc)?;   // Symbol ID to look up
+                        let dest_reg = Self::read_u8(bytecode, pc)?;     // Register to store result
+                        let symbol_id = Self::read_u32(bytecode, pc)?;   // Symbol ID to look up
                 
-                // Look up the global symbol (not use it as register index!)
-                match vm.resolve_global_symbol(current_module, symbol_id) {
-                    Some(value) => {
-                        register_stack[reg_base + dest_reg as usize] = value;  // Use dest_reg, not symbol_id
+                        // Look up the global symbol (not use it as register index!)
+                        match vm.resolve_global_symbol(current_module, symbol_id) {
+                            Some(value) => {
+                                register_stack[reg_base + dest_reg as usize] = value;  // Use dest_reg, not symbol_id
+                            }
+                            None => {
+                                let symbol = vm.symbol_table.read().get_symbol(symbol_id);
+                                return Err(format!("Global symbol {} not found", symbol.unwrap_or("Unknown symbol.".to_string())));
+                            }
+                        }
+                        Ok(InstructionResult::Continue)
                     }
-                    None => {
-                        let symbol = vm.symbol_table.read().get_symbol(symbol_id);
-                        return Err(format!("Global symbol {} not found", symbol.unwrap_or("Unknown symbol.".to_string())));
-                    }
-                }
-                Ok(InstructionResult::Continue)
-            }
-            
-            Opcode::LoadGlobal => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let symbol_id = Self::read_u32(bytecode, pc)?;
-                let module_id = current_module; // Use context module
-                match vm.resolve_global_symbol(module_id, symbol_id) {
-                    Some(value) => {
-                        register_stack[reg_base + reg as usize] = value;
-                    }
-                    None => {
-                        let symbol = vm.symbol_table.read().get_symbol(symbol_id);
-                        return Err(format!("Global symbol {} not found", symbol.unwrap_or("Unknown symbol.".to_string())));
-                    }
-                }
-                Ok(InstructionResult::Continue)
-            }
-            
             Opcode::StoreGlobal => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let symbol_id = Self::read_u32(bytecode, pc)?;
-                let value = register_stack[reg_base + reg as usize];
-                let module_id = current_module;
-                vm.update_module(module_id, symbol_id, value);
-                Ok(InstructionResult::Continue)
-            }
-            
-            // Arithmetic operations
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let symbol_id = Self::read_u32(bytecode, pc)?;
+                        let value = register_stack[reg_base + reg as usize];
+                        let module_id = current_module;
+                        vm.update_module(module_id, symbol_id, value);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Add => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num + right_num);
-                println!("Add: {} + {} = {}, storing in register {}", left_num, right_num, left_num + right_num, result_reg);
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num + right_num);
+                        println!("Add: {} + {} = {}, storing in register {}", left_num, right_num, left_num + right_num, result_reg);
     
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-            
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Sub => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num - right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num - right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Mul => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num * right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num * right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Div => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
                 
-                if right_num == 0.0 {
-                    return Err("Division by zero".to_string());
-                }
+                        if right_num == 0.0 {
+                            return Err("Division by zero".to_string());
+                        }
                 
-                let result = ValueRef::number(left_num / right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-            
-            // Control flow
+                        let result = ValueRef::number(left_num / right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Jump => {
-                let offset = Self::read_i16(bytecode, pc)?;
-                *pc = (*pc as i32 + offset as i32) as usize;
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let offset = Self::read_i16(bytecode, pc)?;
+                        *pc = (*pc as i32 + offset as i32) as usize;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::JumpIfTrue => {
-                let test_reg = Self::read_u8(bytecode, pc)?;
-                let offset = Self::read_i16(bytecode, pc)?;
-                let test_value = register_stack[reg_base + test_reg as usize];
-                if test_value.is_truthy() {
-                    *pc = (*pc as i32 + offset as i32) as usize;
-                }
-                Ok(InstructionResult::Continue)
-            }
-            
+                        let test_reg = Self::read_u8(bytecode, pc)?;
+                        let offset = Self::read_i16(bytecode, pc)?;
+                        let test_value = register_stack[reg_base + test_reg as usize];
+                        if test_value.is_truthy() {
+                            *pc = (*pc as i32 + offset as i32) as usize;
+                        }
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::JumpIfFalse => {
-                let test_reg = Self::read_u8(bytecode, pc)?;
-                let offset = Self::read_i16(bytecode, pc)?;
-                let test_value = register_stack[reg_base + test_reg as usize];
-                if !test_value.is_truthy() {
-                    *pc = (*pc as i32 + offset as i32) as usize;
-                }
-                Ok(InstructionResult::Continue)
-            }
-            
-            // Function operations
+                        let test_reg = Self::read_u8(bytecode, pc)?;
+                        let offset = Self::read_i16(bytecode, pc)?;
+                        let test_value = register_stack[reg_base + test_reg as usize];
+                        if !test_value.is_truthy() {
+                            *pc = (*pc as i32 + offset as i32) as usize;
+                        }
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Call => {
-                let func_reg = Self::read_u8(bytecode, pc)?;
-                let arg_count = Self::read_u8(bytecode, pc)?;
-                let _result_reg = Self::read_u8(bytecode, pc)?; // Ignored - always use reg 0
+                        let func_reg = Self::read_u8(bytecode, pc)?;
+                        let arg_count = Self::read_u8(bytecode, pc)?;
+                        let _result_reg = Self::read_u8(bytecode, pc)?; // Ignored - always use reg 0
                 
-                let func_value = register_stack[reg_base + func_reg as usize];
+                        let func_value = register_stack[reg_base + func_reg as usize];
                 
-                let frame = Self::setup_function_call(register_stack, current_module,func_value, func_reg, arg_count, reg_base)?;
-                Ok(InstructionResult::Call(frame))
-            }
-            
+                        let frame = Self::setup_function_call(register_stack, current_module,func_value, func_reg, arg_count, reg_base)?;
+                        Ok(InstructionResult::Call(frame))
+                    }
             Opcode::Return => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let return_value = register_stack[reg_base + reg as usize];
-                println!("Return: moving value from register {} to register 0: {:?}", reg, return_value);
-                register_stack[reg_base] = return_value;
-                Ok(InstructionResult::Return)
-            }
-            
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let return_value = register_stack[reg_base + reg as usize];
+                        register_stack[reg_base] = return_value;
+                        Ok(InstructionResult::Return)
+                    }
             Opcode::ReturnNil => {
-                register_stack[reg_base] = ValueRef::nil();
-                Ok(InstructionResult::Return)
-            }
-            
-            // Comparison operations
+                        register_stack[reg_base] = ValueRef::nil();
+                        Ok(InstructionResult::Return)
+                    }
             Opcode::Lt => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
                 
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
                 
-                let result = if left_num < right_num {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left_num < right_num {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
                 
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-            
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
+            Opcode::Gt => {
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
+                
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+
+                        let result = if left_num > right_num {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
+
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Eq => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
                 
-                let result = if left == right {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left == right {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
                 
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::SetupSelfReference => {
-                let self_ref_reg = Self::read_u8(bytecode, pc)?;
-                Ok(InstructionResult::SetupSelfReference(self_ref_reg))
-            }
-
-             
+                        let self_ref_reg = Self::read_u8(bytecode, pc)?;
+                        Ok(InstructionResult::SetupSelfReference(self_ref_reg))
+                    }
             Opcode::CreateClosure => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let template_reg = Self::read_u8(bytecode, pc)?;
-                let upvalue_count = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let template_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_count = Self::read_u8(bytecode, pc)?;
                 
-                let mut captures = Vec::new();
-                for _ in 0..upvalue_count {
-                    let parent_reg = Self::read_u8(bytecode, pc)?;
-                    let symbol_id = Self::read_u32(bytecode, pc)?;
-                    captures.push((parent_reg, symbol_id));
-                }
+                        let mut captures = Vec::new();
+                        for _ in 0..upvalue_count {
+                            let parent_reg = Self::read_u8(bytecode, pc)?;
+                            let symbol_id = Self::read_u32(bytecode, pc)?;
+                            captures.push((parent_reg, symbol_id));
+                        }
                 
-                Ok(InstructionResult::CreateClosure {
-                    dest_register: dest_reg,
-                    template_register: template_reg,
-                    captures,
-                })
-            }
-            
+                        Ok(InstructionResult::CreateClosure {
+                            dest_register: dest_reg,
+                            template_register: template_reg,
+                            captures,
+                        })
+                    }
             Opcode::LoadUpvalue => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let upvalue_index = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_index = Self::read_u8(bytecode, pc)?;
                 
-                Ok(InstructionResult::LoadUpvalue {
-                    dest_register: dest_reg,
-                    upvalue_index,
-                })
-            }
-            
+                        Ok(InstructionResult::LoadUpvalue {
+                            dest_register: dest_reg,
+                            upvalue_index,
+                        })
+                    }
             Opcode::StoreUpvalue => {
-                let upvalue_index = Self::read_u8(bytecode, pc)?;
-                let src_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_index = Self::read_u8(bytecode, pc)?;
+                        let src_reg = Self::read_u8(bytecode, pc)?;
                 
-                Ok(InstructionResult::StoreUpvalue {
-                    upvalue_index,
-                    src_register: src_reg,
-                })
+                        Ok(InstructionResult::StoreUpvalue {
+                            upvalue_index,
+                            src_register: src_reg,
+                        })
+                    }
+                    Opcode::GtEq => {
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
+                        
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        
+                        let result = ValueRef::boolean(left_num >= right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
+                    
+                    Opcode::LtEq => {
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
+                        
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        
+                        let result = ValueRef::boolean(left_num <= right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
+                    Opcode::StoreLocal => todo!(),
+                    Opcode::AddImm8 => todo!(),
+                    Opcode::SubImm8 => todo!(),
+                    Opcode::MulImm8 => todo!(),
+                    Opcode::DivImm8 => todo!(),
+                    Opcode::TailCall => todo!(),
+                    Opcode::CallDynamic => todo!(),
+                    Opcode::TailCallDynamic => todo!(),
+                    Opcode::PrepareArgs => todo!(),
+                    Opcode::BeginScope => todo!(),
+                    Opcode::EndScope => todo!(),
+                    Opcode::Bind => todo!(),
+                    Opcode::GetLength => todo!(),
+                    Opcode::GetElement => todo!(),
+                    Opcode::InitLoop => todo!(),
+                    Opcode::LoopTest => todo!(),
+                    Opcode::LoopIncr => todo!(),
+                    Opcode::And => {
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
+
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+
+                        let result = if left.is_truthy() && right.is_truthy() {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
+
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    },
+                    Opcode::Or => {
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
+
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+
+                        let result = if left.is_truthy() || right.is_truthy() {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
+
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    },
+                    Opcode::Not => {
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let value_reg = Self::read_u8(bytecode, pc)?;
+
+                        let value = register_stack[reg_base + value_reg as usize];
+                        let result = if value.is_truthy() {
+                            ValueRef::boolean(false)
+                        } else {
+                            ValueRef::boolean(true)
+                        };
+
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    },
             }
-            
-            _ => {
-                Err(format!("Unimplemented opcode: {:?}", opcode))
-            }
-        }
     }
     
     fn setup_function_call(register_stack: &mut Vec<ValueRef>, current_module: u32, func_value: ValueRef, func_reg: u8, arg_count: u8, caller_reg_base: usize) -> Result<CallFrame, String> {
