@@ -7,6 +7,13 @@ use crate::{
     ImmediateValue, ValueRef,
 };
 
+#[derive(Debug, Clone)]
+struct LoopFrame {
+    start_label: u16,
+    binding_count: u8,
+    binding_registers: Vec<u8>, // Registers holding loop bindings
+}
+
 // The main bytecode compiler
 pub struct BytecodeCompiler {
     vm: Arc<BlinkVM>,
@@ -16,6 +23,7 @@ pub struct BytecodeCompiler {
     scope_stack: Vec<HashMap<u32, u8>>, // symbol_id -> register
     current_module: u32,                // Add this field
 
+    loop_stack: Vec<LoopFrame>,
     // For closure support
     upvalue_stack: Vec<HashMap<u32, u8>>, // symbol_id -> upvalue_index
     captured_symbols: Vec<u32>,           // symbols captured as upvalues
@@ -35,6 +43,7 @@ impl BytecodeCompiler {
             next_register: 1, // Register 0 reserved for return value
             scope_stack: Vec::new(),
             current_module,
+            loop_stack: Vec::new(),
             upvalue_stack: Vec::new(),
             captured_symbols: Vec::new(),
             next_label: 0,
@@ -167,35 +176,61 @@ impl BytecodeCompiler {
         self.emit_i16(0); // Placeholder
     }
 
+
     fn emit_jump(&mut self, label: u16) {
+        println!("DEBUG: emit_jump called for label {}", label);
         self.emit_u8(Opcode::Jump as u8);
         let patch_offset = self.bytecode.len();
-        self.label_patches.push(LabelPatch {
-            bytecode_offset: patch_offset,
-            label_id: label,
-        });
-        self.emit_i16(0); // Placeholder
+        
+        // Check if this label was already emitted
+        if let Some(&target_pos) = self.label_positions.get(&label) {
+            // Label already exists - patch immediately
+            let offset = target_pos as i16 - (patch_offset as i16 + 2);
+            println!("DEBUG: Label {} already exists at {}, patching immediately with offset {}", 
+                    label, target_pos, offset);
+            self.emit_i16(offset);
+        } else {
+            // Label not yet emitted - add to patches list
+            self.label_patches.push(LabelPatch {
+                bytecode_offset: patch_offset,
+                label_id: label,
+            });
+            println!("DEBUG: Added patch at offset {} for label {} (not yet emitted)", patch_offset, label);
+            self.emit_i16(0); // Placeholder
+        }
     }
 
+    
     fn emit_label(&mut self, label: u16) {
-        let current_pos = self.bytecode.len() as i16;
-
-        // Patch all jumps to this label
+        let current_pos = self.bytecode.len();
+        println!("DEBUG: emit_label {} at position {}", label, current_pos);
+        
+        // Store the label position for later use
+        self.label_positions.insert(label, current_pos);
+        
+        // Patch all existing jumps to this label
         for patch in &self.label_patches {
             if patch.label_id == label {
                 let jump_pos = patch.bytecode_offset;
-                let offset = current_pos - jump_pos as i16 - 2;
-
+                let offset = current_pos as i16 - (jump_pos as i16 + 2);
+                
+                println!("DEBUG: Patching jump at {} to target {}, offset = {}", 
+                        jump_pos, current_pos, offset);
+                
                 // Write the offset back into bytecode
                 let offset_bytes = offset.to_le_bytes();
                 self.bytecode[jump_pos] = offset_bytes[0];
                 self.bytecode[jump_pos + 1] = offset_bytes[1];
             }
         }
-
+        
         // Remove processed patches
+        let before_count = self.label_patches.len();
         self.label_patches.retain(|patch| patch.label_id != label);
+        let after_count = self.label_patches.len();
+        println!("DEBUG: Removed {} patches for label {}", before_count - after_count, label);
     }
+    
 
     // SCOPE MANAGEMENT
 
@@ -253,6 +288,148 @@ impl BytecodeCompiler {
             }
         }
     }
+
+    fn compile_loop(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() < 2 {
+            return Err("loop expects at least 2 arguments: bindings and body".to_string());
+        }
+    
+        let bindings = args[0].get_vec()
+            .ok_or("loop bindings must be a vector")?;
+        
+        if bindings.len() % 2 != 0 {
+            return Err("loop bindings must have even number of elements".to_string());
+        }
+    
+        let binding_count = bindings.len() / 2;
+        let mut binding_registers = Vec::new();
+        let mut binding_symbols = Vec::new();
+    
+        self.enter_scope();
+    
+        // STEP 1: First, allocate and bind ALL variables to their loop registers
+        // This ensures variable lookups always resolve to the loop registers
+        for i in 0..binding_count {
+            let symbol_idx = i * 2;
+    
+            // Get symbol
+            let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
+                if let ImmediateValue::Symbol(sym_id) = unpack_immediate(packed) {
+                    sym_id
+                } else {
+                    return Err("loop binding names must be symbols".to_string());
+                }
+            } else {
+                return Err("loop binding names must be symbols".to_string());
+            };
+    
+            // Allocate the loop binding register FIRST
+            let binding_reg = self.alloc_register();
+            
+            // Bind the symbol to the loop register IMMEDIATELY
+            // This ensures all references to this symbol use the loop register
+            self.bind_local_symbol(symbol_id, binding_reg);
+            println!("DEBUG: Bound symbol {} to loop register {}", symbol_id, binding_reg);
+            
+            binding_registers.push(binding_reg);
+            binding_symbols.push(symbol_id);
+        }
+    
+        // STEP 2: Now compile initial values and store them in the loop registers
+        for i in 0..binding_count {
+            let value_idx = i * 2 + 1;
+            let binding_reg = binding_registers[i];
+    
+            // Compile initial value - this might use temporary registers
+            let value_reg = self.compile_expression(bindings[value_idx])?;
+            
+            // Move the initial value to the loop register
+            if value_reg != binding_reg {
+                self.emit_u8(Opcode::LoadLocal as u8);
+                self.emit_u8(binding_reg);      // destination (loop register)
+                self.emit_u8(value_reg);        // source (temporary register)
+                println!("DEBUG: Moved initial value from register {} to loop register {}", value_reg, binding_reg);
+            }
+        }
+    
+        // Create loop frame
+        let start_label = self.alloc_label();
+        let loop_frame = LoopFrame {
+            start_label,
+            binding_count: binding_count as u8,
+            binding_registers: binding_registers.clone(),
+        };
+        self.loop_stack.push(loop_frame);
+    
+        // Emit the loop start label
+        self.emit_label(start_label);
+    
+        let mut result_reg = self.alloc_register();
+        
+        // STEP 3: Compile body expressions - now all variable lookups use loop registers
+        for (i, &expr) in args[1..].iter().enumerate() {
+            result_reg = self.compile_expression(expr)?;
+            
+            if i == args[1..].len() - 1 {
+                if let Some(_) = self.check_tail_call(expr)? {
+                    break;
+                }
+            }
+        }
+    
+        // Clean up
+        self.loop_stack.pop();
+        self.exit_scope();
+        
+        Ok(result_reg)
+    }
+
+    // In your compile_recur method, add debug info about the values:
+fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+    println!("DEBUG: compile_recur called with {} args", args.len());
+    
+    let loop_frame = self.loop_stack.last().cloned()
+        .ok_or("recur used outside of loop")?;
+    
+    println!("DEBUG: Found loop frame, start_label = {}", loop_frame.start_label);
+    
+    if args.len() != loop_frame.binding_count as usize {
+        return Err(format!(
+            "recur expects {} arguments, got {}", 
+            loop_frame.binding_count, 
+            args.len()
+        ));
+    }
+
+    // Compile new values for loop bindings
+    let mut new_value_regs = Vec::new();
+    for (i, &arg) in args.iter().enumerate() {
+        println!("DEBUG: Compiling recur arg {}: {:?}", i, arg);
+        let value_reg = self.compile_expression(arg)?;
+        new_value_regs.push(value_reg);
+        println!("DEBUG: Recur arg {} compiled to register {}", i, value_reg);
+    }
+
+    // Update binding registers with new values
+    for (i, &new_value_reg) in new_value_regs.iter().enumerate() {
+        let binding_reg = loop_frame.binding_registers[i];
+        println!("DEBUG: Updating binding {} register {} with value from register {}", 
+                 i, binding_reg, new_value_reg);
+        
+        // This should move the new value to the binding register
+        self.emit_u8(Opcode::LoadLocal as u8);
+        self.emit_u8(binding_reg);      // destination 
+        self.emit_u8(new_value_reg);    // source
+    }
+
+    println!("DEBUG: About to emit_jump to label {}", loop_frame.start_label);
+    self.emit_jump(loop_frame.start_label);
+    println!("DEBUG: emit_jump completed");
+
+    Ok(0)
+}
+
+
 
     fn compile_fn(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         if args.len() < 2 {
@@ -668,27 +845,29 @@ impl BytecodeCompiler {
         Ok(result_reg)
     }
 
-    // Update resolve_local_symbol to handle upvalues
     fn compile_symbol_reference(&mut self, symbol_id: u32) -> Result<u8, String> {
-        let result_reg = self.alloc_register();
-
+        let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id).unwrap_or_default();
+        
         // Try local scope first
         if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
-            self.emit_u8(Opcode::LoadLocal as u8);
-            self.emit_u8(result_reg);
-            self.emit_u8(local_reg);
-            return Ok(result_reg);
+            println!("DEBUG: Symbol '{}' (id {}) resolved to LOCAL register {}", symbol_name, symbol_id, local_reg);
+            return Ok(local_reg);  // Return the loop register directly
         }
-
+        
+        // Only allocate result_reg if we need it for upvalues/globals
+        let result_reg = self.alloc_register();
+        
         // Try upvalues
         if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
+            println!("DEBUG: Symbol '{}' (id {}) resolved to UPVALUE {}", symbol_name, symbol_id, upvalue_idx);
             self.emit_u8(Opcode::LoadUpvalue as u8);
             self.emit_u8(result_reg);
             self.emit_u8(upvalue_idx);
             return Ok(result_reg);
         }
-
+        
         // Fall back to global
+        println!("DEBUG: Symbol '{}' (id {}) resolved to GLOBAL", symbol_name, symbol_id);
         self.emit_u8(Opcode::LoadGlobal as u8);
         self.emit_u8(result_reg);
         self.emit_u32(symbol_id);
@@ -857,7 +1036,9 @@ impl BytecodeCompiler {
             "let" => self.compile_let(args),
             "do" => self.compile_do(args),
             "quote" => self.compile_quote(args),
-            "fn" => self.compile_fn(args), // Add this line
+            "fn" => self.compile_fn(args),
+            "loop" => self.compile_loop(args),
+            "recur" => self.compile_recur(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
     }
@@ -1167,7 +1348,7 @@ impl BytecodeCompiler {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(
                 symbol_name.as_str(),
-                "if" | "let" | "do" | "quote" | "def" | "fn"
+                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur"
             )
         } else {
             false

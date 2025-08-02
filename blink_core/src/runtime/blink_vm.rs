@@ -316,6 +316,9 @@ impl BlinkVM {
         st.intern_special_form(SpecialFormId::Mod as u32,"mod");
         st.intern_special_form(SpecialFormId::Load as u32,"load");
         st.intern_special_form(SpecialFormId::Macro as u32,"macro");
+        st.intern_special_form(SpecialFormId::Loop as u32,"loop");
+        st.intern_special_form(SpecialFormId::Recur as u32,"recur");
+        st.intern_special_form(SpecialFormId::Quote as u32,"quote");
     }
 
     pub fn resolve_global_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {
