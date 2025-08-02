@@ -59,23 +59,24 @@ impl GcPtr {
         
         match type_tag {
             TypeTag::Str => {
-                                                    HeapValue::Str(self.read_string(data_size))
-                                                }
+                                                            HeapValue::Str(self.read_string(data_size))
+                                                        }
             TypeTag::List => {
-                                                    HeapValue::List(self.read_vec(data_size))
-                                                }
+                                                            HeapValue::List(self.read_vec(data_size))
+                                                        }
             TypeTag::Vector => {
-                                                    HeapValue::Vector(self.read_vec(data_size))
-                                                }
+                                                            HeapValue::Vector(self.read_vec(data_size))
+                                                        }
             TypeTag::Map => {
-                                                    HeapValue::Map(self.read_blink_hash_map())
-                                                }
+                                                            HeapValue::Map(self.read_blink_hash_map())
+                                                        }
             TypeTag::Set => HeapValue::Set(self.read_blink_hash_set()),
             TypeTag::Error => HeapValue::Error(self.read_error()),
             TypeTag::UserDefinedFunction => HeapValue::Function(self.read_callable()),
             TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
             TypeTag::Closure => HeapValue::Closure(self.read_closure()),
+            TypeTag::Macro => HeapValue::Macro(self.read_callable()),
         }
     }
 

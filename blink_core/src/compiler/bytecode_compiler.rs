@@ -1,10 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    error::BlinkError,
-    runtime::{BlinkVM, Bytecode, CompiledFunction, LabelPatch, Opcode},
-    value::{unpack_immediate, GcPtr},
-    ImmediateValue, ValueRef,
+    error::BlinkError, runtime::{BlinkVM, Bytecode, CompiledFunction, ExecutionContext, LabelPatch, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
 };
 
 #[derive(Debug, Clone)]
@@ -71,6 +68,46 @@ impl BytecodeCompiler {
         self.next_register - 1
     }
 
+    fn resolve_symbol_for_compilation(&self, symbol_id: u32) -> Result<ValueRef, String> {
+        // First check local scope bindings
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(&reg) = scope.get(&symbol_id) {
+                // This is a local binding, not a macro
+                return Err("Local binding".to_string());
+            }
+        }
+        
+        // Check module-level definitions (where macros would be)
+        if let Some(value) = self.vm.module_registry.read().resolve_symbol(self.current_module, symbol_id) {
+            return Ok(value);
+        }
+        
+        Err("Symbol not found".to_string())
+    }
+
+
+    // Macro expansion during compilation
+    fn try_expand_macro(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<Option<ValueRef>, String> {
+        // Look up symbol in current compilation scope
+        let symbol_value = match self.resolve_symbol_for_compilation(symbol_id) {
+            Ok(val) => val,
+            Err(_) => return Ok(None), // Not found
+        };
+
+        // Check if it's a compiled macro
+        if let ValueRef::Heap(gc_ptr) = symbol_value {
+            if let HeapValue::Macro(macro_obj) = gc_ptr.to_heap_value() {
+                // Execute the macro to get expanded code
+                let mut exec_ctx = ExecutionContext::new(self.vm.clone(), self.current_module);
+                let expanded_code = exec_ctx.compile_and_execute(symbol_value).map_err(|e| e.to_string())?;
+                return Ok(Some(expanded_code));
+            }
+        }
+
+        Ok(None)
+    }
+
+
     // INSTRUCTION EMISSION
 
     fn emit_u8(&mut self, value: u8) {
@@ -92,55 +129,48 @@ impl BytecodeCompiler {
     // CONSTANT POOL MANAGEMENT
 
     fn add_constant(&mut self, value: ValueRef) -> u8 {
-        
-        
         // Check if constant already exists
         for (i, &existing) in self.constants.iter().enumerate() {
             if existing == value {
-                
                 return i as u8;
             }
         }
-    
+
         // Add new constant
         let index = self.constants.len();
-        
+
         if index > 255 {
             panic!("Too many constants (max 256)");
         }
         self.constants.push(value);
-        
+
         index as u8
     }
 
     // HIGH-LEVEL INSTRUCTION EMISSION
 
     fn emit_load_immediate(&mut self, reg: u8, value: ValueRef) {
-        
         match value {
             ValueRef::Immediate(packed) => {
                 let imm = unpack_immediate(packed);
-                
+
                 match imm {
                     ImmediateValue::Number(n) if n.fract() == 0.0 && n >= 0.0 && n <= 255.0 => {
-                        
                         // Small integer - emit directly
                         self.emit_u8(Opcode::LoadImm8 as u8);
                         self.emit_u8(reg);
                         self.emit_u8(n as u8);
                     }
                     ImmediateValue::Number(n) if n.fract() == 0.0 && n >= 0.0 && n <= 65535.0 => {
-                        
                         // Medium integer - emit as 16-bit
                         self.emit_u8(Opcode::LoadImm16 as u8);
                         self.emit_u8(reg);
                         self.emit_u16(n as u16);
                     }
                     _ => {
-                        
                         // Complex immediate - use constant pool
                         let const_idx = self.add_constant(value);
-                        
+
                         self.emit_u8(Opcode::LoadImmConst as u8);
                         self.emit_u8(reg);
                         self.emit_u8(const_idx);
@@ -148,10 +178,9 @@ impl BytecodeCompiler {
                 }
             }
             _ => {
-                
                 // Heap/Native value - use constant pool
                 let const_idx = self.add_constant(value);
-                
+
                 self.emit_u8(Opcode::LoadImmConst as u8);
                 self.emit_u8(reg);
                 self.emit_u8(const_idx);
@@ -189,17 +218,15 @@ impl BytecodeCompiler {
         self.emit_i16(0); // Placeholder
     }
 
-
     fn emit_jump(&mut self, label: u16) {
-        
         self.emit_u8(Opcode::Jump as u8);
         let patch_offset = self.bytecode.len();
-        
+
         // Check if this label was already emitted
         if let Some(&target_pos) = self.label_positions.get(&label) {
             // Label already exists - patch immediately
             let offset = target_pos as i16 - (patch_offset as i16 + 2);
-            
+
             self.emit_i16(offset);
         } else {
             // Label not yet emitted - add to patches list
@@ -207,41 +234,35 @@ impl BytecodeCompiler {
                 bytecode_offset: patch_offset,
                 label_id: label,
             });
-            
+
             self.emit_i16(0); // Placeholder
         }
     }
 
-    
     fn emit_label(&mut self, label: u16) {
         let current_pos = self.bytecode.len();
-        
-        
+
         // Store the label position for later use
         self.label_positions.insert(label, current_pos);
-        
+
         // Patch all existing jumps to this label
         for patch in &self.label_patches {
             if patch.label_id == label {
                 let jump_pos = patch.bytecode_offset;
                 let offset = current_pos as i16 - (jump_pos as i16 + 2);
-                
-                
-                
+
                 // Write the offset back into bytecode
                 let offset_bytes = offset.to_le_bytes();
                 self.bytecode[jump_pos] = offset_bytes[0];
                 self.bytecode[jump_pos + 1] = offset_bytes[1];
             }
         }
-        
+
         // Remove processed patches
         let before_count = self.label_patches.len();
         self.label_patches.retain(|patch| patch.label_id != label);
         let after_count = self.label_patches.len();
-        
     }
-    
 
     // SCOPE MANAGEMENT
 
@@ -304,25 +325,24 @@ impl BytecodeCompiler {
         if args.len() < 2 {
             return Err("loop expects at least 2 arguments: bindings and body".to_string());
         }
-    
-        let bindings = args[0].get_vec()
-            .ok_or("loop bindings must be a vector")?;
-        
+
+        let bindings = args[0].get_vec().ok_or("loop bindings must be a vector")?;
+
         if bindings.len() % 2 != 0 {
             return Err("loop bindings must have even number of elements".to_string());
         }
-    
+
         let binding_count = bindings.len() / 2;
         let mut binding_registers = Vec::new();
         let mut binding_symbols = Vec::new();
-    
+
         self.enter_scope();
-    
+
         // STEP 1: First, allocate and bind ALL variables to their loop registers
         // This ensures variable lookups always resolve to the loop registers
         for i in 0..binding_count {
             let symbol_idx = i * 2;
-    
+
             // Get symbol
             let symbol_id = if let ValueRef::Immediate(packed) = bindings[symbol_idx] {
                 if let ImmediateValue::Symbol(sym_id) = unpack_immediate(packed) {
@@ -333,36 +353,34 @@ impl BytecodeCompiler {
             } else {
                 return Err("loop binding names must be symbols".to_string());
             };
-    
+
             // Allocate the loop binding register FIRST
             let binding_reg = self.alloc_register();
-            
+
             // Bind the symbol to the loop register IMMEDIATELY
             // This ensures all references to this symbol use the loop register
             self.bind_local_symbol(symbol_id, binding_reg);
-            
-            
+
             binding_registers.push(binding_reg);
             binding_symbols.push(symbol_id);
         }
-    
+
         // STEP 2: Now compile initial values and store them in the loop registers
         for i in 0..binding_count {
             let value_idx = i * 2 + 1;
             let binding_reg = binding_registers[i];
-    
+
             // Compile initial value - this might use temporary registers
             let value_reg = self.compile_expression(bindings[value_idx])?;
-            
+
             // Move the initial value to the loop register
             if value_reg != binding_reg {
                 self.emit_u8(Opcode::LoadLocal as u8);
-                self.emit_u8(binding_reg);      // destination (loop register)
-                self.emit_u8(value_reg);        // source (temporary register)
-                
+                self.emit_u8(binding_reg); // destination (loop register)
+                self.emit_u8(value_reg); // source (temporary register)
             }
         }
-    
+
         // Create loop frame
         let start_label = self.alloc_label();
         let loop_frame = LoopFrame {
@@ -371,75 +389,67 @@ impl BytecodeCompiler {
             binding_registers: binding_registers.clone(),
         };
         self.loop_stack.push(loop_frame);
-    
+
         // Emit the loop start label
         self.emit_label(start_label);
-    
+
         let mut result_reg = self.alloc_register();
-        
+
         // STEP 3: Compile body expressions - now all variable lookups use loop registers
         for (i, &expr) in args[1..].iter().enumerate() {
             result_reg = self.compile_expression(expr)?;
-            
+
             if i == args[1..].len() - 1 {
                 if let Some(_) = self.check_tail_call(expr)? {
                     break;
                 }
             }
         }
-    
+
         // Clean up
         self.loop_stack.pop();
         self.exit_scope();
-        
+
         Ok(result_reg)
     }
 
     // In your compile_recur method, add debug info about the values:
-fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-    
-    
-    let loop_frame = self.loop_stack.last().cloned()
-        .ok_or("recur used outside of loop")?;
-    
-    
-    
-    if args.len() != loop_frame.binding_count as usize {
-        return Err(format!(
-            "recur expects {} arguments, got {}", 
-            loop_frame.binding_count, 
-            args.len()
-        ));
+    fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        let loop_frame = self
+            .loop_stack
+            .last()
+            .cloned()
+            .ok_or("recur used outside of loop")?;
+
+        if args.len() != loop_frame.binding_count as usize {
+            return Err(format!(
+                "recur expects {} arguments, got {}",
+                loop_frame.binding_count,
+                args.len()
+            ));
+        }
+
+        // Compile new values for loop bindings
+        let mut new_value_regs = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            let value_reg = self.compile_expression(arg)?;
+            new_value_regs.push(value_reg);
+        }
+
+        // Update binding registers with new values
+        for (i, &new_value_reg) in new_value_regs.iter().enumerate() {
+            let binding_reg = loop_frame.binding_registers[i];
+
+            // This should move the new value to the binding register
+            self.emit_u8(Opcode::LoadLocal as u8);
+            self.emit_u8(binding_reg); // destination
+            self.emit_u8(new_value_reg); // source
+        }
+
+        self.emit_jump(loop_frame.start_label);
+
+        Ok(0)
     }
-
-    // Compile new values for loop bindings
-    let mut new_value_regs = Vec::new();
-    for (i, &arg) in args.iter().enumerate() {
-        
-        let value_reg = self.compile_expression(arg)?;
-        new_value_regs.push(value_reg);
-        
-    }
-
-    // Update binding registers with new values
-    for (i, &new_value_reg) in new_value_regs.iter().enumerate() {
-        let binding_reg = loop_frame.binding_registers[i];
-        
-        
-        // This should move the new value to the binding register
-        self.emit_u8(Opcode::LoadLocal as u8);
-        self.emit_u8(binding_reg);      // destination 
-        self.emit_u8(new_value_reg);    // source
-    }
-
-
-    self.emit_jump(loop_frame.start_label);
-    
-
-    Ok(0)
-}
-
-
 
     fn compile_fn(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         if args.len() < 2 {
@@ -635,6 +645,129 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         Ok(())
     }
 
+
+
+    fn compile_macro(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() < 2 {
+            return Err("macro expects at least 2 arguments: parameter vector and body".to_string());
+        }
+
+        // Extract parameters (same logic as fn)
+        let params = if let Some(params_vec) = args[0].get_vec() {
+            params_vec
+        } else {
+            return Err("macro first argument must be a vector of parameters".to_string());
+        };
+
+        // Convert parameter ValueRefs to symbol IDs and handle variadic
+        let param_symbols: Result<Vec<u32>, String> = params
+            .iter()
+            .map(|p| match p {
+                ValueRef::Immediate(packed) => {
+                    if let ImmediateValue::Symbol(sym_id) = unpack_immediate(*packed) {
+                        Ok(sym_id)
+                    } else {
+                        Err("macro parameters must be symbols".to_string())
+                    }
+                }
+                _ => Err("macro parameters must be symbols".to_string()),
+            })
+            .collect();
+        let param_symbols = param_symbols?;
+
+        // Check for variadic macros (& rest parameter)
+        let mut is_variadic = false;
+        let mut final_params = Vec::new();
+        
+        let mut i = 0;
+        while i < param_symbols.len() {
+            let symbol_name = self.vm.symbol_table.read()
+                .get_symbol(param_symbols[i])
+                .unwrap_or_default();
+            
+            if symbol_name == "&" {
+                if i + 1 < param_symbols.len() {
+                    final_params.push(param_symbols[i + 1]);
+                    is_variadic = true;
+                    break;
+                } else {
+                    return Err("& must be followed by a parameter name".to_string());
+                }
+            } else {
+                final_params.push(param_symbols[i]);
+            }
+            i += 1;
+        }
+
+        // Save and reset compilation state (same as function compilation)
+        let saved_bytecode = std::mem::take(&mut self.bytecode);
+        let saved_constants = std::mem::take(&mut self.constants);
+        let saved_register_count = self.next_register;
+        let saved_labels = std::mem::take(&mut self.label_positions);
+        let saved_patches = std::mem::take(&mut self.label_patches);
+        let saved_next_label = self.next_label;
+
+        self.next_register = 1;
+        self.next_label = 0;
+        self.enter_scope();
+
+        // Bind parameters to registers
+        for (i, &param_symbol) in final_params.iter().enumerate() {
+            let target_reg = (i + 1) as u8;
+            self.bind_local_symbol(param_symbol, target_reg);
+        }
+        self.next_register = (final_params.len() + 1) as u8;
+
+        // Compile macro body expressions - same as function body
+        let body_exprs = &args[1..];
+        let mut result_reg = self.alloc_register();
+        self.emit_load_immediate(result_reg, ValueRef::nil());
+
+        for &expr in body_exprs {
+            result_reg = self.compile_expression(expr)?;
+        }
+
+        // Regular return - macros return expanded code as a normal value
+        self.emit_u8(Opcode::Return as u8);
+        self.emit_u8(result_reg);
+        self.exit_scope();
+
+        // Create CompiledFunction but mark it as a macro
+        let macro_bytecode = std::mem::take(&mut self.bytecode);
+        let macro_constants = std::mem::take(&mut self.constants);
+        let macro_registers = self.next_register;
+
+        // Restore compilation state
+        self.bytecode = saved_bytecode;
+        self.constants = saved_constants;
+        self.next_register = saved_register_count;
+        self.label_positions = saved_labels;
+        self.label_patches = saved_patches;
+        self.next_label = saved_next_label;
+
+        // Create a CompiledFunction but store it as a macro
+        let compiled_macro = CompiledFunction {
+            bytecode: macro_bytecode,
+            constants: macro_constants,
+            parameter_count: final_params.len() as u8,
+            register_count: macro_registers,
+            module: self.current_module,
+            register_start: 1,
+            has_self_reference: false,
+        };
+
+        // Store as macro in VM (you'll need this method)
+        let macro_obj = self.vm.alloc_callable(compiled_macro);
+        let const_index = self.add_constant(ValueRef::Heap(GcPtr::new(macro_obj)));
+        
+        let result_reg = self.alloc_register();
+        self.emit_u8(Opcode::LoadImmConst as u8);
+        self.emit_u8(result_reg);
+        self.emit_u8(const_index);
+        
+        Ok(result_reg)
+    }
+
     fn find_free_variables(&mut self, expr: ValueRef) -> Result<(), String> {
         match expr {
             ValueRef::Immediate(packed) => {
@@ -733,8 +866,8 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             "=" => self.compile_equality_chain(args),
             "<" => self.compile_ordered_chain(args, Opcode::Lt),
             ">" => self.compile_ordered_chain(args, Opcode::Gt),
-            "<=" => self.compile_ordered_chain(args, Opcode::LtEq), 
-            ">=" => self.compile_ordered_chain(args, Opcode::GtEq), 
+            "<=" => self.compile_ordered_chain(args, Opcode::LtEq),
+            ">=" => self.compile_ordered_chain(args, Opcode::GtEq),
             _ => Err("Not a comparison operator".to_string()),
         }
     }
@@ -788,103 +921,175 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             let left_reg = self.compile_expression(args[0])?;
             let right_reg = self.compile_expression(args[1])?;
             let result_reg = self.alloc_register();
-            
+
             self.emit_u8(base_op as u8);
             self.emit_u8(result_reg);
             self.emit_u8(left_reg);
             self.emit_u8(right_reg);
-            
+
             return Ok(result_reg);
         }
-        
+
         // Multi-argument: implement the same short-circuit logic as your `and`
         let result_reg = self.alloc_register();
         let false_label = self.alloc_label();
         let end_label = self.alloc_label();
-        
+
         for i in 0..(args.len() - 1) {
             let left_reg = self.compile_expression(args[i])?;
             let right_reg = self.compile_expression(args[i + 1])?;
             let cmp_reg = self.alloc_register();
-            
+
             // Compare args[i] > args[i+1]
             self.emit_u8(base_op as u8);
             self.emit_u8(cmp_reg);
             self.emit_u8(left_reg);
             self.emit_u8(right_reg);
-            
+
             // If comparison is false, short-circuit to false
             self.emit_jump_if_false(cmp_reg, false_label);
         }
-        
+
         // All comparisons passed
         self.emit_load_immediate(result_reg, ValueRef::boolean(true));
         self.emit_jump(end_label);
-        
+
         // At least one comparison failed
         self.emit_label(false_label);
         self.emit_load_immediate(result_reg, ValueRef::boolean(false));
-        
+
         self.emit_label(end_label);
         Ok(result_reg)
     }
 
-    fn compile_and_chain(&mut self, registers: &[u8]) -> Result<u8, String> {
-        if registers.is_empty() {
-            let result_reg = self.alloc_register();
-            self.emit_load_immediate(result_reg, ValueRef::boolean(true));
-            return Ok(result_reg);
+    fn compile_cond(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.is_empty() {
+            return Err("cond expects at least one condition-expression pair".to_string());
         }
-        
-        if registers.len() == 1 {
-            return Ok(registers[0]);
+
+        if args.len() % 2 != 0 {
+            return Err("cond expects pairs of condition-expression".to_string());
         }
-        
-        let mut result_reg = registers[0];
-        
-        for &reg in &registers[1..] {
-            let new_result = self.alloc_register();
-            self.emit_u8(Opcode::And as u8); 
-            self.emit_u8(new_result);
+
+        let result_reg = self.alloc_register();
+        let end_label = self.alloc_label();
+        let mut next_condition_labels = Vec::new();
+
+        // Generate labels for each condition check
+        for _ in 0..(args.len() / 2) {
+            next_condition_labels.push(self.alloc_label());
+        }
+
+        // Process each condition-expression pair
+        for i in (0..args.len()).step_by(2) {
+            let condition_index = i / 2;
+
+            // Check if this is an :else clause
+            if let ValueRef::Immediate(packed) = args[i] {
+                if let ImmediateValue::Keyword(keyword_id) = unpack_immediate(packed) {
+                    let keyword = self
+                        .vm
+                        .symbol_table
+                        .read()
+                        .get_symbol(keyword_id)
+                        .unwrap_or_default();
+                    if keyword == "else" {
+                        // This is the else clause - just compile the expression
+                        let else_reg = self.compile_expression(args[i + 1])?;
+                        self.emit_u8(Opcode::LoadLocal as u8);
+                        self.emit_u8(result_reg);
+                        self.emit_u8(else_reg);
+                        self.emit_jump(end_label);
+                        break;
+                    }
+                }
+            }
+
+            // Regular condition-expression pair
+            let condition_reg = self.compile_expression(args[i])?;
+
+            // If this isn't the last pair, jump to next condition on false
+            if condition_index < next_condition_labels.len() - 1 {
+                self.emit_jump_if_false(condition_reg, next_condition_labels[condition_index + 1]);
+            } else {
+                // Last condition - jump to end (setting nil) if false
+                let nil_label = self.alloc_label();
+                self.emit_jump_if_false(condition_reg, nil_label);
+
+                // Condition true - evaluate expression
+                let expr_reg = self.compile_expression(args[i + 1])?;
+                self.emit_u8(Opcode::LoadLocal as u8);
+                self.emit_u8(result_reg);
+                self.emit_u8(expr_reg);
+                self.emit_jump(end_label);
+
+                // Condition false - load nil
+                self.emit_label(nil_label);
+                self.emit_load_immediate(result_reg, ValueRef::nil());
+                self.emit_jump(end_label);
+                break;
+            }
+
+            // Condition true - evaluate expression and jump to end
+            let expr_reg = self.compile_expression(args[i + 1])?;
+            self.emit_u8(Opcode::LoadLocal as u8);
             self.emit_u8(result_reg);
-            self.emit_u8(reg);
-            result_reg = new_result;
+            self.emit_u8(expr_reg);
+            self.emit_jump(end_label);
+
+            // Emit label for next condition (if not the last)
+            if condition_index < next_condition_labels.len() - 1 {
+                self.emit_label(next_condition_labels[condition_index + 1]);
+            }
         }
-        
+
+        self.emit_label(end_label);
         Ok(result_reg)
     }
 
     fn compile_symbol_reference(&mut self, symbol_id: u32) -> Result<u8, String> {
-        let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id).unwrap_or_default();
-        
+        let symbol_name = self
+            .vm
+            .symbol_table
+            .read()
+            .get_symbol(symbol_id)
+            .unwrap_or_default();
+
         // Try local scope first
         if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
-            
-            return Ok(local_reg);  // Return the loop register directly
+            return Ok(local_reg); // Return the loop register directly
         }
-        
+
         // Only allocate result_reg if we need it for upvalues/globals
         let result_reg = self.alloc_register();
-        
+
         // Try upvalues
         if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
-        
             self.emit_u8(Opcode::LoadUpvalue as u8);
             self.emit_u8(result_reg);
             self.emit_u8(upvalue_idx);
             return Ok(result_reg);
         }
-        
+
         // Fall back to global
-        
+
         self.emit_u8(Opcode::LoadGlobal as u8);
         self.emit_u8(result_reg);
         self.emit_u32(symbol_id);
         Ok(result_reg)
     }
 
-    fn try_compile_logical_operator(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<u8, String> {
-        let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id).ok_or("Unknown symbol")?;
+    fn try_compile_logical_operator(
+        &mut self,
+        symbol_id: u32,
+        args: &[ValueRef],
+    ) -> Result<u8, String> {
+        let symbol_name = self
+            .vm
+            .symbol_table
+            .read()
+            .get_symbol(symbol_id)
+            .ok_or("Unknown symbol")?;
         match symbol_name.as_str() {
             "and" => self.compile_and(args),
             "or" => self.compile_or(args),
@@ -900,9 +1105,7 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             return Ok(result_reg);
         }
 
-        if args.len() != 1 {
-            
-        }
+        if args.len() != 1 {}
 
         let arg_reg = self.compile_expression(args[0])?;
         let result_reg = self.alloc_register();
@@ -918,14 +1121,14 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             self.emit_load_immediate(result_reg, ValueRef::boolean(true));
             return Ok(result_reg);
         }
-        
+
         let result_reg = self.alloc_register();
         let false_label = self.alloc_label();
         let end_label = self.alloc_label();
-        
+
         for (i, &arg) in args.iter().enumerate() {
             let arg_reg = self.compile_expression(arg)?;
-            
+
             if i == args.len() - 1 {
                 // Last argument - its value becomes the result
                 self.emit_u8(Opcode::LoadLocal as u8);
@@ -936,13 +1139,13 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
                 self.emit_jump_if_false(arg_reg, false_label);
             }
         }
-        
+
         self.emit_jump(end_label);
-        
+
         // False path
         self.emit_label(false_label);
         self.emit_load_immediate(result_reg, ValueRef::boolean(false));
-        
+
         self.emit_label(end_label);
         Ok(result_reg)
     }
@@ -957,10 +1160,10 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         let result_reg = self.alloc_register();
         let true_label = self.alloc_label();
         let end_label = self.alloc_label();
-        
+
         for (i, &arg) in args.iter().enumerate() {
             let arg_reg = self.compile_expression(arg)?;
-            
+
             if i == args.len() - 1 {
                 // Last argument - its value becomes the result
                 self.emit_u8(Opcode::LoadLocal as u8);
@@ -971,13 +1174,13 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
                 self.emit_jump_if_true(arg_reg, true_label);
             }
         }
-        
+
         self.emit_jump(end_label);
-        
+
         // True path
         self.emit_label(true_label);
         self.emit_load_immediate(result_reg, ValueRef::boolean(false));
-        
+
         self.emit_label(end_label);
         Ok(result_reg)
     }
@@ -1048,6 +1251,8 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             "fn" => self.compile_fn(args),
             "loop" => self.compile_loop(args),
             "recur" => self.compile_recur(args),
+            "cond" => self.compile_cond(args),
+            "macro" => self.compile_macro(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
     }
@@ -1088,10 +1293,18 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
 
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+
+                // CHECK FOR MACROS FIRST!
+                if let Some(expanded) = self.try_expand_macro(symbol_id, &items[1..])? {
+                    return self.compile_expression(expanded);
+                }
+                
                 // Check for special forms
                 if self.is_special_form(symbol_id) {
                     return self.compile_special_form(symbol_id, &items[1..]);
                 }
+
+                
 
                 // Check for arithmetic operators
                 if let Ok(result) = self.try_compile_arithmetic(symbol_id, &items[1..]) {
@@ -1357,7 +1570,7 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(
                 symbol_name.as_str(),
-                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur"
+                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | "cond" | "macro"
             )
         } else {
             false
@@ -1375,21 +1588,17 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
     // MAIN COMPILATION ENTRY POINTS
 
     pub fn compile_for_storage(&mut self, expr: ValueRef) -> Result<CompiledFunction, String> {
-        
         self.reset();
-        
-        
+
         let result_reg = self.compile_expression(expr)?;
-        
-    
+
         // Emit return
         self.emit_u8(Opcode::Return as u8);
         self.emit_u8(result_reg);
-    
-        
+
         Ok(CompiledFunction {
             bytecode: self.bytecode.clone(),
-            constants: self.constants.clone(),  // Make sure this is actually copying
+            constants: self.constants.clone(), // Make sure this is actually copying
             parameter_count: 0,
             register_count: self.next_register,
             module: 0,

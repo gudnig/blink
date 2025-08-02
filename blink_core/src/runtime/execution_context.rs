@@ -6,7 +6,7 @@ use crate::{
     error::BlinkError,
     runtime::{BlinkVM, ClosureObject, CompiledFunction, Opcode, TypeTag},
     value::{unpack_immediate, GcPtr, ImmediateValue},
-    ValueRef,
+    value::ValueRef,
 };
 
 // Updated call frame for byte-sized bytecode
@@ -20,7 +20,7 @@ pub struct CallFrame {
 }
 
 #[derive(Debug)]
-
+//(def when (macro [condition body] (if true '(if condition body nil) nil)))
 enum InstructionResult {
     Continue,
     Return,

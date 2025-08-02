@@ -72,6 +72,10 @@ impl BlinkVM {
         self.alloc_callable(function)
     }
 
+    pub fn alloc_macro(&self, macro_fn: CompiledFunction) -> ObjectReference {
+        self.alloc_callable(macro_fn)
+    }
+
 
     pub fn alloc_callable(&self, function: CompiledFunction) -> ObjectReference {
         self.with_mutator(|mutator| {
@@ -751,6 +755,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
+            HeapValue::Macro(macro_fn) => self.alloc_macro(macro_fn),
             HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => self.alloc_env(env),
             HeapValue::Closure(closure_object) => self.alloc_closure(closure_object),

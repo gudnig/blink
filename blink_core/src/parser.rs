@@ -110,7 +110,7 @@ pub trait SymbolTableTrait {
     fn intern(&mut self, name: &str) -> u32;
     fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32;
 }
-
+    
 
 fn apply_reader_macro(symbol_id: u32, form: ParsedValueWithPos) -> ParsedValueWithPos {
     let pos = form.pos;

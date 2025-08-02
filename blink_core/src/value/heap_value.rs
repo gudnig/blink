@@ -12,7 +12,8 @@ pub enum HeapValue {
     Str(String),
     Set(BlinkHashSet),
     Error(BlinkError),
-    Function(CompiledFunction), // Encompasses functions and expanded macros
+    Function(CompiledFunction),
+    Macro(CompiledFunction),
     Closure(ClosureObject),
     Future(BlinkFuture),
     Env(Env),
@@ -23,57 +24,61 @@ impl Display for HeapValue {
         match self {
             HeapValue::Str(s) => write!(f, "{}", s),
             HeapValue::List(value_refs) => {
-                                                write!(f, "(")?;
-                                                for value_ref in value_refs {
-                                                    write!(f, "{} ", value_ref)?;
-                                                }
-                                                write!(f, ")")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "(")?;
+                                                        for value_ref in value_refs {
+                                                            write!(f, "{} ", value_ref)?;
+                                                        }
+                                                        write!(f, ")")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Vector(value_refs) => {
-                                                write!(f, "[")?;
-                                                for value_ref in value_refs {
-                                                    write!(f, "{} ", value_ref)?;
-                                                }
-                                                write!(f, "]")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "[")?;
+                                                        for value_ref in value_refs {
+                                                            write!(f, "{} ", value_ref)?;
+                                                        }
+                                                        write!(f, "]")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Map(blink_hash_map) => {
-                                                write!(f, "{{")?;
-                                                for (key, value) in blink_hash_map.iter() {
-                                                    write!(f, "{}: {}\n", key, value)?;
-                                                }
-                                                write!(f, "}}")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "{{")?;
+                                                        for (key, value) in blink_hash_map.iter() {
+                                                            write!(f, "{}: {}\n", key, value)?;
+                                                        }
+                                                        write!(f, "}}")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Set(blink_hash_set) => {
-                                                write!(f, "#{{")?;
-                                                for value in blink_hash_set.iter() {
-                                                    write!(f, "{} ", value)?;
-                                                }
-                                                write!(f, "}}")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "#{{")?;
+                                                        for value in blink_hash_set.iter() {
+                                                            write!(f, "{} ", value)?;
+                                                        }
+                                                        write!(f, "}}")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Function(callable) => {
-                                                write!(f, "function")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "function")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Future(blink_future) => {
-                                                write!(f, "future")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "future")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Env(env) => {
-                                                write!(f, "env")?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "env")?;
+                                                        Ok(())
+                                                    },
             HeapValue::Error(blink_error) => {
-                                                write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
-                                                Ok(())
-                                            },
+                                                        write!(f, "error: {} {}", blink_error.error_type, blink_error.message)?;
+                                                        Ok(())
+                                                    },
             HeapValue::Closure(closure_object) => {
-                                                write!(f, "closure")?;
-                                                Ok(())
-                                            },  
+                                                        write!(f, "closure")?;
+                                                        Ok(())
+                                                    },
+            HeapValue::Macro(compiled_function) => {
+                                                        write!(f, "macro")?;
+                                                        Ok(())
+                                                    },
         }
     }
 }
@@ -128,6 +133,16 @@ impl Hash for HeapValue {
                                     constant.hash(state);
                                 }
                                 user_defined_fn.bytecode.hash(state);
+                            }
+            HeapValue::Macro(macro_fn) => {
+                                "macro".hash(state);
+                                macro_fn.parameter_count.hash(state);
+                                macro_fn.bytecode.len().hash(state);
+                                macro_fn.constants.len().hash(state);
+                                for constant in &macro_fn.constants {
+                                    constant.hash(state);
+                                }
+                                macro_fn.bytecode.hash(state);
                             }
             HeapValue::Closure(closure_object) => {
                                 "closure".hash(state);
@@ -200,6 +215,7 @@ impl HeapValue {
             HeapValue::Closure(_) => "closure",
             HeapValue::Future(_) => "future",
             HeapValue::Env(_) => "env",
+            HeapValue::Macro(_) => "macro",
         }
     }
 

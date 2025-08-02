@@ -89,7 +89,7 @@ impl SymbolTable {
     }
 
     pub fn intern_special_form(&mut self, id: u32, name: &str) -> u32 {
-        self.strings.push(name.to_string());
+        self.strings.insert(id as usize, name.to_string());
         self.lookup.insert(name.to_string(), id);
         id
     }

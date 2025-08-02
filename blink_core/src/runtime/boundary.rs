@@ -88,61 +88,64 @@ impl ValueBoundary for ContextualBoundary {
                 if let Some(heap_val) = heap_val {
                     match heap_val {
                         HeapValue::List(value_refs) => {
-                                                let isolated_values: Vec<IsolatedValue> = value_refs
-                                                    .into_iter()
-                                                    .map(|item| self.extract_isolated(item))
-                                                    .collect::<Result<Vec<IsolatedValue>, String>>()?;
-                                                Ok(IsolatedValue::List(isolated_values))
-                                            }
+                                                                    let isolated_values: Vec<IsolatedValue> = value_refs
+                                                                        .into_iter()
+                                                                        .map(|item| self.extract_isolated(item))
+                                                                        .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                                                                    Ok(IsolatedValue::List(isolated_values))
+                                                                }
                         HeapValue::Vector(value_refs) => {
-                                                let isolated_values: Vec<IsolatedValue> = value_refs
-                                                    .into_iter()
-                                                    .map(|item| self.extract_isolated(item))
-                                                    .collect::<Result<Vec<IsolatedValue>, String>>()?;
-                                                Ok(IsolatedValue::Vector(isolated_values))
-                                            }
+                                                                    let isolated_values: Vec<IsolatedValue> = value_refs
+                                                                        .into_iter()
+                                                                        .map(|item| self.extract_isolated(item))
+                                                                        .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                                                                    Ok(IsolatedValue::Vector(isolated_values))
+                                                                }
                         HeapValue::Map(blink_hash_map) => {
-                                                let isolated_values = blink_hash_map
-                                                    .into_iter()
-                                                    .map(|(k, v)| {
-                                                        let k = self.extract_isolated(k)?;
-                                                        let v = self.extract_isolated(v)?;
-                                                        Ok((k, v))
-                                                    })
-                                                    .collect::<Result<Vec<(IsolatedValue, IsolatedValue)>, String>>()?;
+                                                                    let isolated_values = blink_hash_map
+                                                                        .into_iter()
+                                                                        .map(|(k, v)| {
+                                                                            let k = self.extract_isolated(k)?;
+                                                                            let v = self.extract_isolated(v)?;
+                                                                            Ok((k, v))
+                                                                        })
+                                                                        .collect::<Result<Vec<(IsolatedValue, IsolatedValue)>, String>>()?;
 
-                                                let map = HashMap::from_iter(isolated_values);
-                                                Ok(IsolatedValue::Map(map))
-                                            }
+                                                                    let map = HashMap::from_iter(isolated_values);
+                                                                    Ok(IsolatedValue::Map(map))
+                                                                }
                         HeapValue::Str(s) => Ok(IsolatedValue::String(s)),
                         HeapValue::Set(blink_hash_set) => {
-                                                let isolated_values: Vec<IsolatedValue> = blink_hash_set
-                                                    .into_iter()
-                                                    .map(|item| self.extract_isolated(item))
-                                                    .collect::<Result<Vec<IsolatedValue>, String>>()?;
-                                                Ok(IsolatedValue::Set(HashSet::from_iter(isolated_values)))
-                                            }
+                                                                    let isolated_values: Vec<IsolatedValue> = blink_hash_set
+                                                                        .into_iter()
+                                                                        .map(|item| self.extract_isolated(item))
+                                                                        .collect::<Result<Vec<IsolatedValue>, String>>()?;
+                                                                    Ok(IsolatedValue::Set(HashSet::from_iter(isolated_values)))
+                                                                }
                         HeapValue::Error(blink_error) => {
-                                                let error = BlinkError::eval(blink_error.to_string());
-                                                Ok(IsolatedValue::Error(error.to_string()))
-                                            }
+                                                                    let error = BlinkError::eval(blink_error.to_string());
+                                                                    Ok(IsolatedValue::Error(error.to_string()))
+                                                                }
                         HeapValue::Function(callable) => {
-                                                let handle = self.vm.handle_registry.write().register_function(value);
-                                                Ok(IsolatedValue::Function(handle))
-                                            }
+                                                                    let handle = self.vm.handle_registry.write().register_function(value);
+                                                                    Ok(IsolatedValue::Function(handle))
+                                                                }
                         HeapValue::Future(blink_future) => {
-                                                let handle = self.vm.handle_registry.write().register_future(value);
-                                                Ok(IsolatedValue::Future(handle))
-                                            }
+                                                                    let handle = self.vm.handle_registry.write().register_future(value);
+                                                                    Ok(IsolatedValue::Future(handle))
+                                                                }
                         HeapValue::Env(env) => {
-                                                Err(format!("Env is not supported for boundary crossing"))
-                                            }
+                                                                    Err(format!("Env is not supported for boundary crossing"))
+                                                                }
                         HeapValue::Closure(closure_object) => {
-                                                let handle = self.vm.handle_registry.write().register_function(value);
-                                                Ok(IsolatedValue::Function(handle))
-                                            }
-
-                    }
+                                                                    let handle = self.vm.handle_registry.write().register_function(value);
+                                                                    Ok(IsolatedValue::Function(handle))
+                                                                }
+                        HeapValue::Macro(compiled_function) => {
+                                                                    let handle = self.vm.handle_registry.write().register_function(value);
+                                                                    Ok(IsolatedValue::Macro(handle))
+                                                                }
+                                                                }
                 } else {
                     Err(format!("Unsupported value type for boundary crossing"))
                 }

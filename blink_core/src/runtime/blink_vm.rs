@@ -111,6 +111,7 @@ pub struct BlinkVM {
     pub value_metadata: RwLock<ValueMetadataStore>,
     pub gc_roots: RwLock<Vec<ObjectReference>>,  // Track all roots
     pub handle_registry: RwLock<HandleRegistry>,
+    pub core_module: Option<u32>
 }
 
 impl std::fmt::Debug for BlinkVM {
@@ -153,6 +154,7 @@ impl BlinkVM {
             value_metadata: RwLock::new(ValueMetadataStore::new()),
             handle_registry: RwLock::new(HandleRegistry::new()),
             gc_roots: RwLock::new(Vec::new()),
+            core_module: None,
         }
     }
 
@@ -169,7 +171,7 @@ impl BlinkVM {
         let mut vm = Self::construct_vm();
 
         let core_module_id = vm.symbol_table.write().intern("core");
-
+        vm.core_module = Some(core_module_id);
         let core_module = Module {
             name: core_module_id,
             imports: HashMap::new(),
@@ -324,40 +326,29 @@ impl BlinkVM {
     pub fn resolve_global_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {
         
         let module_registry = self.module_registry.read();
-        module_registry.resolve_symbol(module_id, symbol_id)
+        let core_module = self.core_module.unwrap();
+        let value = module_registry.resolve_symbol(module_id, symbol_id);
+        match value {
+            Some(value) => Some(value),
+            None => {
+                module_registry.resolve_symbol(core_module, symbol_id)
+            }
+        }
     }
 
 
     fn build_simple_macro(&mut self,name: &str, module: u32) -> u32 {
-        
-        // let symbol_id = self.symbol_table.write().intern(name);
-        // let list = self.alloc_vec_or_list(vec![ValueRef::symbol(symbol_id), ValueRef::symbol(symbol_id)], true);
-        // let body = vec![ValueRef::Heap(GcPtr::new(list))];
-        // let empty_env = self.alloc_env(Env::new());
-        // let call = CompiledFunction {
-        //     module: module,
-        //     is_variadic: false,
-        //     body: body,
-        //     env: empty_env,
-        //     params: vec![symbol_id],
-
-        // };
-
-        
-        
-        // let macro_ref = self.alloc_compiled_function(call);
-        // let value = ValueRef::Heap(GcPtr::new(macro_ref));
-        // self.update_module(module, symbol_id, value);
-        // symbol_id
-
-        0
-
+        let symbol_id = self.symbol_table.write().intern(name);
+        let expr = ValueRef::symbol(symbol_id);
+        let mut module_registry = self.module_registry.write();
+        module_registry.update_module(module, symbol_id, expr);
+        symbol_id
     }
 
     pub fn preload_builtin_reader_macros(&mut self, module: u32) {
         
         
-        let quote = self.build_simple_macro("quo", module);
+        let quote = self.build_simple_macro("quote", module);
     
         let quasiquote = self.build_simple_macro("quasiquote", module);
         let unquote = self.build_simple_macro("unquote", module);
