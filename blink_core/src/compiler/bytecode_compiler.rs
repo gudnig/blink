@@ -92,44 +92,55 @@ impl BytecodeCompiler {
     // CONSTANT POOL MANAGEMENT
 
     fn add_constant(&mut self, value: ValueRef) -> u8 {
+        
+        
         // Check if constant already exists
         for (i, &existing) in self.constants.iter().enumerate() {
             if existing == value {
+                
                 return i as u8;
             }
         }
-
+    
         // Add new constant
         let index = self.constants.len();
+        
         if index > 255 {
             panic!("Too many constants (max 256)");
         }
         self.constants.push(value);
+        
         index as u8
     }
 
     // HIGH-LEVEL INSTRUCTION EMISSION
 
     fn emit_load_immediate(&mut self, reg: u8, value: ValueRef) {
+        
         match value {
             ValueRef::Immediate(packed) => {
                 let imm = unpack_immediate(packed);
+                
                 match imm {
                     ImmediateValue::Number(n) if n.fract() == 0.0 && n >= 0.0 && n <= 255.0 => {
+                        
                         // Small integer - emit directly
                         self.emit_u8(Opcode::LoadImm8 as u8);
                         self.emit_u8(reg);
                         self.emit_u8(n as u8);
                     }
                     ImmediateValue::Number(n) if n.fract() == 0.0 && n >= 0.0 && n <= 65535.0 => {
+                        
                         // Medium integer - emit as 16-bit
                         self.emit_u8(Opcode::LoadImm16 as u8);
                         self.emit_u8(reg);
                         self.emit_u16(n as u16);
                     }
                     _ => {
+                        
                         // Complex immediate - use constant pool
                         let const_idx = self.add_constant(value);
+                        
                         self.emit_u8(Opcode::LoadImmConst as u8);
                         self.emit_u8(reg);
                         self.emit_u8(const_idx);
@@ -137,8 +148,10 @@ impl BytecodeCompiler {
                 }
             }
             _ => {
+                
                 // Heap/Native value - use constant pool
                 let const_idx = self.add_constant(value);
+                
                 self.emit_u8(Opcode::LoadImmConst as u8);
                 self.emit_u8(reg);
                 self.emit_u8(const_idx);
@@ -178,7 +191,7 @@ impl BytecodeCompiler {
 
 
     fn emit_jump(&mut self, label: u16) {
-        println!("DEBUG: emit_jump called for label {}", label);
+        
         self.emit_u8(Opcode::Jump as u8);
         let patch_offset = self.bytecode.len();
         
@@ -186,8 +199,7 @@ impl BytecodeCompiler {
         if let Some(&target_pos) = self.label_positions.get(&label) {
             // Label already exists - patch immediately
             let offset = target_pos as i16 - (patch_offset as i16 + 2);
-            println!("DEBUG: Label {} already exists at {}, patching immediately with offset {}", 
-                    label, target_pos, offset);
+            
             self.emit_i16(offset);
         } else {
             // Label not yet emitted - add to patches list
@@ -195,7 +207,7 @@ impl BytecodeCompiler {
                 bytecode_offset: patch_offset,
                 label_id: label,
             });
-            println!("DEBUG: Added patch at offset {} for label {} (not yet emitted)", patch_offset, label);
+            
             self.emit_i16(0); // Placeholder
         }
     }
@@ -203,7 +215,7 @@ impl BytecodeCompiler {
     
     fn emit_label(&mut self, label: u16) {
         let current_pos = self.bytecode.len();
-        println!("DEBUG: emit_label {} at position {}", label, current_pos);
+        
         
         // Store the label position for later use
         self.label_positions.insert(label, current_pos);
@@ -214,8 +226,7 @@ impl BytecodeCompiler {
                 let jump_pos = patch.bytecode_offset;
                 let offset = current_pos as i16 - (jump_pos as i16 + 2);
                 
-                println!("DEBUG: Patching jump at {} to target {}, offset = {}", 
-                        jump_pos, current_pos, offset);
+                
                 
                 // Write the offset back into bytecode
                 let offset_bytes = offset.to_le_bytes();
@@ -228,7 +239,7 @@ impl BytecodeCompiler {
         let before_count = self.label_patches.len();
         self.label_patches.retain(|patch| patch.label_id != label);
         let after_count = self.label_patches.len();
-        println!("DEBUG: Removed {} patches for label {}", before_count - after_count, label);
+        
     }
     
 
@@ -329,7 +340,7 @@ impl BytecodeCompiler {
             // Bind the symbol to the loop register IMMEDIATELY
             // This ensures all references to this symbol use the loop register
             self.bind_local_symbol(symbol_id, binding_reg);
-            println!("DEBUG: Bound symbol {} to loop register {}", symbol_id, binding_reg);
+            
             
             binding_registers.push(binding_reg);
             binding_symbols.push(symbol_id);
@@ -348,7 +359,7 @@ impl BytecodeCompiler {
                 self.emit_u8(Opcode::LoadLocal as u8);
                 self.emit_u8(binding_reg);      // destination (loop register)
                 self.emit_u8(value_reg);        // source (temporary register)
-                println!("DEBUG: Moved initial value from register {} to loop register {}", value_reg, binding_reg);
+                
             }
         }
     
@@ -386,12 +397,12 @@ impl BytecodeCompiler {
 
     // In your compile_recur method, add debug info about the values:
 fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-    println!("DEBUG: compile_recur called with {} args", args.len());
+    
     
     let loop_frame = self.loop_stack.last().cloned()
         .ok_or("recur used outside of loop")?;
     
-    println!("DEBUG: Found loop frame, start_label = {}", loop_frame.start_label);
+    
     
     if args.len() != loop_frame.binding_count as usize {
         return Err(format!(
@@ -404,17 +415,16 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
     // Compile new values for loop bindings
     let mut new_value_regs = Vec::new();
     for (i, &arg) in args.iter().enumerate() {
-        println!("DEBUG: Compiling recur arg {}: {:?}", i, arg);
+        
         let value_reg = self.compile_expression(arg)?;
         new_value_regs.push(value_reg);
-        println!("DEBUG: Recur arg {} compiled to register {}", i, value_reg);
+        
     }
 
     // Update binding registers with new values
     for (i, &new_value_reg) in new_value_regs.iter().enumerate() {
         let binding_reg = loop_frame.binding_registers[i];
-        println!("DEBUG: Updating binding {} register {} with value from register {}", 
-                 i, binding_reg, new_value_reg);
+        
         
         // This should move the new value to the binding register
         self.emit_u8(Opcode::LoadLocal as u8);
@@ -422,9 +432,9 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         self.emit_u8(new_value_reg);    // source
     }
 
-    println!("DEBUG: About to emit_jump to label {}", loop_frame.start_label);
+
     self.emit_jump(loop_frame.start_label);
-    println!("DEBUG: emit_jump completed");
+    
 
     Ok(0)
 }
@@ -830,12 +840,11 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
             return Ok(registers[0]);
         }
         
-        // Chain AND operations using your LogicalAnd bytecode
         let mut result_reg = registers[0];
         
         for &reg in &registers[1..] {
             let new_result = self.alloc_register();
-            self.emit_u8(Opcode::And as u8);  // Your bytecode op
+            self.emit_u8(Opcode::And as u8); 
             self.emit_u8(new_result);
             self.emit_u8(result_reg);
             self.emit_u8(reg);
@@ -850,7 +859,7 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         
         // Try local scope first
         if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
-            println!("DEBUG: Symbol '{}' (id {}) resolved to LOCAL register {}", symbol_name, symbol_id, local_reg);
+            
             return Ok(local_reg);  // Return the loop register directly
         }
         
@@ -859,7 +868,7 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         
         // Try upvalues
         if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
-            println!("DEBUG: Symbol '{}' (id {}) resolved to UPVALUE {}", symbol_name, symbol_id, upvalue_idx);
+        
             self.emit_u8(Opcode::LoadUpvalue as u8);
             self.emit_u8(result_reg);
             self.emit_u8(upvalue_idx);
@@ -867,7 +876,7 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
         }
         
         // Fall back to global
-        println!("DEBUG: Symbol '{}' (id {}) resolved to GLOBAL", symbol_name, symbol_id);
+        
         self.emit_u8(Opcode::LoadGlobal as u8);
         self.emit_u8(result_reg);
         self.emit_u32(symbol_id);
@@ -1366,16 +1375,21 @@ fn compile_recur(&mut self, args: &[ValueRef]) -> Result<u8, String> {
     // MAIN COMPILATION ENTRY POINTS
 
     pub fn compile_for_storage(&mut self, expr: ValueRef) -> Result<CompiledFunction, String> {
+        
         self.reset();
+        
+        
         let result_reg = self.compile_expression(expr)?;
-
+        
+    
         // Emit return
         self.emit_u8(Opcode::Return as u8);
         self.emit_u8(result_reg);
-
+    
+        
         Ok(CompiledFunction {
             bytecode: self.bytecode.clone(),
-            constants: self.constants.clone(),
+            constants: self.constants.clone(),  // Make sure this is actually copying
             parameter_count: 0,
             register_count: self.next_register,
             module: 0,

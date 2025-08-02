@@ -378,13 +378,6 @@ impl ExecutionContext {
             Opcode::LoadImmConst => {
                 let dest_reg = Self::read_u8(bytecode, pc)?;
                 let const_index = Self::read_u8(bytecode, pc)?;
-
-                println!("DEBUG: LoadImmConst - dest_reg={}, const_index={}, constants.len()={}", 
-                        dest_reg, const_index, constants.len());
-                println!("DEBUG: Current bytecode position: {}", *pc - 2); // Approximate position
-                
-                println!("DEBUG: LoadImmConst - trying to load constant index {}, constants.len()={}", 
-                         const_index, constants.len());
                 
                 if const_index as usize >= constants.len() {
                     return Err(format!("Constant index {} out of bounds (have {} constants)", 
@@ -399,31 +392,14 @@ impl ExecutionContext {
                 let dest_reg = Self::read_u8(bytecode, pc)?;
                 let src_reg = Self::read_u8(bytecode, pc)?;
                 
-                println!("DEBUG EXEC: LoadLocal - dest_reg={}, src_reg={}, reg_base={}, register_stack.len()={}", 
-                         dest_reg, src_reg, reg_base, register_stack.len());
-                
                 // Check bounds before accessing
                 if reg_base + src_reg as usize >= register_stack.len() {
-                    println!("ERROR: Trying to access register {} (reg_base {} + src_reg {}), but only have {} registers", 
-                             reg_base + src_reg as usize, reg_base, src_reg, register_stack.len());
+                    
                     return Err(format!("Register {} out of bounds", src_reg));
                 }
                 
                 let value = register_stack[reg_base + src_reg as usize];
                 
-                // Add debug to see what's being moved
-                println!("DEBUG EXEC: LoadLocal - moving from register {} to register {}", src_reg, dest_reg);
-                if let ValueRef::Immediate(packed) = value {
-                    let imm = unpack_immediate(packed);
-                    match imm {
-                        ImmediateValue::Number(n) => println!("DEBUG EXEC: Moving number {} from reg {} to reg {}", n, src_reg, dest_reg),
-                        ImmediateValue::Bool(b) => println!("DEBUG EXEC: Moving boolean {} from reg {} to reg {}", b, src_reg, dest_reg),
-                        _ => println!("DEBUG EXEC: Moving other immediate from reg {} to reg {}", src_reg, dest_reg),
-                    }
-                } else if let ValueRef::Heap(heap) = value {
-                    let type_tag = heap.type_tag();
-                    println!("DEBUG EXEC: Moving heap object (type {}) from reg {} to reg {}", type_tag.to_str(), src_reg, dest_reg);
-                }
                 
                 register_stack[reg_base + dest_reg as usize] = value;
                 Ok(InstructionResult::Continue)
@@ -514,24 +490,9 @@ impl ExecutionContext {
                 Ok(InstructionResult::Continue)
             }
             Opcode::Jump => {
-                let jump_pc = *pc; // Save PC before reading offset
                 let offset = Self::read_i16(bytecode, pc)?;
-                
-                // Debug: Show what's in register 1 (the loop variable) before jumping
-                let x_value_reg1 = register_stack[reg_base + 1];
-                if let Ok(x_num_reg1) = Self::extract_number(x_value_reg1) {
-                    println!("DEBUG: About to jump back to loop, x (register 1) = {}", x_num_reg1);
-                }
-                
-                // Also show register 2 for comparison
-                if reg_base + 2 < register_stack.len() {
-                    let x_value_reg2 = register_stack[reg_base + 2];
-                    if let Ok(x_num_reg2) = Self::extract_number(x_value_reg2) {
-                        println!("DEBUG: About to jump back to loop, x (register 2) = {}", x_num_reg2);
-                    }
-                }
-                
-                *pc = (jump_pc as i32 + offset as i32) as usize;
+                // Use current PC (after reading offset) as base for jump
+                *pc = (*pc as i32 + offset as i32) as usize;
                 Ok(InstructionResult::Continue)
             }
             Opcode::JumpIfTrue => {
@@ -539,26 +500,21 @@ impl ExecutionContext {
                 let offset = Self::read_i16(bytecode, pc)?;
                 let test_value = register_stack[reg_base + test_reg as usize];
                 if test_value.is_truthy() {
-                    *pc = (*pc as i32 + offset as i32) as usize;
+                    *pc = (*pc as i32 + offset as i32) as usize;  // Fixed: (*pc) not (pc*)
                 }
                 Ok(InstructionResult::Continue)
             }
             Opcode::JumpIfFalse => {
                 let test_reg = Self::read_u8(bytecode, pc)?;
-                let jump_pc = *pc;
                 let offset = Self::read_i16(bytecode, pc)?;
                 
-                println!("DEBUG: JumpIfFalse: reading from register {}", test_reg);
                 let test_value = register_stack[reg_base + test_reg as usize];
                 
-                println!("DEBUG: JumpIfFalse: test_value = {:?}, is_truthy = {}", test_value, test_value.is_truthy());
                 
                 if !test_value.is_truthy() {
-                    println!("DEBUG: JumpIfFalse: JUMPING with offset {}", offset);
-                    *pc = (jump_pc as i32 + offset as i32) as usize;
-                } else {
-                    println!("DEBUG: JumpIfFalse: NOT JUMPING (continuing)");
-                }
+                    let new_pc = (*pc as i32 + offset as i32) as usize;
+                    *pc = new_pc;
+                } 
                 
                 Ok(InstructionResult::Continue)
             }
@@ -600,7 +556,7 @@ impl ExecutionContext {
                 let left_num = Self::extract_number(left)?;
                 let right_num = Self::extract_number(right)?;
                 
-                println!("DEBUG: Lt: left_num = {:?} in register {}, right_num = {:?} in register {}", left_num, left_reg, right_num, right_reg);
+                
                 
                 let result = if left_num < right_num {
                     ValueRef::boolean(true)
@@ -609,7 +565,7 @@ impl ExecutionContext {
                 };
                 
                 register_stack[reg_base + result_reg as usize] = result;
-                println!("DEBUG: Lt: storing result = {:?} in register {}", result, result_reg);
+                
                 
                 Ok(InstructionResult::Continue)
             }
@@ -860,7 +816,7 @@ impl ExecutionContext {
                 for i in 0..arg_count.min(compiled_fn.parameter_count) {
                     let arg_value =
                         register_stack[caller_reg_base + func_reg as usize + 1 + i as usize];
-                    println!("Copying argument {} from caller register {} to parameter register {}: {:?}", i, caller_reg_base + 1 + i as usize, reg_start + (param_start as usize) + i as usize, arg_value);
+                    
                     register_stack[reg_start + (param_start as usize) + i as usize] = arg_value;
                 }
 
