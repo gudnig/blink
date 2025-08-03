@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    error::BlinkError, runtime::{BlinkVM, Bytecode, CompiledFunction, ExecutionContext, LabelPatch, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
+    error::BlinkError, runtime::{BlinkVM, CompiledFunction, ExecutionContext, LabelPatch, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
 };
 
 #[derive(Debug, Clone)]
@@ -101,7 +101,6 @@ impl BytecodeCompiler {
             Err(_) => return Ok(None), // Not found
         };
 
-        println!("DEBUG: symbol_value = {}", symbol_value);
 
         // Check if it's a macro
         if let ValueRef::Heap(gc_ptr) = symbol_value {
@@ -111,6 +110,7 @@ impl BytecodeCompiler {
                 let expanded_code = exec_ctx
                     .execute_function_directly(&symbol_value, args)  // Pass args directly, not as a call expression
                     .map_err(|e| e.to_string())?;
+                
                 return Ok(Some(expanded_code));
             }
         }
@@ -543,10 +543,7 @@ impl BytecodeCompiler {
         let param_start_reg = if function_name.is_some() { 2 } else { 1 };
         for (i, &param_symbol) in param_symbols.iter().enumerate() {
             let target_reg = (param_start_reg + i) as u8;
-            println!(
-                "Binding parameter symbol {} to register {}",
-                param_symbol, target_reg
-            );
+            
             self.bind_local_symbol(param_symbol, target_reg);
         }
 
@@ -1305,7 +1302,6 @@ impl BytecodeCompiler {
             return Err("Empty function call".to_string());
         }
 
-        println!("DEBUG: first item = {}", items[0]);
 
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
@@ -2163,43 +2159,30 @@ impl BytecodeCompiler {
 
     // QUASIQUOTE and UNQUOTE support
     fn compile_quasiquote(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-        println!("DEBUG: compile_quasiquote called with {} args", args.len());
+        
         if args.len() != 1 {
             return Err("quasiquote expects exactly 1 argument".to_string());
         }
     
-        println!("DEBUG: processing quasiquote of: {:?}", args[0]);
+        
         
         if self.has_unquotes(args[0]) {
             let processed = self.process_quasiquote(args[0], 1)?;
-            println!("DEBUG: processed result: {:?}", processed);
-            
-            // Add this debug to see what the processed result looks like
-            if let Some(items) = processed.get_list() {
-                println!("DEBUG: processed is a list with {} items", items.len());
-                for (i, item) in items.iter().enumerate() {
-                    println!("DEBUG: item {}: {:?}", i, item);
-                }
-            }
             
             self.compile_expression(processed)
         } else {
-            println!("DEBUG: no unquotes, treating as quote");
             self.compile_quote(args)
         }
     }
     
     fn has_unquotes(&self, expr: ValueRef) -> bool {
-        println!("DEBUG: has_unquotes checking: {:?}", expr);
         match expr {
             ValueRef::Immediate(_) => {
-                println!("DEBUG: immediate, no unquotes");
                 false
             }
             ValueRef::Native(_) => false,
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
-                    println!("DEBUG: checking list with {} items", list_items.len());
                     self.list_has_unquotes(&list_items)
                 } else if let Some(vec_items) = expr.get_vec() {
                     self.list_has_unquotes(&vec_items)
@@ -2219,9 +2202,7 @@ impl BytecodeCompiler {
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
                 if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
-                    println!("DEBUG: First symbol is: {}", symbol_name);
                     if matches!(symbol_name.as_str(), "unquote" | "unquote-splicing" | "quasiquote") {
-                        println!("DEBUG: Found {} at top level!", symbol_name);
                         return true;
                     }
                 }
@@ -2361,41 +2342,19 @@ impl BytecodeCompiler {
             
             // Regular item - process recursively
             let processed = self.process_quasiquote(*item, depth)?;
-            // Quote symbols that aren't from unquotes
-            let final_item = if processed.is_symbol() {
-                self.quote_symbol(processed) // + -> (quote +)
-            } else {
-                processed // Numbers, etc. stay as-is
-            };
+            
+            let final_item = processed;
             result_parts.push(SplicePart::Item(final_item));
         }
         self.build_spliced_list(result_parts)
     }
 
-    fn quote_symbol(&mut self, symbol: ValueRef) -> ValueRef {
-        println!("DEBUG: quote_symbol called with: {:?}", symbol);
-        
-        let quote_symbol = self.vm.symbol_table.write().intern("quote");
-        let quote_symbol_val = ValueRef::symbol(quote_symbol);
-        
-        let result = ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(vec![quote_symbol_val, symbol], true)
-        ));
-        
-        println!("DEBUG: quote_symbol returning: {:?}", result);
-        result
-    }
 
     fn create_quoted_list(&mut self, items: Vec<ValueRef>) -> ValueRef {
-        // Create a call to (list ...) so items get evaluated at runtime
-        let list_symbol = self.vm.symbol_table.write().intern("list");
-        let list_symbol_val = ValueRef::symbol(list_symbol);
-        
-        let mut call_items = vec![list_symbol_val];
-        call_items.extend(items);
-        
+        // Create a direct list structure for macro expansion
+        // This should create (if condition body nil) not (list 'if condition body 'nil)
         ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(call_items, true)
+            self.vm.alloc_vec_or_list(items, true) // true = list
         ))
     }
     

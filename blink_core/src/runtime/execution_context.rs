@@ -5,7 +5,7 @@ use crate::{
     compiler::BytecodeCompiler,
     error::BlinkError,
     runtime::{BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary},
-    value::{unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef}, HeapValue,
+    value::{unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef}, value::HeapValue,
 };
 
 // Updated call frame for byte-sized bytecode
@@ -104,29 +104,38 @@ impl ExecutionContext {
     }
 
     pub fn execute_function_directly(&mut self, func: &ValueRef, args: &[ValueRef]) -> Result<ValueRef, String> {
-        // Set up call frame directly
-
         
         if let ValueRef::Heap(heap) = func {
-            
-            let _func_val = match heap.to_heap_value() {
+            let compiled_func = match heap.to_heap_value() {
                 HeapValue::Function(func) => func,
                 HeapValue::Macro(macro_obj) => macro_obj,
                 _ => return Err("Function must be a function".to_string()),
             };
-            let reg_len = self.register_stack.len();
             
-            let frame = Self::setup_function_call(
-                &mut self.register_stack,
-                self.current_module,
-                *func,
-                0,
-                args.len() as u8,
-                reg_len,
-            )?;
-
+            // Directly implement frame setup without extra register copies
+            let reg_start = self.register_stack.len();
+            let reg_count = compiled_func.register_count;
+            
+            // Allocate registers for new frame
+            for _ in 0..reg_count {
+                self.register_stack.push(ValueRef::nil());
+            }
+            
+            // Copy arguments to parameter registers
+            let param_start = compiled_func.register_start;
+            for i in 0..args.len().min(compiled_func.parameter_count as usize) {
+                self.register_stack[reg_start + (param_start as usize) + i] = args[i];
+            }
+            let module = compiled_func.module;
+            let frame = CallFrame {
+                func: FunctionRef::CompiledFunction(compiled_func, Some(heap.0)),
+                pc: 0,
+                reg_start,
+                reg_count,
+                current_module: module,
+            };
+    
             self.call_stack.push(frame);
-
             self.execute()
         } else {
             return Err("Function must be a heap object".to_string());
