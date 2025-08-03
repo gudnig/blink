@@ -301,26 +301,25 @@ impl BlinkVM {
 
     fn register_special_forms(&mut self) {
         let mut st = self.symbol_table.write();
-        st.intern_special_form(SpecialFormId::If as u32,"if");
-        st.intern_special_form(SpecialFormId::Def as u32,"def");
-        st.intern_special_form(SpecialFormId::Macro as u32,"mac");
-        st.intern_special_form(SpecialFormId::Rmac as u32,"rmac");
-        st.intern_special_form(SpecialFormId::Quasiquote as u32,"quasiquote");
-        st.intern_special_form(SpecialFormId::Unquote as u32,"unquote");
-        st.intern_special_form(SpecialFormId::UnquoteSplicing as u32,"unquote-splicing");
-        st.intern_special_form(SpecialFormId::Deref as u32,"deref");
-        st.intern_special_form(SpecialFormId::Go as u32,"go");
-        st.intern_special_form(SpecialFormId::Imp as u32,"imp"); 
-        st.intern_special_form(SpecialFormId::Mod as u32,"mod");
-        st.intern_special_form(SpecialFormId::Load as u32,"load");
-        st.intern_special_form(SpecialFormId::Try as u32,"try");
-        st.intern_special_form(SpecialFormId::Imp as u32,"imp");
-        st.intern_special_form(SpecialFormId::Mod as u32,"mod");
-        st.intern_special_form(SpecialFormId::Load as u32,"load");
-        st.intern_special_form(SpecialFormId::Macro as u32,"macro");
-        st.intern_special_form(SpecialFormId::Loop as u32,"loop");
-        st.intern_special_form(SpecialFormId::Recur as u32,"recur");
-        st.intern_special_form(SpecialFormId::Quote as u32,"quote");
+        st.intern("if");
+        st.intern("def");
+        st.intern("mac");
+        st.intern("rmac");
+        st.intern("quasiquote");
+        st.intern("unquote");
+        st.intern("unquote-splicing");
+        st.intern("deref");
+        st.intern("go");
+        st.intern("imp"); 
+        st.intern("mod");
+        st.intern("load");
+        st.intern("try");
+        st.intern("imp");
+        st.intern("load");
+        st.intern("macro");
+        st.intern("loop");
+        st.intern("recur");
+        st.intern("quote");
     }
 
     pub fn resolve_global_symbol(&self, module_id: u32, symbol_id: u32) -> Option<ValueRef> {

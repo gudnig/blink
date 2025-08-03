@@ -31,6 +31,7 @@ pub fn tokenize_at(
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_str = false;
+    let mut in_comment = false; // Track if we're inside a comment
 
     let mut line = 1;
     let mut col = 0;
@@ -43,8 +44,25 @@ pub fn tokenize_at(
     for c in code.chars() {
         col += 1;
         if c == '\n' {
+            if in_comment {
+                in_comment = false; // Comments end at newline
+            }
             line += 1;
             col = 0;
+            
+            // If we're not in a string and not in a comment, treat newline as whitespace
+            if !in_str {
+                if !current.is_empty() {
+                    tokens.push((current.clone(), SourcePos { line, col }));
+                    current.clear();
+                }
+                continue;
+            }
+        }
+
+        // If we're in a comment, skip all characters until newline
+        if in_comment && !in_str {
+            continue;
         }
 
         match c {
@@ -110,7 +128,7 @@ pub trait SymbolTableTrait {
     fn intern(&mut self, name: &str) -> u32;
     fn intern_qualified(&mut self, module_id: u32, symbol_id: u32) -> u32;
 }
-    
+
 
 fn apply_reader_macro(symbol_id: u32, form: ParsedValueWithPos) -> ParsedValueWithPos {
     let pos = form.pos;

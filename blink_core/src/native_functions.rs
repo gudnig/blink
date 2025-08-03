@@ -165,7 +165,7 @@ pub fn native_cons(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
     if args.len() != 2 {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "cons"));
     }
-    let mut new_list = vec![args[0]];
+    let mut new_list = vec![args[1]];
     let old_list =  if let Some(v)  = args[0].get_list(){
         v 
     } else if let Some(v) = args[1].get_vec(){
@@ -174,6 +174,22 @@ pub fn native_cons(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
         return EvalResult::Value(ctx.eval_error("second argument to cons must be a list or vector"));
     };
     new_list.extend(old_list);
+    EvalResult::Value(ctx.list(new_list))
+}
+
+pub fn native_concat(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
+    
+    
+    let mut lists = vec![];
+    for arg in args {
+        if let Some(v) = arg.get_list(){
+            lists.push(v);
+        } else if let Some(v) = arg.get_vec(){
+            lists.push(v);
+        }
+    }
+    let new_list = lists.concat();
+    
     EvalResult::Value(ctx.list(new_list))
 }
 

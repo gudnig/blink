@@ -31,6 +31,13 @@ pub struct BytecodeCompiler {
     label_patches: Vec<LabelPatch>,
 }
 
+#[derive(Debug)]
+enum SplicePart {
+    Item(ValueRef),      // Regular item (gets quoted if symbol)
+    Splice(ValueRef),    // Expression to be spliced
+    UnquotedItem(ValueRef), // From unquote (never gets quoted)
+}
+
 impl BytecodeCompiler {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         Self {
@@ -94,12 +101,16 @@ impl BytecodeCompiler {
             Err(_) => return Ok(None), // Not found
         };
 
-        // Check if it's a compiled macro
+        println!("DEBUG: symbol_value = {}", symbol_value);
+
+        // Check if it's a macro
         if let ValueRef::Heap(gc_ptr) = symbol_value {
             if let HeapValue::Macro(macro_obj) = gc_ptr.to_heap_value() {
-                // Execute the macro to get expanded code
+                // DON'T create a function call expression - execute the macro directly
                 let mut exec_ctx = ExecutionContext::new(self.vm.clone(), self.current_module);
-                let expanded_code = exec_ctx.compile_and_execute(symbol_value).map_err(|e| e.to_string())?;
+                let expanded_code = exec_ctx
+                    .execute_function_directly(&symbol_value, args)  // Pass args directly, not as a call expression
+                    .map_err(|e| e.to_string())?;
                 return Ok(Some(expanded_code));
             }
         }
@@ -757,7 +768,7 @@ impl BytecodeCompiler {
         };
 
         // Store as macro in VM (you'll need this method)
-        let macro_obj = self.vm.alloc_callable(compiled_macro);
+        let macro_obj = self.vm.alloc_macro(compiled_macro);
         let const_index = self.add_constant(ValueRef::Heap(GcPtr::new(macro_obj)));
         
         let result_reg = self.alloc_register();
@@ -1233,7 +1244,7 @@ impl BytecodeCompiler {
         Ok(None)
     }
 
-    // Add to compile_special_form match
+    
     fn compile_special_form(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<u8, String> {
         let symbol_name = self
             .vm
@@ -1253,6 +1264,9 @@ impl BytecodeCompiler {
             "recur" => self.compile_recur(args),
             "cond" => self.compile_cond(args),
             "macro" => self.compile_macro(args),
+            "quasiquote" => self.compile_quasiquote(args),
+            "unquote" => self.compile_unquote(args),
+            "unquote-splicing" => self.compile_unquote_splicing(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
     }
@@ -1291,6 +1305,8 @@ impl BytecodeCompiler {
             return Err("Empty function call".to_string());
         }
 
+        println!("DEBUG: first item = {}", items[0]);
+
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
 
@@ -1298,7 +1314,7 @@ impl BytecodeCompiler {
                 if let Some(expanded) = self.try_expand_macro(symbol_id, &items[1..])? {
                     return self.compile_expression(expanded);
                 }
-                
+
                 // Check for special forms
                 if self.is_special_form(symbol_id) {
                     return self.compile_special_form(symbol_id, &items[1..]);
@@ -1324,6 +1340,7 @@ impl BytecodeCompiler {
                 return self.compile_regular_function_call(symbol_id, &items[1..]);
             }
         }
+        
 
         Err("Unsupported function call".to_string())
     }
@@ -1536,23 +1553,26 @@ impl BytecodeCompiler {
         // Compile arguments into consecutive registers
         let mut arg_registers = Vec::new();
         for arg in args {
-            let arg_reg = self.compile_expression(*arg)?;
-            arg_registers.push(arg_reg);
+            let arg_reg = self.compile_expression(*arg)?;  // This puts result in register 0
+            
+            // Save the result before the next expression overwrites register 0
+            let saved_reg = self.alloc_register();
+            if arg_reg != saved_reg {
+                self.emit_u8(Opcode::LoadLocal as u8);
+                self.emit_u8(saved_reg);
+                self.emit_u8(arg_reg);  // Copy from register 0 to saved_reg
+            }
+            arg_registers.push(saved_reg);  // Use the saved register, not arg_reg
         }
 
-        // Now move arguments to consecutive positions if they're not already
-        let first_arg_reg = self.next_register; // Where args should start
-
+        // Move arguments to consecutive positions
         for (i, &arg_reg) in arg_registers.iter().enumerate() {
-            let target_reg = first_arg_reg + i as u8;
+            let target_reg = func_reg + 1 + i as u8;  // Right after func_reg
             if arg_reg != target_reg {
-                // Need to move the argument to the correct position
                 self.emit_u8(Opcode::LoadLocal as u8);
                 self.emit_u8(target_reg);
                 self.emit_u8(arg_reg);
             }
-            // Reserve the target register
-            self.next_register = target_reg + 1;
         }
 
         let result_reg = self.alloc_register();
@@ -1570,7 +1590,7 @@ impl BytecodeCompiler {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(
                 symbol_name.as_str(),
-                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | "cond" | "macro"
+                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | "cond" | "macro" | "quasiquote" | "unquote" | "unquote-splicing"
             )
         } else {
             false
@@ -2139,4 +2159,314 @@ impl BytecodeCompiler {
         self.emit_label(non_empty_label);
         Ok(accumulator_reg)
     }
+
+
+    // QUASIQUOTE and UNQUOTE support
+    fn compile_quasiquote(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        println!("DEBUG: compile_quasiquote called with {} args", args.len());
+        if args.len() != 1 {
+            return Err("quasiquote expects exactly 1 argument".to_string());
+        }
+    
+        println!("DEBUG: processing quasiquote of: {:?}", args[0]);
+        
+        if self.has_unquotes(args[0]) {
+            let processed = self.process_quasiquote(args[0], 1)?;
+            println!("DEBUG: processed result: {:?}", processed);
+            
+            // Add this debug to see what the processed result looks like
+            if let Some(items) = processed.get_list() {
+                println!("DEBUG: processed is a list with {} items", items.len());
+                for (i, item) in items.iter().enumerate() {
+                    println!("DEBUG: item {}: {:?}", i, item);
+                }
+            }
+            
+            self.compile_expression(processed)
+        } else {
+            println!("DEBUG: no unquotes, treating as quote");
+            self.compile_quote(args)
+        }
+    }
+    
+    fn has_unquotes(&self, expr: ValueRef) -> bool {
+        println!("DEBUG: has_unquotes checking: {:?}", expr);
+        match expr {
+            ValueRef::Immediate(_) => {
+                println!("DEBUG: immediate, no unquotes");
+                false
+            }
+            ValueRef::Native(_) => false,
+            ValueRef::Heap(_) => {
+                if let Some(list_items) = expr.get_list() {
+                    println!("DEBUG: checking list with {} items", list_items.len());
+                    self.list_has_unquotes(&list_items)
+                } else if let Some(vec_items) = expr.get_vec() {
+                    self.list_has_unquotes(&vec_items)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    
+    fn list_has_unquotes(&self, items: &[ValueRef]) -> bool {
+        if items.is_empty() {
+            return false;
+        }
+
+        // Check if this list IS an unquote/unquote-splicing
+        if let ValueRef::Immediate(packed) = items[0] {
+            if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
+                    println!("DEBUG: First symbol is: {}", symbol_name);
+                    if matches!(symbol_name.as_str(), "unquote" | "unquote-splicing" | "quasiquote") {
+                        println!("DEBUG: Found {} at top level!", symbol_name);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check nested items recursively
+        for item in items {
+            if self.has_unquotes(*item) {
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    fn compile_unquote(&mut self, _args: &[ValueRef]) -> Result<u8, String> {
+        Err("unquote used outside quasiquote".to_string())
+    }
+    
+    fn compile_unquote_splicing(&mut self, _args: &[ValueRef]) -> Result<u8, String> {
+        Err("unquote-splicing used outside quasiquote".to_string())
+    }
+    
+    /// Process a quasiquoted expression, handling nested quasiquotes
+    /// depth: current nesting level of quasiquotes (1 = top level)
+    fn process_quasiquote(&mut self, expr: ValueRef, depth: i32) -> Result<ValueRef, String> {
+        match expr {
+            ValueRef::Immediate(packed) => {
+                // For immediate values (symbols, numbers, etc), just return them quoted
+                Ok(expr)
+            }
+            ValueRef::Heap(_) => {
+                if let Some(list_items) = expr.get_list() {
+                    self.process_quasiquote_list(&list_items, depth)
+                } else if let Some(vec_items) = expr.get_vec() {
+                    // Handle vectors specially
+                    let processed_items = self.process_quasiquote_list(&vec_items, depth)?;
+                    if let Some(processed_list) = processed_items.get_list() {
+                        // Convert the list back to a vector
+                        Ok(self.create_quoted_vector(processed_list))
+                    } else {
+                        Ok(processed_items)
+                    }
+                } else {
+                    // For other heap values (maps, strings, etc), return as-is
+                    Ok(expr)
+                }
+            }
+            ValueRef::Native(_) => Ok(expr),
+        }
+    }
+    
+    fn process_quasiquote_list(&mut self, items: &[ValueRef], depth: i32) -> Result<ValueRef, String> {
+        if items.is_empty() {
+            // Empty list - just return a quoted empty list
+            return Ok(self.create_quoted_list(vec![]));
+        }
+    
+        // Check if first item is a special quasiquote form
+        if let ValueRef::Immediate(packed) = items[0] {
+            if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id);
+                match symbol_name.as_deref() {
+                    Some("quasiquote") => {
+                        // Nested quasiquote - increase depth
+                        if items.len() != 2 {
+                            return Err("quasiquote expects exactly 1 argument".to_string());
+                        }
+                        let processed = self.process_quasiquote(items[1], depth + 1)?;
+                        return Ok(self.create_quoted_list(vec![items[0], processed]));
+                    }
+                    Some("unquote") => {
+                        if depth == 1 {
+                            // This is the unquote we should evaluate
+                            if items.len() != 2 {
+                                return Err("unquote expects exactly 1 argument".to_string());
+                            }
+                            return Ok(items[1]); // Return the unquoted expression for evaluation
+                        } else {
+                            // Nested unquote - decrease depth
+                            let processed = self.process_quasiquote(items[1], depth - 1)?;
+                            return Ok(self.create_quoted_list(vec![items[0], processed]));
+                        }
+                    }
+                    Some("unquote-splicing") => {
+                        return Err("unquote-splicing not allowed at top level of list".to_string());
+                    }
+                    _ => {
+                        // Regular symbol, fall through to process normally
+                    }
+                }
+            }
+        }
+    
+        // Process all items, collecting them and checking for splicing
+        let mut result_parts = Vec::new();
+        
+        for item in items {
+            // Check for unquote-splicing and unquote
+            if let Some(list_items) = item.get_list() {
+                if list_items.len() == 2 {
+                    if let ValueRef::Immediate(packed) = list_items[0] {
+                        if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                            let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id);
+                            if symbol_name.as_deref() == Some("unquote-splicing") {
+                                if depth == 1 {
+                                    // This is actual splicing
+                                    result_parts.push(SplicePart::Splice(list_items[1]));
+                                    continue;
+                                } else {
+                                    // Nested unquote-splicing - decrease depth
+                                    let processed = self.process_quasiquote(list_items[1], depth - 1)?;
+                                    let new_item = self.create_quoted_list(vec![list_items[0], processed]);
+                                    result_parts.push(SplicePart::Item(new_item));
+                                    continue;
+                                }
+                            }
+                            // ADD THIS: Handle regular unquote
+                            if symbol_name.as_deref() == Some("unquote") {
+                                if depth == 1 {
+                                    // This is an unquote - mark as unquoted (no quoting!)
+                                    result_parts.push(SplicePart::UnquotedItem(list_items[1]));
+                                    continue;
+                                } else {
+                                    // Nested unquote - decrease depth
+                                    let processed = self.process_quasiquote(list_items[1], depth - 1)?;
+                                    let new_item = self.create_quoted_list(vec![list_items[0], processed]);
+                                    result_parts.push(SplicePart::Item(new_item));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Regular item - process recursively
+            let processed = self.process_quasiquote(*item, depth)?;
+            // Quote symbols that aren't from unquotes
+            let final_item = if processed.is_symbol() {
+                self.quote_symbol(processed) // + -> (quote +)
+            } else {
+                processed // Numbers, etc. stay as-is
+            };
+            result_parts.push(SplicePart::Item(final_item));
+        }
+        self.build_spliced_list(result_parts)
+    }
+
+    fn quote_symbol(&mut self, symbol: ValueRef) -> ValueRef {
+        println!("DEBUG: quote_symbol called with: {:?}", symbol);
+        
+        let quote_symbol = self.vm.symbol_table.write().intern("quote");
+        let quote_symbol_val = ValueRef::symbol(quote_symbol);
+        
+        let result = ValueRef::Heap(GcPtr::new(
+            self.vm.alloc_vec_or_list(vec![quote_symbol_val, symbol], true)
+        ));
+        
+        println!("DEBUG: quote_symbol returning: {:?}", result);
+        result
+    }
+
+    fn create_quoted_list(&mut self, items: Vec<ValueRef>) -> ValueRef {
+        // Create a call to (list ...) so items get evaluated at runtime
+        let list_symbol = self.vm.symbol_table.write().intern("list");
+        let list_symbol_val = ValueRef::symbol(list_symbol);
+        
+        let mut call_items = vec![list_symbol_val];
+        call_items.extend(items);
+        
+        ValueRef::Heap(GcPtr::new(
+            self.vm.alloc_vec_or_list(call_items, true)
+        ))
+    }
+    
+    fn create_quoted_vector(&mut self, items: Vec<ValueRef>) -> ValueRef {
+        // Create a simple quoted vector literal  
+        ValueRef::Heap(GcPtr::new(
+            self.vm.alloc_vec_or_list(items, false)
+        ))
+    }
+    
+    fn build_spliced_list(&mut self, parts: Vec<SplicePart>) -> Result<ValueRef, String> {
+        // Check if we actually need splicing
+        let has_splice = parts.iter().any(|p| matches!(p, SplicePart::Splice(_)));
+        
+        if !has_splice {
+            // No splicing - just build a regular quoted list
+            let items: Vec<ValueRef> = parts.into_iter()
+                .map(|p| match p {
+                    SplicePart::Item(item) => item,
+                    SplicePart::Splice(_) => unreachable!(),
+                    SplicePart::UnquotedItem(item) => item,
+                })
+                .collect();
+            return Ok(self.create_quoted_list(items));
+        }
+        
+        // We have splicing - need to build a runtime expression
+        // Transform into: (concat (list item1) spliced-expr (list item3) ...)
+        
+        let concat_symbol = self.vm.symbol_table.write().intern("concat");
+        let concat_symbol_val = ValueRef::symbol(concat_symbol);
+        let list_symbol = self.vm.symbol_table.write().intern("list");
+        let list_symbol_val = ValueRef::symbol(list_symbol);
+        
+        let mut concat_args = vec![concat_symbol_val];
+        let mut current_items = Vec::new();
+        
+        for part in parts {
+            match part {
+                SplicePart::Item(item) => {
+                                current_items.push(item);
+                            }
+                SplicePart::Splice(expr) => {
+                                // Flush any accumulated items as a list
+                                if !current_items.is_empty() {
+                                    let mut list_call = vec![list_symbol_val];
+                                    list_call.extend(current_items.drain(..));
+                                    concat_args.push(ValueRef::Heap(GcPtr::new(
+                                        self.vm.alloc_vec_or_list(list_call, true)
+                                    )));
+                                }
+                                // Add the spliced expression directly
+                                concat_args.push(expr);
+                            }
+                SplicePart::UnquotedItem(item) => current_items.push(item),
+            }
+        }
+        
+        // Flush any remaining items
+        if !current_items.is_empty() {
+            let mut list_call = vec![list_symbol_val];
+            list_call.extend(current_items);
+            concat_args.push(ValueRef::Heap(GcPtr::new(
+                self.vm.alloc_vec_or_list(list_call, true)
+            )));
+        }
+        
+        // Return the concat expression
+        Ok(ValueRef::Heap(GcPtr::new(
+            self.vm.alloc_vec_or_list(concat_args, true)
+        )))
+    }
+    
 }

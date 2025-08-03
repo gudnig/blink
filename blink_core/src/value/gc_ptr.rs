@@ -342,6 +342,7 @@ impl GcPtr {
 
 
     
+    
     pub fn read_callable(&self) -> CompiledFunction {
         unsafe {
             let data_ptr = self.0.to_raw_address().as_usize() as *const u8;

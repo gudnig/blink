@@ -1,52 +1,50 @@
 use crate::{
-    runtime::EvalResult,
-    native_functions::{
-        native_add, native_complete_future, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
-    },
-    runtime::BlinkVM,
-    value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}, env::Env,
+    env::Env, native_functions::{
+        native_add, native_complete_future, native_concat, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
+    }, runtime::{BlinkVM, EvalResult}, value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}
 };
 
 impl BlinkVM {
     pub fn register_builtins(&mut self, module: u32) {
         
 
-    //     let mut reg =
-    //         |s: &str, f: fn(Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult, module: u32| -> ValueRef {
-    //             let sym = self.symbol_table.write().intern(s);
-    //             let boxed = Box::new(f);
-    //             let val = ValueRef::contextual_native_fn(boxed);
-    //             let empty_env = self.alloc_env(Env::new());
-    //             self.update_module(module, sym, val);
+        let mut reg =
+            |s: &str, f: fn(Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult, module: u32| -> ValueRef {
+                let sym = self.symbol_table.write().intern(s);
+                let boxed = Box::new(f);
+                let val = ValueRef::contextual_native_fn(boxed);
+                
+                self.update_module(module, sym, val);
 
-    //             val
-    //         };
+                val
+            };
 
-    //     reg("+", native_add, module);
-    //     reg("-", native_sub, module);
-    //     reg("*", native_mul, module);
-    //     reg("/", native_div, module);
-    //     reg("=", native_eq, module);
-    //     reg("not", native_not, module);
+        reg("+", native_add, module);
+        reg("-", native_sub, module);
+        reg("*", native_mul, module);
+        reg("/", native_div, module);
+        reg("=", native_eq, module);
+        reg("not", native_not, module);
 
-    //     reg("list", native_list, module);
-    //     reg("vector", native_vector, module);
-    //     reg("hash-map", native_map_construct, module);
-    //     //reg("map", native_map); // TODO need to do a map fn
-    //     reg("print", native_print, module);
-    //     reg("type-of", native_type_of, module);
-    //     reg("cons", native_cons, module);
-    //     reg("first", native_first, module);
-    //     reg("rest", native_rest, module);
-    //     reg("get", native_get, module);
-    //     reg("report-gc-stats", native_report_gc_stats, module);
-    //     reg("gc-stress", native_gc_stress, module);
-    //     // TODO: Error module
-    //     reg("err", native_error, module);
+        reg("list", native_list, module);
+        reg("vector", native_vector, module);
+        reg("hash-map", native_map_construct, module);
+        //reg("map", native_map); // TODO need to do a map fn
+        reg("print", native_print, module);
+        reg("type-of", native_type_of, module);
+        reg("cons", native_cons, module);
+        reg("concat", native_concat, module);
+        reg("first", native_first, module);
+        reg("rest", native_rest, module);
+        reg("get", native_get, module);
+        reg("report-gc-stats", native_report_gc_stats, module);
+        reg("gc-stress", native_gc_stress, module);
+        // TODO: Error module
+        reg("err", native_error, module);
 
-    //     // TODO: async module
-    //     reg("future", native_future, module);
-    //     reg("complete", native_complete_future, module);
+        // TODO: async module
+        reg("future", native_future, module);
+        reg("complete", native_complete_future, module);
 
         
     }

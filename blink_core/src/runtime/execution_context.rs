@@ -4,9 +4,8 @@ use std::sync::Arc;
 use crate::{
     compiler::BytecodeCompiler,
     error::BlinkError,
-    runtime::{BlinkVM, ClosureObject, CompiledFunction, Opcode, TypeTag},
-    value::{unpack_immediate, GcPtr, ImmediateValue},
-    value::ValueRef,
+    runtime::{BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary},
+    value::{unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef}, HeapValue,
 };
 
 // Updated call frame for byte-sized bytecode
@@ -102,6 +101,36 @@ impl ExecutionContext {
             }
         }
         roots
+    }
+
+    pub fn execute_function_directly(&mut self, func: &ValueRef, args: &[ValueRef]) -> Result<ValueRef, String> {
+        // Set up call frame directly
+
+        
+        if let ValueRef::Heap(heap) = func {
+            
+            let _func_val = match heap.to_heap_value() {
+                HeapValue::Function(func) => func,
+                HeapValue::Macro(macro_obj) => macro_obj,
+                _ => return Err("Function must be a function".to_string()),
+            };
+            let reg_len = self.register_stack.len();
+            
+            let frame = Self::setup_function_call(
+                &mut self.register_stack,
+                self.current_module,
+                *func,
+                0,
+                args.len() as u8,
+                reg_len,
+            )?;
+
+            self.call_stack.push(frame);
+
+            self.execute()
+        } else {
+            return Err("Function must be a heap object".to_string());
+        }
     }
 
     pub fn compile_and_execute(&mut self, expr: ValueRef) -> Result<ValueRef, BlinkError> {
@@ -337,9 +366,72 @@ impl ExecutionContext {
                         }
                     }
                 }
+            } else if let FunctionRef::Native(tagged_ptr) = &current_frame.func {
+                // Handle native function execution using tagged pointer
+                
+                // Get arguments from registers (skip register 0 which is for return value)
+                let arg_count = current_frame.reg_count as usize - 1; // Subtract 1 for return register
+                let mut args = Vec::with_capacity(arg_count);
+                
+                for i in 0..arg_count {
+                    args.push(self.register_stack[current_frame.reg_start + 1 + i]);
+                }
+                
+                // Decode tagged pointer and call appropriate function type
+                let ptr = tagged_ptr & !1; // Clear the tag bit
+                let return_value = if tagged_ptr & 1 == 0 {
+                    // Tag 0 = Isolated function
+                    let boxed_fn_ptr = ptr as *const IsolatedNativeFn;
+                    let boxed_fn = unsafe { &*boxed_fn_ptr };
+            
+                    // Convert args to isolated values and call
+                    let mut boundary = ContextualBoundary::new(self.vm.clone());
+                    let isolated_args: Result<Vec<_>, _> = args
+                        .iter()
+                        .map(|arg| boundary.extract_isolated(*arg))
+                        .collect();
+            
+                    match isolated_args {
+                        Ok(isolated_args) => match boxed_fn(isolated_args) {
+                            Ok(result) => boundary.alloc_from_isolated(result),
+                            Err(e) => self.vm.eval_error(&e.to_string()),
+                        },
+                        Err(e) => self.vm.eval_error(&e.to_string()),
+                    }
+                } else {
+                    // Tag 1 = Contextual function
+                    let boxed_fn_ptr = ptr as *const ContextualNativeFn;
+                    let boxed_fn = unsafe { &*boxed_fn_ptr };
+                    let mut ctx = NativeContext::new(&self.vm);
+                    
+                    // Call function and extract value (ignore suspension for now)
+                    match boxed_fn(args, &mut ctx) {
+                        EvalResult::Value(val) => val,
+                        EvalResult::Suspended { .. } => {
+                            // Convert suspension to error for now
+                            self.vm.eval_error("Native function suspension not supported")
+                        }
+                    }
+                };
+                
+                // Native function completed - pop frame and handle return
+                let completed_frame = self.call_stack.pop().unwrap();
+                
+                // Clean up registers
+                self.register_stack.truncate(completed_frame.reg_start);
+                
+                if self.call_stack.is_empty() {
+                    return Ok(return_value);
+                }
+                
+                // Store return value in caller's register 0
+                if let Some(caller_frame) = self.call_stack.last() {
+                    self.register_stack[caller_frame.reg_start] = return_value;
+                }
+                
             } else {
-                // TODO: Implement native function calls
-                todo!()
+                // Handle other function types (Closure, etc.)
+                return Err(format!("Unsupported function type: {:?}", current_frame.func));
             }
         }
 
@@ -786,7 +878,7 @@ impl ExecutionContext {
                 let type_tag = heap.type_tag();
                 let obj_ref = heap.0;
                 match type_tag {
-                    TypeTag::UserDefinedFunction => {
+                    TypeTag::UserDefinedFunction | TypeTag::Macro => {
                         let compiled_func = heap.read_callable();
                         let module = compiled_func.module;
                         (
@@ -831,10 +923,36 @@ impl ExecutionContext {
                 Ok(frame)
             }
             FunctionRef::Native(native_fn) => {
-                // Execute native function immediately
-                // TODO: Implement native function calls
-                Err("Native functions not implemented".to_string())
+                // For native functions, we need minimal register setup but still create a frame
+                // for call stack tracing and suspension support
+                
+                // Allocate minimal registers: 1 for return value + arg_count for arguments
+                let reg_start = register_stack.len();
+                let reg_count = 1 + arg_count as usize; // Return slot + arguments
+                
+                // Resize register stack
+                for _ in 0..reg_count {
+                    register_stack.push(ValueRef::nil());
+                }
+                
+                // Copy arguments to the new frame's registers (starting at register 1)
+                // Register 0 is reserved for the return value
+                for i in 0..arg_count {
+                    let arg_value = register_stack[caller_reg_base + func_reg as usize + 1 + i as usize];
+                    register_stack[reg_start + 1 + i as usize] = arg_value;
+                }
+                
+                let frame = CallFrame {
+                    func: FunctionRef::Native(native_fn),
+                    pc: 0, // Native functions don't use PC, but set to 0 for consistency
+                    reg_start,
+                    reg_count: reg_count as u8,
+                    current_module: module,
+                };
+                
+                Ok(frame)
             }
+
             FunctionRef::Closure(closure_object, object_reference) => todo!(),
         }
     }

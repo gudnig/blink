@@ -69,15 +69,15 @@ impl BlinkVM {
     }
 
     pub fn alloc_user_defined_fn(&self, function: CompiledFunction) -> ObjectReference {
-        self.alloc_callable(function)
+        self.alloc_callable(function, false)
     }
 
     pub fn alloc_macro(&self, macro_fn: CompiledFunction) -> ObjectReference {
-        self.alloc_callable(macro_fn)
+        self.alloc_callable(macro_fn, true)
     }
 
 
-    pub fn alloc_callable(&self, function: CompiledFunction) -> ObjectReference {
+    pub fn alloc_callable(&self, function: CompiledFunction, is_macro: bool) -> ObjectReference {
         self.with_mutator(|mutator| {
 
             /* 
@@ -115,7 +115,7 @@ impl BlinkVM {
             bytecode_len;                                             // bytecode data
             
             
-            let type_tag = TypeTag::UserDefinedFunction;
+            let type_tag = if is_macro { TypeTag::Macro } else { TypeTag::UserDefinedFunction };
             let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
 
 
