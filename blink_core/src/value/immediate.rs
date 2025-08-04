@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use crate::runtime::BlinkVM;
+
 
 // NaN-tagging constants
 const NAN_MASK: u64 = 0x7FF0_0000_0000_0000;
@@ -50,7 +52,11 @@ impl Display for ImmediateValue {
         match self {
             ImmediateValue::Number(n) => write!(f, "{}", n),
             ImmediateValue::Bool(b) => write!(f, "{}", b),
-            ImmediateValue::Symbol(s) => write!(f, "{}", s),
+            ImmediateValue::Symbol(s) => {
+                let vm_instance = BlinkVM::get_instance();
+                let symbol_name = vm_instance.get_symbol_name(*s);
+                write!(f, "{}", symbol_name.unwrap_or_else(|| "unknown".to_string()))
+            },
             ImmediateValue::Keyword(k) => write!(f, "{}", k),
             ImmediateValue::Nil => write!(f, "nil"),
         }

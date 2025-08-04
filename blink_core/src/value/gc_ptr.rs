@@ -6,7 +6,7 @@ use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::module::{Module, SerializedModuleSource};
-use crate::runtime::{BlinkObjectModel, ClosureObject, CompiledFunction};
+use crate::runtime::{BlinkObjectModel, ClosureObject, CompiledFunction, Macro};
 use crate::value::{Callable, SourceRange};
 use crate::env::Env;
 use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
@@ -76,7 +76,7 @@ impl GcPtr {
             TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
             TypeTag::Closure => HeapValue::Closure(self.read_closure()),
-            TypeTag::Macro => HeapValue::Macro(self.read_callable()),
+            TypeTag::Macro => HeapValue::Macro(self.read_macro()),
         }
     }
 
@@ -341,7 +341,34 @@ impl GcPtr {
     }
 
 
-    
+    pub fn read_macro(&self) -> Macro {
+        unsafe {
+            let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
+            let mut offset = 0;
+
+            let body_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+
+            let params_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
+            offset += std::mem::size_of::<u32>();
+
+            let body = std::slice::from_raw_parts(data_ptr.add(offset) as *const ValueRef, body_count);
+            offset += std::mem::size_of::<ValueRef>() * body_count;
+            
+
+            let params = std::slice::from_raw_parts(data_ptr.add(offset) as *const u32, params_count);
+            offset += std::mem::size_of::<u32>() * params_count;
+            
+            let is_variadic = std::ptr::read_unaligned(data_ptr.add(offset) as *const u8);
+            offset += std::mem::size_of::<u8>();
+
+            let module = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32);
+            
+
+            Macro { params: params.to_vec(), body: body.to_vec(), is_variadic: is_variadic != 0, module }
+        }
+        
+    }
     
     pub fn read_callable(&self) -> CompiledFunction {
         unsafe {

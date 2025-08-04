@@ -1,6 +1,6 @@
 use mmtk::util::ObjectReference;
 
-use crate::value::ValueRef;
+use crate::value::{ParsedValue, ParsedValueWithPos, ValueRef};
 
 // Opcodes - each fits in a single byte
 #[repr(u8)]
@@ -143,6 +143,48 @@ pub struct CompiledFunction {
     pub module: u32,
     pub register_start: u8,
     pub has_self_reference: bool
+}
+
+#[derive(Clone, Debug)]
+pub struct Macro {
+    pub params: Vec<u32>,           // Parameter symbol IDs
+    pub body: Vec<ValueRef>,        // Raw AST body (not compiled)
+    pub is_variadic: bool,          // Whether last param is &rest
+    pub module: u32,   
+}
+
+impl Macro {
+    pub fn regular_params(&self) -> &[u32] {
+        if self.is_variadic && !self.params.is_empty() {
+            &self.params[..self.params.len() - 1]
+        } else {
+            &self.params
+        }
+    }
+    
+    pub fn variadic_param(&self) -> Option<u32> {
+        if self.is_variadic && !self.params.is_empty() {
+            Some(self.params[self.params.len() - 1])
+        } else {
+            None
+        }
+    }
+
+    pub fn validate_arity(&self, arg_count: usize) -> Result<(), String> {
+        let required = self.regular_params().len();
+        
+        if self.is_variadic {
+            if arg_count < required {
+                return Err(format!("Macro expects at least {} arguments, got {}", required, arg_count));
+            }
+        } else {
+            if arg_count != required {
+                return Err(format!("Macro expects exactly {} arguments, got {}", required, arg_count));
+            }
+        }
+        
+        Ok(())
+    }
 }
 
 // Add to your heap object types

@@ -2,7 +2,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
 use crate::module::{Module, SerializedModuleSource};
 use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkActivePlan, BlinkObjectModel, ClosureObject, CompiledFunction, TypeTag, GLOBAL_MMTK};
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, ClosureObject, CompiledFunction, Macro, TypeTag, GLOBAL_MMTK};
 use crate::value::{Callable, GcPtr, ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
@@ -72,8 +72,64 @@ impl BlinkVM {
         self.alloc_callable(function, false)
     }
 
-    pub fn alloc_macro(&self, macro_fn: CompiledFunction) -> ObjectReference {
-        self.alloc_callable(macro_fn, true)
+    pub fn alloc_macro(&self, macro_fn: Macro) -> ObjectReference {
+        self.with_mutator(|mutator| {
+
+            /*
+             *  pub struct Macro {
+             *       params: Vec<u32>,           // Parameter symbol IDs
+             *       body: Vec<ValueRef>,        // Raw, unevaluated forms
+             *       is_variadic: bool,
+             *       module: u32,
+             *   }
+             */
+
+            let params_count = macro_fn.params.len();
+            let body_count = macro_fn.body.len();
+            let is_variadic = macro_fn.is_variadic;
+            let module = macro_fn.module;
+
+            let total_size = 
+            std::mem::size_of::<u32>() +                              // body_count
+            body_count * std::mem::size_of::<ValueRef>() +            // body
+            std::mem::size_of::<u32>() +                              // params_count
+            params_count * std::mem::size_of::<u32>() +               // params
+            std::mem::size_of::<u8>() +                               // is_variadic
+            std::mem::size_of::<u32>();                               // module
+
+            let type_tag = TypeTag::Macro;
+            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
+
+            unsafe {
+                let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
+                let mut offset = 0;
+
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, body_count as u32);
+                offset += std::mem::size_of::<u32>();
+
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, params_count as u32);
+                offset += std::mem::size_of::<u32>();
+
+                for item in &macro_fn.body {
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut ValueRef, *item);
+                    offset += std::mem::size_of::<ValueRef>();
+                }
+                
+
+                for param in &macro_fn.params {
+                    std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, *param);
+                    offset += std::mem::size_of::<u32>();
+                }
+                
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u8, is_variadic as u8);
+                offset += std::mem::size_of::<u8>();
+
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, module);
+                offset += std::mem::size_of::<u32>();
+                
+            }
+            data_start
+        })
     }
 
 

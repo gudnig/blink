@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    error::BlinkError, runtime::{BlinkVM, CompiledFunction, ExecutionContext, LabelPatch, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
+    compiler::MacroExpander, error::BlinkError, runtime::{BlinkVM, CompiledFunction, ExecutionContext, LabelPatch, Macro, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,7 @@ enum SplicePart {
 
 impl BytecodeCompiler {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
+        
         Self {
             vm,
             bytecode: Vec::new(),
@@ -91,33 +92,6 @@ impl BytecodeCompiler {
         
         Err("Symbol not found".to_string())
     }
-
-
-    // Macro expansion during compilation
-    fn try_expand_macro(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<Option<ValueRef>, String> {
-        // Look up symbol in current compilation scope
-        let symbol_value = match self.resolve_symbol_for_compilation(symbol_id) {
-            Ok(val) => val,
-            Err(_) => return Ok(None), // Not found
-        };
-
-
-        // Check if it's a macro
-        if let ValueRef::Heap(gc_ptr) = symbol_value {
-            if let HeapValue::Macro(macro_obj) = gc_ptr.to_heap_value() {
-                // DON'T create a function call expression - execute the macro directly
-                let mut exec_ctx = ExecutionContext::new(self.vm.clone(), self.current_module);
-                let expanded_code = exec_ctx
-                    .execute_function_directly(&symbol_value, args)  // Pass args directly, not as a call expression
-                    .map_err(|e| e.to_string())?;
-                
-                return Ok(Some(expanded_code));
-            }
-        }
-
-        Ok(None)
-    }
-
 
     // INSTRUCTION EMISSION
 
@@ -653,39 +627,35 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-
-
-    fn compile_macro(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-        if args.len() < 2 {
-            return Err("macro expects at least 2 arguments: parameter vector and body".to_string());
-        }
-
-        // Extract parameters (same logic as fn)
-        let params = if let Some(params_vec) = args[0].get_vec() {
-            params_vec
+    fn extract_parameter_symbols(&self, params: ValueRef) -> Result<Vec<u32>, String> {
+        let params_vec = if let Some(params) = params.get_vec() {
+            params
         } else {
-            return Err("macro first argument must be a vector of parameters".to_string());
+            return Err("Parameters must be a vector".to_string());
         };
 
-        // Convert parameter ValueRefs to symbol IDs and handle variadic
-        let param_symbols: Result<Vec<u32>, String> = params
+        let param_symbols: Result<Vec<u32>, String> = params_vec
             .iter()
             .map(|p| match p {
                 ValueRef::Immediate(packed) => {
                     if let ImmediateValue::Symbol(sym_id) = unpack_immediate(*packed) {
                         Ok(sym_id)
                     } else {
-                        Err("macro parameters must be symbols".to_string())
+                        Err("Parameters must be symbols".to_string())
                     }
                 }
-                _ => Err("macro parameters must be symbols".to_string()),
+                _ => Err("Parameters must be symbols".to_string()),
             })
             .collect();
-        let param_symbols = param_symbols?;
+        
+        param_symbols
+    }
 
-        // Check for variadic macros (& rest parameter)
-        let mut is_variadic = false;
+    /// Detect variadic parameters and return the final parameter list
+    /// Handles patterns like [a b & rest] -> returns [a, b, rest] with is_variadic=true
+    fn detect_variadic_params(&self, param_symbols: &[u32]) -> (Vec<u32>, bool) {
         let mut final_params = Vec::new();
+        let mut is_variadic = false;
         
         let mut i = 0;
         while i < param_symbols.len() {
@@ -694,85 +664,58 @@ impl BytecodeCompiler {
                 .unwrap_or_default();
             
             if symbol_name == "&" {
+                // Found variadic marker
                 if i + 1 < param_symbols.len() {
+                    // Add the rest parameter
                     final_params.push(param_symbols[i + 1]);
                     is_variadic = true;
-                    break;
+                    break; // Stop processing after rest parameter
                 } else {
-                    return Err("& must be followed by a parameter name".to_string());
+                    // This should be an error, but return what we have
+                    break;
                 }
             } else {
+                // Regular parameter
                 final_params.push(param_symbols[i]);
             }
             i += 1;
         }
+        
+        (final_params, is_variadic)
+    }
 
-        // Save and reset compilation state (same as function compilation)
-        let saved_bytecode = std::mem::take(&mut self.bytecode);
-        let saved_constants = std::mem::take(&mut self.constants);
-        let saved_register_count = self.next_register;
-        let saved_labels = std::mem::take(&mut self.label_positions);
-        let saved_patches = std::mem::take(&mut self.label_patches);
-        let saved_next_label = self.next_label;
-
-        self.next_register = 1;
-        self.next_label = 0;
-        self.enter_scope();
-
-        // Bind parameters to registers
-        for (i, &param_symbol) in final_params.iter().enumerate() {
-            let target_reg = (i + 1) as u8;
-            self.bind_local_symbol(param_symbol, target_reg);
-        }
-        self.next_register = (final_params.len() + 1) as u8;
-
-        // Compile macro body expressions - same as function body
-        let body_exprs = &args[1..];
-        let mut result_reg = self.alloc_register();
-        self.emit_load_immediate(result_reg, ValueRef::nil());
-
-        for &expr in body_exprs {
-            result_reg = self.compile_expression(expr)?;
+    fn compile_macro(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() < 2 {
+            return Err("macro expects at least 2 arguments: params and body".to_string());
         }
 
-        // Regular return - macros return expanded code as a normal value
-        self.emit_u8(Opcode::Return as u8);
-        self.emit_u8(result_reg);
-        self.exit_scope();
+        let params = args[0];
+        let body = &args[1..];
 
-        // Create CompiledFunction but mark it as a macro
-        let macro_bytecode = std::mem::take(&mut self.bytecode);
-        let macro_constants = std::mem::take(&mut self.constants);
-        let macro_registers = self.next_register;
+        // Parse parameters (same logic as fn)
+        let param_symbols = self.extract_parameter_symbols(params)?;
+        let (variadic_params, is_variadic) = self.detect_variadic_params(&param_symbols);
 
-        // Restore compilation state
-        self.bytecode = saved_bytecode;
-        self.constants = saved_constants;
-        self.next_register = saved_register_count;
-        self.label_positions = saved_labels;
-        self.label_patches = saved_patches;
-        self.next_label = saved_next_label;
-
-        // Create a CompiledFunction but store it as a macro
-        let compiled_macro = CompiledFunction {
-            bytecode: macro_bytecode,
-            constants: macro_constants,
-            parameter_count: final_params.len() as u8,
-            register_count: macro_registers,
+        // Create MacroDefinition with raw AST
+        let macro_def = Macro {
+            params: variadic_params,
+            body: body.to_vec(),  // Store raw AST - no compilation!
+            is_variadic,
             module: self.current_module,
-            register_start: 1,
-            has_self_reference: false,
         };
 
-        // Store as macro in VM (you'll need this method)
-        let macro_obj = self.vm.alloc_macro(compiled_macro);
-        let const_index = self.add_constant(ValueRef::Heap(GcPtr::new(macro_obj)));
-        
+        // Allocate to GC heap
+        let macro_obj = self.vm.alloc_macro(macro_def);
+        let macro_value = ValueRef::Heap(GcPtr::new(macro_obj));
+
+        // Store in constants and return register
+        let constant_idx = self.add_constant(macro_value);
         let result_reg = self.alloc_register();
-        self.emit_u8(Opcode::LoadImmConst as u8);
-        self.emit_u8(result_reg);
-        self.emit_u8(const_index);
         
+        self.emit_u8(Opcode::LoadImmConst as u8);  
+        self.emit_u8(result_reg);
+        self.emit_u8(constant_idx);
+
         Ok(result_reg)
     }
 
@@ -924,6 +867,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_ordered_chain(&mut self, args: &[ValueRef], base_op: Opcode) -> Result<u8, String> {
+        
         if args.len() == 2 {
             // Binary case
             let left_reg = self.compile_expression(args[0])?;
@@ -1306,10 +1250,6 @@ impl BytecodeCompiler {
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
 
-                // CHECK FOR MACROS FIRST!
-                if let Some(expanded) = self.try_expand_macro(symbol_id, &items[1..])? {
-                    return self.compile_expression(expanded);
-                }
 
                 // Check for special forms
                 if self.is_special_form(symbol_id) {

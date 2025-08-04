@@ -2,10 +2,10 @@ use mmtk::util::ObjectReference;
 use std::sync::Arc;
 
 use crate::{
-    compiler::BytecodeCompiler,
+    compiler::{BytecodeCompiler, MacroExpander},
     error::BlinkError,
     runtime::{BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary},
-    value::{unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef}, value::HeapValue,
+    value::{unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef},
 };
 
 // Updated call frame for byte-sized bytecode
@@ -66,7 +66,7 @@ pub struct ExecutionContext {
 impl ExecutionContext {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         Self {
-            vm,
+            vm: vm.clone(),
             current_module,
             register_stack: Vec::new(),
             call_stack: Vec::new(),
@@ -103,49 +103,14 @@ impl ExecutionContext {
         roots
     }
 
-    pub fn execute_function_directly(&mut self, func: &ValueRef, args: &[ValueRef]) -> Result<ValueRef, String> {
-        
-        if let ValueRef::Heap(heap) = func {
-            let compiled_func = match heap.to_heap_value() {
-                HeapValue::Function(func) => func,
-                HeapValue::Macro(macro_obj) => macro_obj,
-                _ => return Err("Function must be a function".to_string()),
-            };
-            
-            // Directly implement frame setup without extra register copies
-            let reg_start = self.register_stack.len();
-            let reg_count = compiled_func.register_count;
-            
-            // Allocate registers for new frame
-            for _ in 0..reg_count {
-                self.register_stack.push(ValueRef::nil());
-            }
-            
-            // Copy arguments to parameter registers
-            let param_start = compiled_func.register_start;
-            for i in 0..args.len().min(compiled_func.parameter_count as usize) {
-                self.register_stack[reg_start + (param_start as usize) + i] = args[i];
-            }
-            let module = compiled_func.module;
-            let frame = CallFrame {
-                func: FunctionRef::CompiledFunction(compiled_func, Some(heap.0)),
-                pc: 0,
-                reg_start,
-                reg_count,
-                current_module: module,
-            };
-    
-            self.call_stack.push(frame);
-            self.execute()
-        } else {
-            return Err("Function must be a heap object".to_string());
-        }
-    }
 
     pub fn compile_and_execute(&mut self, expr: ValueRef) -> Result<ValueRef, BlinkError> {
+        let mut macro_expander = MacroExpander::new(self.vm.clone(), self.current_module);
+
+        let expanded = macro_expander.expand(*&expr).map_err(|e| BlinkError::eval(e))?;
         let mut compiler = BytecodeCompiler::new(self.vm.clone(), self.current_module);
         let compiled = compiler
-            .compile_for_storage(expr)
+            .compile_for_storage(expanded)
             .map_err(|e| BlinkError::eval(e))?;
 
         let reg_count = compiled.register_count;
@@ -160,7 +125,7 @@ impl ExecutionContext {
 
         // Allocate registers for the expression
         for _ in 0..reg_count {
-            self.register_stack.push(ValueRef::nil());
+            self.register_stack.push(ValueRef::nil());  
         }
 
         self.call_stack.push(initial_frame);

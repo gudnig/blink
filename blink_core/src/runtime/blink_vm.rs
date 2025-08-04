@@ -129,7 +129,9 @@ impl Default for BlinkVM {
 }
 
 impl BlinkVM {
-
+    pub fn get_instance() -> &'static BlinkVM {
+        GLOBAL_VM.get().expect("BlinkVM not initialized")
+    }
     
     pub fn get_or_init_mmtk() -> &'static MMTK<BlinkVM> {
         GLOBAL_MMTK.get_or_init(|| {

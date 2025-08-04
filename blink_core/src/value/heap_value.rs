@@ -1,7 +1,7 @@
 use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, runtime::{ClosureObject, CompiledFunction}, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
+    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, runtime::{ClosureObject, CompiledFunction, Macro}, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
 };
 
 #[derive(Debug)]
@@ -13,7 +13,7 @@ pub enum HeapValue {
     Set(BlinkHashSet),
     Error(BlinkError),
     Function(CompiledFunction),
-    Macro(CompiledFunction),
+    Macro(Macro),
     Closure(ClosureObject),
     Future(BlinkFuture),
     Env(Env),
@@ -136,13 +136,10 @@ impl Hash for HeapValue {
                             }
             HeapValue::Macro(macro_fn) => {
                                 "macro".hash(state);
-                                macro_fn.parameter_count.hash(state);
-                                macro_fn.bytecode.len().hash(state);
-                                macro_fn.constants.len().hash(state);
-                                for constant in &macro_fn.constants {
-                                    constant.hash(state);
-                                }
-                                macro_fn.bytecode.hash(state);
+                                macro_fn.params.hash(state);
+                                macro_fn.body.len().hash(state);
+                                macro_fn.is_variadic.hash(state);
+                                macro_fn.module.hash(state);
                             }
             HeapValue::Closure(closure_object) => {
                                 "closure".hash(state);
