@@ -781,16 +781,41 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         }
     }
 
-
-
     pub fn alloc_closure(&self, closure_object: ClosureObject) -> ObjectReference {
+        println!("DEBUG: Storing closure with {} upvalues", closure_object.upvalues.len());
         self.with_mutator(|mutator| {
-            let total_size = std::mem::size_of::<ObjectReference>() + closure_object.upvalues.len() * std::mem::size_of::<ValueRef>();
+            // Calculate padding needed for ValueRef alignment
+            let template_size = std::mem::size_of::<ObjectReference>();
+            let count_size = std::mem::size_of::<u32>();
+            let valueref_align = std::mem::align_of::<ValueRef>();
+            
+            // Calculate padding to align ValueRef array
+            let after_count_pos = template_size + count_size;
+            let padding = (valueref_align - (after_count_pos % valueref_align)) % valueref_align;
+            
+            let total_size = template_size 
+                + count_size 
+                + padding  // Add padding
+                + closure_object.upvalues.len() * std::mem::size_of::<ValueRef>();
+                
             let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Closure, &total_size);
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
-                std::ptr::write_unaligned(data_ptr.add(0) as *mut ObjectReference, closure_object.template);
-                let upvalues_ptr = data_ptr.add(std::mem::size_of::<ObjectReference>()) as *mut ValueRef;
+                let mut offset = 0;
+                
+                // Write template
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut ObjectReference, closure_object.template);
+                offset += std::mem::size_of::<ObjectReference>();
+                
+                // Write upvalue count
+                std::ptr::write_unaligned(data_ptr.add(offset) as *mut u32, closure_object.upvalues.len() as u32);
+                offset += std::mem::size_of::<u32>();
+                
+                // Add padding
+                offset += padding;
+                
+                // Write upvalues (now properly aligned)
+                let upvalues_ptr = data_ptr.add(offset) as *mut ValueRef;
                 for (i, upvalue) in closure_object.upvalues.iter().enumerate() {
                     std::ptr::write(upvalues_ptr.add(i), *upvalue);
                 }

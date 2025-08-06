@@ -23,7 +23,7 @@ pub struct BytecodeCompiler {
     loop_stack: Vec<LoopFrame>,
     // For closure support
     upvalue_stack: Vec<HashMap<u32, u8>>, // symbol_id -> upvalue_index
-    captured_symbols: Vec<u32>,           // symbols captured as upvalues
+    captured_symbols: Vec<(u32, u8)>,  // (symbol_id, parent_register)
 
     // Label management
     next_label: u16,
@@ -265,13 +265,22 @@ impl BytecodeCompiler {
         }
     }
 
-    fn resolve_local_symbol(&self, symbol_id: u32) -> Option<u8> {
+    fn resolve_any_local_symbol(&self, symbol_id: u32) -> Option<u8> {
         for scope in self.scope_stack.iter().rev() {
             if let Some(&register) = scope.get(&symbol_id) {
                 return Some(register);
             }
         }
         None
+    }
+
+    fn resolve_local_symbol(&self, symbol_id: u32) -> Option<u8> {
+        // Only look in the CURRENT scope (for free variable detection)
+        if let Some(current_scope) = self.scope_stack.last() {
+            current_scope.get(&symbol_id).copied()
+        } else {
+            None
+        }
     }
 
     // MAIN COMPILATION METHODS
@@ -502,6 +511,8 @@ impl BytecodeCompiler {
 
         self.enter_scope();
 
+self.debug_closure_compilation("After entering function scope");
+
         // If named function, bind the name to itself for recursion
         // We'll use a special register slot that gets set up at function call time
         if let Some(name_symbol) = function_name {
@@ -521,11 +532,14 @@ impl BytecodeCompiler {
             self.bind_local_symbol(param_symbol, target_reg);
         }
 
+        self.debug_closure_compilation("After binding parameters");
         self.next_register = (param_start_reg + param_symbols.len()) as u8;
 
         // Analyze closure requirements - no need for upvalue array register anymore
         let body_exprs = &args[(params_index + 1)..];
         self.analyze_closures(body_exprs)?;
+
+        self.debug_closure_compilation("After analyzing closures");
 
         // For named functions, emit instruction to load self-reference
         if let Some(_name_symbol) = function_name {
@@ -611,19 +625,6 @@ impl BytecodeCompiler {
         for &expr in exprs {
             self.find_free_variables(expr)?;
         }
-
-        // Emit upvalue capture instructions
-        let captured_symbols = self.captured_symbols.clone();
-        for (i, &symbol_id) in captured_symbols.iter().enumerate() {
-            if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
-                // Symbol is in a parent scope - capture as upvalue
-                self.emit_u8(0xF0); // Custom opcode: CaptureUpvalue
-                self.emit_u8(i as u8);
-                self.emit_u8(parent_reg);
-                self.emit_u32(symbol_id);
-            }
-        }
-
         Ok(())
     }
 
@@ -720,52 +721,123 @@ impl BytecodeCompiler {
     }
 
     fn find_free_variables(&mut self, expr: ValueRef) -> Result<(), String> {
+        println!("🔍 Analyzing expression: {}", expr);
+        
         match expr {
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
-                    // Check if this symbol is free (not bound locally)
+                    let symbol_name = self.vm.symbol_table.read()
+                        .get_symbol(symbol_id)
+                        .unwrap_or_default();
+                    println!("   → Found symbol: {} (id: {})", symbol_name, symbol_id);
+                    
+                    let local_result = self.resolve_local_symbol(symbol_id);
+                    println!("     Local scope result: {}", local_result.unwrap_or(0));
+                    
                     if self.resolve_local_symbol(symbol_id).is_none() {
-                        // Not in local scope - might be an upvalue
-                        if self.resolve_in_parent_scopes(symbol_id).is_some() {
-                            if !self.captured_symbols.contains(&symbol_id) {
-                                self.captured_symbols.push(symbol_id);
+                        if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
+                            if !self.captured_symbols.iter().any(|(sym, _)| *sym == symbol_id) {
+                                println!("     ✅ CAPTURING as upvalue: {} at register {}", symbol_name, parent_reg);
+                                self.captured_symbols.push((symbol_id, parent_reg)); // Store both!
                             }
+                        } else {
+                            println!("     → Not in parent scopes, might be global");
                         }
+                    } else {
+                        println!("     → Found in local scope, no capture needed");
                     }
+                } else {
+                    println!("   → Non-symbol immediate: {}", unpack_immediate(packed));
                 }
             }
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
-                    // Recursively analyze list elements
-                    for &item in list_items.iter() {
+                    println!("   → Analyzing list with {} items", list_items.len());
+                    // Recursively analyze ALL list elements
+                    for (i, &item) in list_items.iter().enumerate() {
+                        println!("     Analyzing list item {}: {}", i, item);
                         self.find_free_variables(item)?;
                     }
+                } else if let Some(vec_items) = expr.get_vec() {
+                    println!("   → Analyzing vector with {} items", vec_items.len());
+                    // Recursively analyze vector elements
+                    for (i, &item) in vec_items.iter().enumerate() {
+                        println!("     Analyzing vector item {}: {}", i, item);
+                        self.find_free_variables(item)?;
+                    }
+                } else {
+                    println!("   → Heap value (not list/vector)");
                 }
             }
-            _ => {} // Literals don't capture anything
+            _ => {
+                println!("   → Other value type");
+            }
         }
         Ok(())
     }
 
-    fn resolve_in_parent_scopes(&self, symbol_id: u32) -> Option<u8> {
-        // Look through upvalue stack to find symbol in parent scopes
-        for upvalue_scope in self.upvalue_stack.iter().rev() {
-            if let Some(&upvalue_idx) = upvalue_scope.get(&symbol_id) {
-                return Some(upvalue_idx);
+    fn debug_closure_compilation(&self, context: &str) {
+        println!("=== Debug: {} ===", context);
+        println!("Scope stack levels: {}", self.scope_stack.len());
+        
+        for (level, scope) in self.scope_stack.iter().enumerate() {
+            println!("Scope level {}: {} bindings", level, scope.len());
+            for (&symbol_id, &register) in scope {
+                let symbol_name = self.vm.symbol_table.read()
+                    .get_symbol(symbol_id)
+                    .unwrap_or_default();
+                println!("  {} (id: {}) -> register {}", symbol_name, symbol_id, register);
             }
         }
+        
+        println!("Captured symbols: {} total", self.captured_symbols.len());
+        for &(symbol_id, _) in &self.captured_symbols {
+            let symbol_name = self.vm.symbol_table.read()
+                .get_symbol(symbol_id)
+                .unwrap_or_default();
+            println!("  Captured: {} (id: {})", symbol_name, symbol_id);
+            
+            if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
+                println!("    Found in parent scope at register: {}", parent_reg);
+            } else {
+                println!("    ERROR: NOT FOUND in parent scopes!");
+            }
+        }
+        println!("=====================================");
+    }
+    
+
+    fn resolve_in_parent_scopes(&self, symbol_id: u32) -> Option<u8> {
+        // Look through LOCAL scope stack to find symbol in parent scopes
+        // We need to find the REGISTER where the value is stored, not an upvalue index
+        
+        if self.scope_stack.len() <= 1 {
+            return None; // No parent scopes
+        }
+        
+        // Look through all parent scopes (excluding current scope)
+        // Go from most recent parent to oldest
+        for scope in self.scope_stack.iter().rev().skip(1) {
+            if let Some(&register) = scope.get(&symbol_id) {
+                return Some(register);
+            }
+        }
+        
         None
     }
 
     fn resolve_upvalue(&self, symbol_id: u32) -> Option<u8> {
         self.captured_symbols
             .iter()
-            .position(|&sym| sym == symbol_id)
+            .position(|(sym, _)| *sym == symbol_id)
             .map(|pos| pos as u8)
     }
 
     fn create_closure_object(&mut self, compiled_fn: CompiledFunction) -> Result<u8, String> {
+        println!("DEBUG: create_closure_object called with {} captured symbols", self.captured_symbols.len());
+    
         if self.captured_symbols.is_empty() {
+            println!("DEBUG: Taking simple function path (no upvalues)");
             // Simple function - no upvalues
             let func_obj = self.vm.alloc_user_defined_fn(compiled_fn);
             let result_reg = self.alloc_register();
@@ -773,19 +845,21 @@ impl BytecodeCompiler {
             Ok(result_reg)
         } else {
             // Closure - emit single instruction with all upvalue capture info
-
+            println!("DEBUG: Taking closure path with upvalues");
             // First, allocate the template CompiledFunction
             let template_obj = self.vm.alloc_user_defined_fn(compiled_fn);
             let template_reg = self.alloc_register();
             self.emit_load_immediate(template_reg, ValueRef::Heap(GcPtr::new(template_obj)));
 
             // Collect upvalue capture information
+            // Collect upvalue capture information
             let mut upvalue_captures = Vec::new();
-            for symbol_id in &self.captured_symbols {
-                if let Some(parent_reg) = self.resolve_in_parent_scopes(*symbol_id) {
-                    upvalue_captures.push((parent_reg, *symbol_id));
-                }
+            for (symbol_id, parent_reg) in &self.captured_symbols {
+                println!("DEBUG: Using stored info: symbol {} at register {}", symbol_id, parent_reg);
+                upvalue_captures.push((*parent_reg, *symbol_id));
             }
+
+            println!("DEBUG: Final upvalue_captures: {} items", upvalue_captures.len());
 
             let result_reg = self.alloc_register();
 
@@ -1008,7 +1082,7 @@ impl BytecodeCompiler {
             .unwrap_or_default();
 
         // Try local scope first
-        if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
+        if let Some(local_reg) = self.resolve_any_local_symbol(symbol_id) {
             return Ok(local_reg); // Return the loop register directly
         }
 
@@ -1151,7 +1225,7 @@ impl BytecodeCompiler {
                             let func_reg = self.alloc_register();
 
                             // Load function
-                            if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
+                            if let Some(local_reg) = self.resolve_any_local_symbol(symbol_id) {
                                 self.emit_u8(Opcode::LoadLocal as u8);
                                 self.emit_u8(func_reg);
                                 self.emit_u8(local_reg);

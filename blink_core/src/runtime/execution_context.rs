@@ -243,21 +243,6 @@ impl ExecutionContext {
                         }
                     }
 
-                    InstructionResult::SetupSelfReference(self_ref_reg) => {
-                        if let Some(obj_ref) = obj_ref {
-                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
-                            self.register_stack[current_frame.reg_start + self_ref_reg as usize] =
-                                function_value;
-                        } else {
-                            return Err(
-                                "SetupSelfReference: no function object available".to_string()
-                            );
-                        }
-
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
 
                     InstructionResult::LoadUpvalue {
                         dest_register,
@@ -308,6 +293,7 @@ impl ExecutionContext {
                         template_register,
                         captures,
                     } => {
+                        println!("DEBUG: CreateClosure with {} captures: {:?}", captures.len(), captures);
                         // Get template
                         let template_value = self.register_stack
                             [current_frame.reg_start + template_register as usize];
@@ -324,6 +310,7 @@ impl ExecutionContext {
                                 self.register_stack[current_frame.reg_start + parent_reg as usize];
                             upvalues.push(captured_value);
                         }
+                        println!("DEBUG: Collected {} upvalues: {:?}", upvalues.len(), upvalues);
 
                         // Create closure
                         let closure_obj = ClosureObject {
@@ -403,9 +390,151 @@ impl ExecutionContext {
                     self.register_stack[caller_frame.reg_start] = return_value;
                 }
                 
-            } else {
-                // Handle other function types (Closure, etc.)
-                return Err(format!("Unsupported function type: {:?}", current_frame.func));
+            } else if let FunctionRef::Closure(closure_obj, obj_ref) = &current_frame.func {
+                // Extract the template function
+                let template_fn = GcPtr::new(closure_obj.template).read_callable();
+                
+                // Check for end of function (same logic as CompiledFunction)
+                if current_frame.pc >= template_fn.bytecode.len() {
+                    // Function completed naturally
+                    let completed_frame = self.call_stack.pop().unwrap();
+                    let return_value = self.register_stack[completed_frame.reg_start];
+            
+                    // Clean up registers
+                    self.register_stack.truncate(completed_frame.reg_start);
+            
+                    if self.call_stack.is_empty() {
+                        return Ok(return_value);
+                    }
+            
+                    // Store return value in caller's register 0
+                    if let Some(caller_frame) = self.call_stack.last() {
+                        self.register_stack[caller_frame.reg_start] = return_value;
+                    }
+                    continue;
+                }
+            
+                // Execute bytecode instruction (same as CompiledFunction but with closure context)
+                let opcode = Opcode::from_u8(template_fn.bytecode[current_frame.pc])?;
+                current_frame.pc += 1;
+            
+                let instruction_result = Self::execute_instruction(
+                    &mut self.register_stack,
+                    &self.vm,
+                    self.current_module,
+                    opcode,
+                    &template_fn.bytecode,
+                    &template_fn.constants,
+                    
+                    current_frame.reg_start,
+                    
+                    &mut current_frame.pc,
+                )?;
+            
+                // Handle instruction results (same logic as CompiledFunction)
+                match instruction_result {
+                    InstructionResult::Continue => {
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::Return => {
+                        let completed_frame = self.call_stack.pop().unwrap();
+                        let return_value = self.register_stack[completed_frame.reg_start];
+            
+                        self.register_stack.truncate(completed_frame.reg_start);
+            
+                        if self.call_stack.is_empty() {
+                            return Ok(return_value);
+                        }
+            
+                        if let Some(caller_frame) = self.call_stack.last() {
+                            self.register_stack[caller_frame.reg_start] = return_value;
+                        }
+                    }
+                    InstructionResult::Call(new_frame) => {
+                        // Update current frame PC, then push new frame
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                        self.call_stack.push(new_frame);
+                    }
+                    InstructionResult::SetupSelfReference(reg) => {
+                        // Handle self-reference setup for closures
+                        if let Some(obj_ref) = obj_ref {
+                            let closure_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                            self.register_stack[current_frame.reg_start + reg as usize] = closure_value;
+                        } else {
+                            return Err("SetupSelfReference: no closure object available".to_string());
+                        }
+            
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::LoadUpvalue { dest_register, upvalue_index } => {
+                        // Load upvalue from closure object
+                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] = *upvalue;
+                        } else {
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                        }
+            
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::StoreUpvalue { upvalue_index, src_register } => {
+                        // Store upvalue back to closure object
+                        let value = self.register_stack[current_frame.reg_start + src_register as usize];
+                        
+                        if let Some(obj_ref) = obj_ref {
+                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                        } else {
+                            return Err("StoreUpvalue: no closure object available".to_string());
+                        }
+            
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::CreateClosure { dest_register, template_register, captures } => {
+                        
+    
+                        // Handle nested closure creation (same as in CompiledFunction case)
+                        let template_value = self.register_stack[current_frame.reg_start + template_register as usize];
+                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                            heap_ptr.0
+                        } else {
+                            return Err("Template must be a heap object".to_string());
+                        };
+            
+                        // Capture upvalues directly from registers
+                        let mut upvalues = Vec::new();
+                        for (parent_reg, _symbol_id) in captures {
+                            let captured_value = self.register_stack[current_frame.reg_start + parent_reg as usize];
+                            upvalues.push(captured_value);
+                        }
+
+                        println!("DEBUG: Collected {} upvalues: {:?}", upvalues.len(), upvalues);
+            
+                        // Create closure
+                        let closure_obj = ClosureObject {
+                            template: template_obj_ref,
+                            upvalues,
+                        };
+            
+                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                        self.register_stack[current_frame.reg_start + dest_register as usize] = 
+                            ValueRef::Heap(GcPtr::new(closure_ref));
+            
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                }
+                
+                continue; // Continue to next iteration of the main execution loop
             }
         }
 
@@ -766,7 +895,7 @@ impl ExecutionContext {
                 match func {
                     ValueRef::Heap(gc_ptr) => {
                         // Handle compiled functions, closures, etc.
-                        // This would integrate with your existing function call logic
+                        // This would integrate with existing function call logic
                         // but without creating a new stack frame
 
                         // For now, let's handle the basic case
@@ -860,6 +989,15 @@ impl ExecutionContext {
                             module,
                         )
                     }
+                    TypeTag::Closure => {
+                        let closure_obj = heap.read_closure();
+                        let template_fn = GcPtr::new(closure_obj.template).read_callable();
+                        let module = template_fn.module;
+                        (
+                            FunctionRef::Closure(closure_obj, Some(obj_ref)),
+                            module,
+                        )
+                    }
                     _ => return Err(format!("Invalid function value: {:?}", func_value)),
                 }
             }
@@ -927,7 +1065,39 @@ impl ExecutionContext {
                 Ok(frame)
             }
 
-            FunctionRef::Closure(closure_object, object_reference) => todo!(),
+            FunctionRef::Closure(closure_object, object_reference) => {
+                // Extract the template function from the closure object
+                let template_obj_ref = closure_object.template;
+                let template_fn = GcPtr::new(template_obj_ref).read_callable();
+                
+                // Allocate registers for new frame - same as CompiledFunction but with closure context
+                let reg_start = register_stack.len();
+                let reg_count = template_fn.register_count;
+            
+                // Resize register stack - include register 0 for return value
+                for _ in 0..reg_count {
+                    register_stack.push(ValueRef::nil());
+                }
+            
+                // Copy function arguments to parameter registers (same as CompiledFunction)
+                let param_start = template_fn.register_start;
+                for i in 0..arg_count.min(template_fn.parameter_count) {
+                    let arg_value = register_stack[caller_reg_base + func_reg as usize + 1 + i as usize];
+                    register_stack[reg_start + (param_start as usize) + i as usize] = arg_value;
+                }
+            
+                // Create call frame with closure function reference that includes the closure object reference
+                // This ensures that LoadUpvalue and StoreUpvalue instructions can access the upvalues
+                let frame = CallFrame {
+                    func: FunctionRef::Closure(closure_object, object_reference),
+                    pc: 0,
+                    reg_start,
+                    reg_count,
+                    current_module: module,
+                };
+            
+                Ok(frame)
+            }
         }
     }
 

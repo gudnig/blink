@@ -452,18 +452,22 @@ impl GcPtr {
     pub fn read_closure(&self) -> ClosureObject {
         let data_ptr = self.0.to_raw_address().as_usize() as *const u8;
         let mut offset = 0;
-
+    
         unsafe {
-
             let template = std::ptr::read_unaligned(data_ptr.add(offset) as *const ObjectReference);
             offset += std::mem::size_of::<ObjectReference>();
-
+    
             let upvalues_count = std::ptr::read_unaligned(data_ptr.add(offset) as *const u32) as usize;
             offset += std::mem::size_of::<u32>();
-
+            
+            // Add the same padding calculation
+            let valueref_align = std::mem::align_of::<ValueRef>();
+            let padding = (valueref_align - (offset % valueref_align)) % valueref_align;
+            offset += padding;
+    
             let upvalues_ptr = data_ptr.add(offset) as *const ValueRef;
             let upvalues = std::slice::from_raw_parts(upvalues_ptr, upvalues_count);
-
+    
             ClosureObject {
                 template,
                 upvalues: upvalues.to_vec(),
