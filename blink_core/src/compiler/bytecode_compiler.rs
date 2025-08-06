@@ -511,7 +511,7 @@ impl BytecodeCompiler {
 
         self.enter_scope();
 
-self.debug_closure_compilation("After entering function scope");
+        self.debug_closure_compilation("After entering function scope");
 
         // If named function, bind the name to itself for recursion
         // We'll use a special register slot that gets set up at function call time
@@ -1081,21 +1081,29 @@ self.debug_closure_compilation("After entering function scope");
             .get_symbol(symbol_id)
             .unwrap_or_default();
 
-        // Try local scope first
-        if let Some(local_reg) = self.resolve_any_local_symbol(symbol_id) {
-            return Ok(local_reg); // Return the loop register directly
+        // Try CURRENT scope first (not any local scope)
+        if let Some(local_reg) = self.resolve_local_symbol(symbol_id) {
+            return Ok(local_reg);
         }
 
-        // Only allocate result_reg if we need it for upvalues/globals
-        let result_reg = self.alloc_register();
-
-        // Try upvalues
+        // Try upvalues BEFORE parent scopes
         if let Some(upvalue_idx) = self.resolve_upvalue(symbol_id) {
+            let result_reg = self.alloc_register();
             self.emit_u8(Opcode::LoadUpvalue as u8);
             self.emit_u8(result_reg);
             self.emit_u8(upvalue_idx);
             return Ok(result_reg);
         }
+
+        // Then try parent scopes (for non-captured symbols)
+        if let Some(local_reg) = self.resolve_any_local_symbol(symbol_id) {
+            return Ok(local_reg);
+        }
+
+        // Only allocate result_reg if we need it for upvalues/globals
+        let result_reg = self.alloc_register();
+
+
 
         // Fall back to global
 

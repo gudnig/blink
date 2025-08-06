@@ -293,7 +293,10 @@ impl ExecutionContext {
                         template_register,
                         captures,
                     } => {
-                        println!("DEBUG: CreateClosure with {} captures: {:?}", captures.len(), captures);
+                        println!("DEBUG: CreateClosure with {} captures: ", captures.len() );
+                        for capture in captures.iter() {
+                            print!(" {:?} ", capture);
+                        }   
                         // Get template
                         let template_value = self.register_stack
                             [current_frame.reg_start + template_register as usize];
@@ -310,7 +313,10 @@ impl ExecutionContext {
                                 self.register_stack[current_frame.reg_start + parent_reg as usize];
                             upvalues.push(captured_value);
                         }
-                        println!("DEBUG: Collected {} upvalues: {:?}", upvalues.len(), upvalues);
+                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                        for upvalue in upvalues.iter() {
+                            println!(" {}", upvalue);
+                        }
 
                         // Create closure
                         let closure_obj = ClosureObject {
@@ -516,7 +522,10 @@ impl ExecutionContext {
                             upvalues.push(captured_value);
                         }
 
-                        println!("DEBUG: Collected {} upvalues: {:?}", upvalues.len(), upvalues);
+                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                        for upvalue in upvalues.iter() {
+                            println!("{}", upvalue);
+                        }
             
                         // Create closure
                         let closure_obj = ClosureObject {
