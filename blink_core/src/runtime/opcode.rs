@@ -73,6 +73,14 @@ pub enum Opcode {
     GtEq = 0x93,            // Greater than or equal to
     LtEq = 0x94,            // Less than or equal to
 
+    CreateFuture = 0xA0,    // Create a new future
+    CompleteFuture = 0xA1,  // Complete a future with a value
+    Suspend = 0xA3,         // Suspend current goroutine 
+    Resume = 0xA4,          // Resume a suspended goroutine
+    Spawn = 0xA5,           // Spawn new goroutine (go)
+    Await = 0xA6,           // Suspend goroutine until future completes (deref)
+
+
     
 }
 
@@ -125,6 +133,12 @@ impl Opcode {
             0x92 => Ok(Opcode::Not),
             0x93 => Ok(Opcode::GtEq),
             0x94 => Ok(Opcode::LtEq),
+            0xA0 => Ok(Opcode::CreateFuture),
+    0xA1 => Ok(Opcode::CompleteFuture), 
+    0xA2 => Ok(Opcode::Await),
+    0xA3 => Ok(Opcode::Suspend),
+    0xA4 => Ok(Opcode::Resume),
+    0xA5 => Ok(Opcode::Spawn),
             _ => Err(format!("Invalid opcode: 0x{:02x}", byte)),
         }
     }

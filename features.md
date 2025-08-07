@@ -1,201 +1,309 @@
-✅ Core Interpreter
+# Blink Bytecode Compiler Status
 
-✅ Tokenizer and Parser (with line/column tracking)
-✅ Eval engine with closures and environment chaining
-✅ Special forms:
+## CORE LANGUAGE
 
-✅ def
-✅ fn
-✅ if
-✅ quote
-✅ do
-✅ let
-✅ and / or
-✅ try
-✅ macro (compiler macros)
-✅ quasiquote / unquote / unquote-splicing
-✅ go (goroutines)
-✅ deref (future dereferencing)
+- [ ] Basic compilation
+  - [x] Expressions to bytecode with register allocation
+- [ ] Arithmetic
+  - [x] +, -, *, / opcodes compile and execute
+- [ ] Comparison operators
+  - [x] <, >, <=, >=, !=, =
+- [ ] Special forms
+  - [x] def - Global variable definition
+  - [x] fn - Function definition with closures
+    - [x] Variadic functions - [a b & rest] parameter syntax
+  - [x] if - Conditional with else branch
+  - [x] let - Local bindings with scope
+  - [x] do - Sequential expression evaluation
+  - [x] quote - Prevent evaluation
+  - [x] macro - Macro definition
+    - [x] Variadic macros - [a b & rest] parameter syntax
+  - [ ] macroexpand - Macro expand at runtime
+  - [x] and / or - Logical operators
+  - [ ] try - Error handling (exists but may need bytecode work)
+  - [x] quasiquote / unquote - Template expansion (compilation stubbed)
+  - [ ] mod - Module declaration
+  - [ ] imp - Module import
+  - [ ] load - Load file with multiple source types
+  - [ ] rmac - Remove macro
+  - [x] loop / recur - Tail-recursive loops
+    - [ ] loop / recur - use TCO
+  - [ ] set - Update local binding or global value
+  - [ ] eval - Runtime code evaluation opcode
+  - [ ] apply - Function application with argument lists
 
+- [x] Reader macros
+  - [x] ' (quote), ` (quasiquote), ~ (unquote), ~@ (unquote-splicing), @ (deref)
 
-✅ User-defined functions with lexical scoping
-✅ Native function registration system
-✅ Fully working REPL (readline, errors, history)
-✅ imp for loading .blink source modules
-✅ load with multiple source types (:file, :native)
-✅ mod for module declaration and context switching
-✅ Support for macros (reader and compiler-level)
-✅ Reader macros (', `, ~, ~@, @)
-✅ Built-in numeric, string, and collection functions
+- [x] Symbols - Symbol type distinct from keywords
+- [x] Keywords - :keyword syntax implemented
 
-✅ Arithmetic: +, -, *, /, =
-✅ Logic: not
-✅ Collections: list, vector, hash-map, cons, first, rest, get, map
-✅ I/O: print
-✅ Introspection: type-of
+- [ ] Comments
+  - [x] Line comments - `;` to end of line
+  - [ ] Block comments - Multiline comments, e.g. `#| ... |#`
 
+- [ ] Unicode identifiers and strings
+  - [ ] Full Unicode identifiers - Allow variable and function names to use full Unicode, including emoji and non-Latin scripts (for modern devx)
+  - [x] Full Unicode strings
 
-✅ Module system with namespace isolation
-✅ Async/Future support with future, complete, deref
-✅ Goroutines with go
-⬜ Macro cache to avoid frequent expansion
-⬜ Rich pattern matching or destructuring forms
-⬜ Optional type tags or value introspection utilities
-⬜ Inline documentation / docstrings for functions
-⬜ Evaluation metering or cost accounting (for sandboxing)
+- [ ] Source mapping
+  - [ ] Per-form source locations - Every expression retains file/line/col for precise error reporting, debugging, LSP, and mapping bytecode back to source.
 
-🔌 Plugin System
+- [ ] Std lib/core fns
+  - [x] Collections
+    - [x] vec - create vec
+    - [x] list - create list
+    - [x] set - create set
+    - [ ] tuples - fixed-size, immutable grouping (under consideration)
+    - [x] cons - prepend to list
+    - [x] first - get first element
+    - [x] rest - get all but first
+    - [x] concat - concatenate lists/vectors
+    - [x] empty? - check if collection is empty
+    - [x] count - get collection length
+    - [ ] map - map function over collection
+    - [ ] reduce - reduce collection to single value
+    - [ ] filter - filter collection by predicate
+    - [ ] nth - get element at index
+    - [ ] last - get last element
+    - [ ] reverse - reverse collection
+    - [ ] take - take first n elements
+    - [ ] drop - skip first n elements
+    - [ ] sort - sort collection
+    - [ ] partition - split collection by predicate
+  - [x] Hash-maps
+    - [x] hash-map - create map
+    - [ ] get - access by key
+    - [ ] assoc - add/update key-value pair
+    - [ ] dissoc - remove key
+    - [ ] keys - get all keys
+    - [ ] vals - get all values
+    - [ ] contains? - check if key exists
+    - [ ] merge - merge maps
+  - [x] Logic & Predicates
+    - [x] not - logical negation
+    - [ ] nil? - check for nil
+    - [ ] true? - check for true
+    - [ ] false? - check for false
+    - [ ] number? - check if number
+    - [ ] int?/float? - type predicates if/when introduced
+    - [ ] string? - check if string
+    - [ ] list? - check if list
+    - [ ] vector? - check if vector
+    - [ ] map? - check if hash-map
+    - [ ] set? - check if set
+    - [ ] tuple? - check if tuple
+    - [ ] fn? - check if function
+    - [ ] keyword? - check if keyword
+    - [ ] symbol? - check if symbol
+  - [ ] Numeric operations
+    - [ ] inc - increment by 1
+    - [ ] dec - decrement by 1
+    - [ ] mod - modulo operation
+    - [ ] abs - absolute value
+    - [ ] floor - round down
+    - [ ] ceil - round up
+    - [ ] round - round to nearest
+    - [ ] min - minimum of values
+    - [ ] max - maximum of values
+  - [ ] String operations
+    - [ ] str - string concatenation
+    - [ ] subs - substring
+    - [ ] str-split - split string
+    - [ ] str-join - join strings
+    - [ ] str-upper - uppercase
+    - [ ] str-lower - lowercase
+    - [ ] str-replace - replace substring
+    - [ ] str-trim - trim whitespace
+    - [ ] unicode-normalize - normalize unicode string
+  - [x] I/O & Debugging
+    - [x] print - output values
+    - [x] type-of - get value type
+    - [x] gc-stress - stress test GC
+    - [x] report-gc-stats - GC statistics
+  - [ ] File & System
+    - [ ] env - Access and modify environment variables
+    - [ ] args - Access program arguments
+    - [ ] fs-path - Path manipulation functions
+    - [ ] fs-dir - Directory walking, creation, removal
 
-✅ Plugin loading via libloading
-✅ Hot-reload support for plugins
-✅ compile-plugin form to build plugin from source at runtime
+- [ ] Built in macros
+  - [ ] defn - Function definition macro (stubbed in builtins.rs)
+  - [ ] when - Single-branch conditional
+  - [ ] cond - Multi-branch conditional (stubbed in builtins.rs)
+  - [ ] -> / ->> - Threading macros
 
-✅ Compiles plugins/<name> via cargo build
-✅ Moves resulting .so to native/
-✅ Calls native-import automatically
+- [x] Closures - CreateClosure opcode with upvalue capture
 
+- [ ] Function calls
+  - [x] Call - Support fn, closure, macro and native fn calls
+  - [ ] TailCall - Tail call optimization (opcode exists, optimization incomplete)
 
-✅ Plugin registration with blink_register function
-✅ Plugin builder API in blink_runtime crate
-⬜ CLI tools to scaffold, build, and install plugins
+---
 
-⬜ blink new-plugin <name> to generate template
-⬜ blink build-plugin to compile to .so/.dll
-⬜ blink install-plugin to move built plugin to standard location
+## Language features
 
+- [ ] Advanced function features
+  - [ ] Multiple arity - (fn ([x] ...) ([x y] ...))
+  - [ ] Docstrings - (defn foo "doc" [x] ...)
+  - [ ] Metadata - ^{:doc "..."} (defn foo ...)
+  - [ ] REPL documentation integration - Show docs, arglists, signatures
+  - [ ] Reflection/introspection - Query types, function signatures, env, etc.
 
-⬜ Plugin versioning & metadata support
+- [ ] Mutable state
+  - [ ] Atoms - (atom x), (swap! a f), (reset! a v)
+  - [ ] References - Thread-safe mutable references
 
-⬜ Support plugin.blink or blink.toml for metadata
-⬜ Load version and description for listing
-⬜ Resolve compatible versions when loading
+- [x] Custom error types - User-defined exceptions with data attached
 
+- [ ] Error handling
+  - [ ] Result map implementation - {:ok value} and {:error reason} conventions
+  - [ ] Result specialised implementation - {:ok value} and {:error reason} conventions
+  - [ ] with macro - (with [{:ok x} (fetch)] ...) for error pipelines
+  - [ ] Error reporting improvements
+    - [ ] Stack traces - Call stack on errors (currently only source position)
+    - [ ] Error context - Attach context as errors propagate
+    - [ ] Call frame tracking - Track function call chain
+    - [ ] Source mapping - Map runtime errors to source, especially for macros
+    - [ ] Better REPL errors - Cleaner error display in REPL
+    - [ ] Friendly error messages - Errors provide context, hints, and "did you mean" suggestions for better developer experience
+    - [ ] Error recovery - Suggest fixes for common errors
+    - [ ] Assert/preconditions - (assert condition message)
+    - [ ] Warning system - Compile-time/runtime warnings (unused bindings, deprecations)
 
-⬜ Optional plugin sandboxing or isolation
+- [ ] I/O & Practical features
+  - [ ] File I/O - slurp, spit for reading/writing files
+  - [ ] JSON handling - Parse/generate JSON
+  - [ ] EDN handling - Parse/generate EDN
+  - [ ] Regular expressions - Pattern matching on strings
+  - [ ] Date/time - Basic temporal operations
 
-⬜ Prevent plugins from modifying core bindings unless whitelisted
-⬜ Limit access to eval/environment manipulation
-⬜ Tag plugins as trusted/untrusted
+- [ ] Serialization
+  - [ ] Bytecode serialization - Save/load compiled code
+  - [ ] Binary compilation - Package scripts as standalone binaries (VM + bytecode)
 
+- [ ] Advanced features
+  - [ ] Lazy sequences - Infinite/deferred computation
+  - [ ] Transducers - Composable data transformation
+  - [ ] Protocols/Interfaces - Define behavior contracts
+  - [ ] Multimethods - Dispatch on value/type
+  - [ ] Namespaced keywords - ::local and :namespace/qualified
+   - [ ] Contract system (runtime contracts for values, functions, and structs)
+    - [ ] Contracts are first-class values: can be passed, composed, and attached to data/functions.
+    - [ ] Contracts are composable: support for primitives (predicates), and/or/or, maps, vectors, optionals, etc.
+    - [ ] Contracts can be aggressively inlined and compiled to efficient checks, not just fn calls (flatten/inline contract logic at compile time for performance).
+    - [ ] Contracts can carry rich, composable error messages: each contract can define a custom error message or error message function, which can incorporate both the value and the context.
+    - [ ] Contract checks track error *paths*: when checking nested data (e.g., a vector of positive numbers in a struct field), the error will include the path to the failure (e.g., `"Expected positive number in withdrawals[2] in User struct"`).
+    - [ ] Multiple contract failures can be collected and reported, not just the first.
+    - [ ] Contracts can be attached to functions (pre/post), struct fields, or values, and checked at runtime, optionally only in dev/debug builds.
+    - [ ] Libraries can leverage contracts to perform automatic validation at boundaries (e.g., API validation, FFI, form handling).
+  
 
-⬜ (plugin-installed? <name>) to check availability
-⬜ (list-plugins) to show active or cached plugins
-⬜ (plugin-info <name>) to inspect plugin metadata
-⬜ Add plugin error handling for failed builds / bad symbols
-⬜ Support :url values that point to:
+- [ ] Structs
+  - [ ] Struct constructors - (Name. value1 value2) or (Name :field1 val1 :field2 val2)
+  - [ ] Field access - (:field struct) or (.-field struct)
+  - [ ] Type - (type? ) and dot notation .type optimized to bypass field accessors
+  - [ ] Postfix dot notation - (struct.method args) (after structs are done)
+  - [ ] Type validation - Runtime checking of struct field types
 
-.bl files (single-file modules)
-.zip / .tar.gz packages (multi-file)
-GitHub or Git repos (cloned into lib/<name>/)
+- [ ] Pattern matching
+  - [ ] Match form
+  - [ ] Destructuring - (let [[a b] list] ...) and (fn [{:keys [x]}] ...)
 
+- [ ] Async model
+  - [ ] Futures - (future ...) for concurrent computation
+  - [ ] Goroutines - (go ...) for lightweight concurrency
+  - [ ] Channels (CSP style) - Communication primitives for goroutines/futures
+  - [ ] Async I/O - File/network I/O, timers, etc.
+  - [ ] Timers/sleep
+  - [ ] Future compilation and storage
+  - [ ] Continuation capture
+  - [ ] complete - complete future
+  - [ ] fail - fails future
+  - [ ] Delimited continuations
+    - [ ] shift
+    - [ ] reset
+  - [ ] Async/await syntax - Syntactic sugar for working with futures/promises (possibly in future, built on current async features)
 
-⬜ :entry key for specifying entry file inside a package
+- [ ] First class env
+  - [ ] Capture env
 
-🛠 CLI / Developer Workflow
+- [ ] Unicode support
+  - [x] Full Unicode strings
+  - [ ] String normalization
 
-✅ Socket-based REPL server (blink_socket)
-✅ Language Server Protocol (LSP) implementation
+- [ ] FFI and Interop
+  - [x] Rust FFI - Native function calls from bytecode
+  - [ ] C FFI - Foreign function interface for C libraries
+  - [ ] OS/Shell interop - Run OS commands, access shell features
+  - [ ] Networking - Sockets, HTTP client/server (via plugins/libraries)
+  - [ ] Plugin system - Load Rust/C plugins into runtime
 
-✅ Text synchronization (didOpen, didChange, didClose)
-✅ Diagnostics (parse errors, etc.)
-✅ Completion (built-ins, symbols, special forms)
-✅ Hover documentation
-✅ Document symbols
-✅ Go to definition
+- [ ] Sandboxing
+  - [ ] Sandboxed eval - Run untrusted code safely (research/optional)
 
+---
 
-✅ Session management for multi-client support
-✅ Socket client (blink_sclient)
-✅ VS Code plugin
+## Runtime features
 
-⬜ Syntax highlighting
-✅ Inline eval / hover docs
-✅ Integration with socket REPL
-⬜ Code formatter and/or linter for .blink files
+- [ ] Goroutine scheduler - Task scheduling and execution loop
+- [ ] Future and goroutine API - API for VM to access futures/act on them
+- [ ] GC integration
+  - [x] Root scanning
+  - [x] Mark and sweep
+  - [ ] Gencopy
+- [ ] JIT compilation - Native code generation from bytecode (future)
+- [ ] Native AOT compilation
+- [ ] Performance profiling
+  - [ ] Profiler hooks and API - Built-in hooks for performance measurement and profiling in the bytecode VM and REPL
 
-📦 Native Binaries
+---
 
-✅ Embeddable interpreter for apps (blink_core as library)
-✅ Multiple runtime crates (blink_repl, blink_socket, etc.)
-⬜ Compile to single binary with embedded code
-⬜ Static native plugin registration support
+## Devx
 
-⬜ Define a blink_register_<plugin>() function per plugin crate
-⬜ Register native functions directly from Rust at startup
-⬜ Use #[cfg(...)] or Cargo features to control plugin inclusion
+- [ ] Socket REPL - Remote bytecode compilation and execution
+- [ ] LSP integration - Bytecode debugging, code intelligence, inline docs, autocomplete, warnings
+  - [ ] Warning system - Unused bindings, deprecations
+  - [ ] Source mapping - Error and stack trace mapping to source
+- [ ] Debugger - Debugger integrated into plugin
+  - [ ] Stepping
+  - [ ] TimeTravel
+  - [ ] Hot change values
+  - [ ] Visualize program execution
+- [ ] Testing framework - Unit/integration tests, assertions, runner
+  - [ ] Property-based testing - QuickCheck-style random testing for properties (future)
+- [ ] Formatter / linter - Code formatting, style checks
+  - [ ] Idiomatic code detection - Suggest idiomatic patterns and anti-patterns in formatter/linter
+- [ ] Package manager / module registry - Distribute/install libraries
+- [ ] Script runner/shebang - Direct execution via shebang line
+- [ ] Hot reload / code swapping - Live code changes in REPL/dev
+- [ ] REPL documentation - Show docstrings, arglists, metadata
+- [ ] CLI ergonomics
+  - [ ] blink run / blink repl / blink fmt / blink test - Ergonomic, batteries-included CLI for dev workflows
+- [ ] Editor/structural editing
+  - [ ] Paredit/smart editing support - Structural editing for parens and forms, particularly in VSCode and other plugin editors
+- [ ] Config api woriking with .edn files
 
+---
 
-⬜ Replace native-import with static calls when compiling
+## Ideas to Explore
 
-⬜ At compile time, skip libloading and directly invoke blink_register_<plugin>()
-⬜ Allow fallback to dynamic load in dev mode
+- Macro hygiene & binding hygiene  
+  Research gensyms, hygienic macros, and safe variable binding in macros.
 
+- Advanced macro system  
+  Explore syntax-quote (auto-gensym), macro stepper/visualizer for advanced devx.
 
+- Deterministic execution and sandboxing  
+  Study mechanisms for limiting resource usage, timeouts, and providing deterministic evaluation for REPL or running untrusted code.
 
-🎯 High Priority Features (Target Focus)
-🌟 First-Class Environments
+- Streams and Lazy IO  
+  Investigate lazy stream abstractions for IO (file, socket, etc.), both as a core feature and for advanced users.
 
-⬜ Serializable environments (import/export)
-⬜ Environment introspection and manipulation
-⬜ Environment composition and merging
-⬜ Persistent environment storage
+- Interactive tutorials  
+  Potentially add a "learn mode" or inline tutorial support in the REPL for newcomers.
 
-🌟 Delimited Continuations
+---
 
-⬜ shift and reset operators
-⬜ Continuation capture and restoration
-⬜ Non-local control flow
-⬜ Generator/iterator support via continuations
-
-🌟 Compilation System
-
-⬜ REPL-driven compilation
-⬜ Interpreter and compiled code interop on shared memory
-⬜ Incremental compilation
-⬜ Hot code swapping
-
-🌟 Garbage Collection
-
-✅ Shared arena for temporary values (current implementation)
-⬜ Mark-and-sweep GC for long-lived objects
-⬜ Generational GC
-⬜ Weak references
-⬜ Finalizers
-
-🌟 Advanced DevX (Post-Continuations & Envs)
-
-⬜ Time travel debugging
-⬜ Execution history capture/replay
-⬜ Interactive debugging with continuation manipulation
-⬜ Live environment inspection and modification
-
-🔥 Performance & Optimization
-
-⬜ Tail call optimization (TCO)
-⬜ Constant folding at parse time
-⬜ Function call caching / inline expansion
-⬜ JIT compilation hints from interpretation
-⬜ Profile-guided optimization
-
-
-⚠️ Error Reporting
-
-✅ Source position tracking (line/column)
-✅ Rich error types with context
-✅ Error propagation in async contexts
-⬜ Backtrace on errors
-⬜ REPL error display improvements
-⬜ Value formatter improvements for debug printing
-⬜ Error recovery and suggestions
-
-
-Current Architecture Status
-✅ Implemented Core Systems
-
-Value System: NaN-tagged immediates + shared arena + future GC hooks
-Evaluation: Async-aware eval with suspension/resumption
-Environment: Lexical scoping with parent chains
-Module System: File-based modules with exports/imports
-Native Integration: Plugin system with Rust FFI boundary
-Async Runtime: Tokio-based goroutines and futures
-Developer Tools: LSP server with rich IDE integration
+**Implementation Priority:**  
+1. Futures and goroutines and scheduling

@@ -1290,8 +1290,47 @@ impl BytecodeCompiler {
             "quasiquote" => self.compile_quasiquote(args),
             "unquote" => self.compile_unquote(args),
             "unquote-splicing" => self.compile_unquote_splicing(args),
+            "future" => self.compile_future(args),
+            "complete" => self.compile_complete(args),
+            "go" => self.compile_go(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
+    }
+
+    fn compile_future(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if !args.is_empty() {
+            return Err("future expects no arguments".to_string());
+        }
+
+        let result_reg = self.alloc_register();
+        
+        // Emit CreateFuture opcode
+        self.emit_u8(Opcode::CreateFuture as u8);
+        self.emit_u8(result_reg);
+
+        Ok(result_reg)
+    }
+
+    fn compile_complete(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() != 2 {
+            return Err("complete expects exactly 2 arguments: future and value".to_string());
+        }
+
+        // Compile future reference
+        let future_reg = self.compile_expression(args[0])?;
+        
+        // Compile value to complete with
+        let value_reg = self.compile_expression(args[1])?;
+        
+        let result_reg = self.alloc_register();
+
+        // Emit CompleteFuture opcode
+        self.emit_u8(Opcode::CompleteFuture as u8);
+        self.emit_u8(result_reg);    // Result register (returns success/error)
+        self.emit_u8(future_reg);    // Future to complete
+        self.emit_u8(value_reg);     // Value to complete with
+
+        Ok(result_reg)
     }
 
     fn compile_def(&mut self, args: &[ValueRef]) -> Result<u8, String> {
@@ -1608,7 +1647,9 @@ impl BytecodeCompiler {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(
                 symbol_name.as_str(),
-                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | "cond" | "macro" | "quasiquote" | "unquote" | "unquote-splicing"
+                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | 
+                "cond" | "macro" | "quasiquote" | "unquote" | "unquote-splicing" |
+                "future" | "complete" | "go"
             )
         } else {
             false
