@@ -45,33 +45,7 @@ impl TypeTag {
     }
 }
 
-// Updated header structure to include GC metadata
-#[repr(C)]
-pub struct ObjectHeader {
-    // First word: GC metadata
-    pub gc_metadata: usize,  // Contains mark bit, forwarding bit, etc.
-    // Second word: Type tag and size
-    pub type_tag: i8,
-    pub _padding1: [u8; 3],
-    pub total_size: u32,
-}
 
-impl ObjectHeader {
-    pub const SIZE: usize = std::mem::size_of::<ObjectHeader>();
-    
-    pub fn new(type_tag: TypeTag, data_size: usize) -> Self {
-        Self {
-            gc_metadata: 0,  // Initially zero - GC will manage this
-            type_tag: type_tag as i8,
-            _padding1: [0; 3],
-            total_size: (Self::SIZE + data_size) as u32,
-        }
-    }
-    
-    pub fn get_type(&self) -> TypeTag {
-        unsafe { std::mem::transmute(self.type_tag) }
-    }
-}
 
 pub struct BlinkObjectModel;
 
@@ -79,7 +53,7 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
     // CRITICAL CHANGE: This must be header size to skip over header
     const OBJECT_REF_OFFSET_LOWER_BOUND: isize = ObjectHeader::SIZE as isize;
     
-    // CRITICAL CHANGE: All metadata specs now point to header locations
+    
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
     const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::side_first();
     //const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::in_header(0);
@@ -226,9 +200,12 @@ impl BlinkObjectModel {
             (header, type_tag)
         }
     }
+
+    
     
     /// Get just the data size (excluding header)
     pub fn get_data_size(object: ObjectReference) -> usize {
         Self::get_current_size(object) - ObjectHeader::SIZE
     }
 }
+

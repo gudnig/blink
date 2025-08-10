@@ -2,10 +2,7 @@ use mmtk::util::ObjectReference;
 use std::sync::Arc;
 
 use crate::{
-    compiler::{BytecodeCompiler, MacroExpander},
-    error::BlinkError,
-    runtime::{BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary},
-    value::{unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef},
+    compiler::{BytecodeCompiler, MacroExpander}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary}, value::{unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, NativeContext, ValueRef}
 };
 
 // Updated call frame for byte-sized bytecode
@@ -39,6 +36,10 @@ enum InstructionResult {
         upvalue_index: u8,
         src_register: u8,
     },
+    Suspend {
+        future: BlinkFuture,
+        resume_pc: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -59,8 +60,8 @@ struct PendingUpvalue {
 pub struct ExecutionContext {
     pub vm: Arc<BlinkVM>,
     current_module: u32,
-    register_stack: Vec<ValueRef>,
-    call_stack: Vec<CallFrame>,
+    pub register_stack: Vec<ValueRef>,
+    pub call_stack: Vec<CallFrame>,
 }
 
 impl ExecutionContext {
@@ -71,36 +72,6 @@ impl ExecutionContext {
             register_stack: Vec::new(),
             call_stack: Vec::new(),
         }
-    }
-
-    pub fn get_stack_roots(&self) -> Vec<ObjectReference> {
-        let mut roots = Vec::new();
-        for frame in self.call_stack.iter() {
-            match &frame.func {
-                FunctionRef::Closure(closure_object, obj_ref) => {
-                    if let Some(obj_ref) = obj_ref {
-                        roots.push(*obj_ref);
-                    }
-                }
-                FunctionRef::CompiledFunction(_func, obj_ref) => {
-                    if let Some(obj_ref) = obj_ref {
-                        roots.push(*obj_ref);
-                    }
-                }
-                FunctionRef::Native(_func) => {
-                    // no op
-                }
-            }
-        }
-        for reg in self.register_stack.iter() {
-            match reg {
-                ValueRef::Heap(heap) => {
-                    roots.push(heap.0);
-                }
-                _ => {}
-            }
-        }
-        roots
     }
 
 
@@ -195,143 +166,140 @@ impl ExecutionContext {
 
                 match instruction_result {
                     InstructionResult::Continue => {
-                        // Update the frame in the stack
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        // Update the frame in the stack
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::Return => {
-                        // Get return value from register 0 of completed frame
-                        let completed_frame = self.call_stack.pop().unwrap();
-                        let return_value = self.register_stack[completed_frame.reg_start];
+                                        // Get return value from register 0 of completed frame
+                                        let completed_frame = self.call_stack.pop().unwrap();
+                                        let return_value = self.register_stack[completed_frame.reg_start];
 
-                        // Clean up registers used by completed frame
-                        self.register_stack.truncate(completed_frame.reg_start);
+                                        // Clean up registers used by completed frame
+                                        self.register_stack.truncate(completed_frame.reg_start);
 
-                        // If no more frames, we're done
-                        if self.call_stack.is_empty() {
-                            return Ok(return_value);
-                        }
+                                        // If no more frames, we're done
+                                        if self.call_stack.is_empty() {
+                                            return Ok(return_value);
+                                        }
 
-                        // Store return value in caller's register 0
-                        if let Some(caller_frame) = self.call_stack.last() {
-                            self.register_stack[caller_frame.reg_start] = return_value;
-                        }
-                    }
+                                        // Store return value in caller's register 0
+                                        if let Some(caller_frame) = self.call_stack.last() {
+                                            self.register_stack[caller_frame.reg_start] = return_value;
+                                        }
+                                    }
                     InstructionResult::Call(new_frame) => {
-                        // Update current frame PC, then push new frame
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                        self.call_stack.push(new_frame);
-                    }
+                                        // Update current frame PC, then push new frame
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                        self.call_stack.push(new_frame);
+                                    }
                     InstructionResult::SetupSelfReference(reg) => {
-                        // Handle self-reference setup here where we have access to function context
-                        if let Some(obj_ref) = obj_ref {
-                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
-                            self.register_stack[current_frame.reg_start + reg as usize] =
-                                function_value;
-                        } else {
-                            return Err(
-                                "SetupSelfReference: no function object available".to_string()
-                            );
-                        }
+                                        // Handle self-reference setup here where we have access to function context
+                                        if let Some(obj_ref) = obj_ref {
+                                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                                            self.register_stack[current_frame.reg_start + reg as usize] =
+                                                function_value;
+                                        } else {
+                                            return Err(
+                                                "SetupSelfReference: no function object available".to_string()
+                                            );
+                                        }
 
-                        // Update frame PC and continue
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
-
-
+                                        // Update frame PC and continue
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::LoadUpvalue {
-                        dest_register,
-                        upvalue_index,
-                    } => {
-                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
-                            // Changed here
-                            let closure = GcPtr(*obj_ref).read_closure();
-                            if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
-                                self.register_stack
-                                    [current_frame.reg_start + dest_register as usize] = *upvalue;
-                            } else {
-                                return Err(format!(
-                                    "Upvalue index {} out of bounds",
-                                    upvalue_index
-                                ));
-                            }
-                        } else {
-                            return Err("LoadUpvalue called on non-closure function".to_string());
-                        }
+                                        dest_register,
+                                        upvalue_index,
+                                    } => {
+                                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
+                                            // Changed here
+                                            let closure = GcPtr(*obj_ref).read_closure();
+                                            if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
+                                                self.register_stack
+                                                    [current_frame.reg_start + dest_register as usize] = *upvalue;
+                                            } else {
+                                                return Err(format!(
+                                                    "Upvalue index {} out of bounds",
+                                                    upvalue_index
+                                                ));
+                                            }
+                                        } else {
+                                            return Err("LoadUpvalue called on non-closure function".to_string());
+                                        }
 
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
-
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::StoreUpvalue {
-                        upvalue_index,
-                        src_register,
-                    } => {
-                        let value =
-                            self.register_stack[current_frame.reg_start + src_register as usize];
+                                        upvalue_index,
+                                        src_register,
+                                    } => {
+                                        let value =
+                                            self.register_stack[current_frame.reg_start + src_register as usize];
 
-                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
-                            // Changed here
-                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
-                        } else {
-                            return Err("StoreUpvalue called on non-closure function".to_string());
-                        }
+                                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
+                                            // Changed here
+                                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                                        } else {
+                                            return Err("StoreUpvalue called on non-closure function".to_string());
+                                        }
 
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
-
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::CreateClosure {
-                        dest_register,
-                        template_register,
-                        captures,
-                    } => {
-                        println!("DEBUG: CreateClosure with {} captures: ", captures.len() );
-                        for capture in captures.iter() {
-                            print!(" {:?} ", capture);
-                        }   
-                        // Get template
-                        let template_value = self.register_stack
-                            [current_frame.reg_start + template_register as usize];
-                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
-                            heap_ptr.0
-                        } else {
-                            return Err("Template must be a heap object".to_string());
-                        };
+                                        dest_register,
+                                        template_register,
+                                        captures,
+                                    } => {
+                                        println!("DEBUG: CreateClosure with {} captures: ", captures.len() );
+                                        for capture in captures.iter() {
+                                            print!(" {:?} ", capture);
+                                        }   
+                                        // Get template
+                                        let template_value = self.register_stack
+                                            [current_frame.reg_start + template_register as usize];
+                                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                                            heap_ptr.0
+                                        } else {
+                                            return Err("Template must be a heap object".to_string());
+                                        };
 
-                        // Capture upvalues directly from registers
-                        let mut upvalues = Vec::new();
-                        for (parent_reg, _symbol_id) in captures {
-                            let captured_value =
-                                self.register_stack[current_frame.reg_start + parent_reg as usize];
-                            upvalues.push(captured_value);
-                        }
-                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
-                        for upvalue in upvalues.iter() {
-                            println!(" {}", upvalue);
-                        }
+                                        // Capture upvalues directly from registers
+                                        let mut upvalues = Vec::new();
+                                        for (parent_reg, _symbol_id) in captures {
+                                            let captured_value =
+                                                self.register_stack[current_frame.reg_start + parent_reg as usize];
+                                            upvalues.push(captured_value);
+                                        }
+                                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                                        for upvalue in upvalues.iter() {
+                                            println!(" {}", upvalue);
+                                        }
 
-                        // Create closure
-                        let closure_obj = ClosureObject {
-                            template: template_obj_ref,
-                            upvalues,
-                        };
+                                        // Create closure
+                                        let closure_obj = ClosureObject {
+                                            template: template_obj_ref,
+                                            upvalues,
+                                        };
 
-                        let closure_ref = self.vm.alloc_closure(closure_obj);
-                        self.register_stack[current_frame.reg_start + dest_register as usize] =
-                            ValueRef::Heap(GcPtr::new(closure_ref));
+                                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                                        self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                            ValueRef::Heap(GcPtr::new(closure_ref));
 
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
+                    InstructionResult::Suspend { future, resume_pc } => todo!(),
                 }
             } else if let FunctionRef::Native(tagged_ptr) = &current_frame.func {
                 // Handle native function execution using tagged pointer
@@ -440,107 +408,108 @@ impl ExecutionContext {
                 // Handle instruction results (same logic as CompiledFunction)
                 match instruction_result {
                     InstructionResult::Continue => {
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::Return => {
-                        let completed_frame = self.call_stack.pop().unwrap();
-                        let return_value = self.register_stack[completed_frame.reg_start];
+                                        let completed_frame = self.call_stack.pop().unwrap();
+                                        let return_value = self.register_stack[completed_frame.reg_start];
             
-                        self.register_stack.truncate(completed_frame.reg_start);
+                                        self.register_stack.truncate(completed_frame.reg_start);
             
-                        if self.call_stack.is_empty() {
-                            return Ok(return_value);
-                        }
+                                        if self.call_stack.is_empty() {
+                                            return Ok(return_value);
+                                        }
             
-                        if let Some(caller_frame) = self.call_stack.last() {
-                            self.register_stack[caller_frame.reg_start] = return_value;
-                        }
-                    }
+                                        if let Some(caller_frame) = self.call_stack.last() {
+                                            self.register_stack[caller_frame.reg_start] = return_value;
+                                        }
+                                    }
                     InstructionResult::Call(new_frame) => {
-                        // Update current frame PC, then push new frame
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                        self.call_stack.push(new_frame);
-                    }
+                                        // Update current frame PC, then push new frame
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                        self.call_stack.push(new_frame);
+                                    }
                     InstructionResult::SetupSelfReference(reg) => {
-                        // Handle self-reference setup for closures
-                        if let Some(obj_ref) = obj_ref {
-                            let closure_value = ValueRef::Heap(GcPtr::new(*obj_ref));
-                            self.register_stack[current_frame.reg_start + reg as usize] = closure_value;
-                        } else {
-                            return Err("SetupSelfReference: no closure object available".to_string());
-                        }
+                                        // Handle self-reference setup for closures
+                                        if let Some(obj_ref) = obj_ref {
+                                            let closure_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                                            self.register_stack[current_frame.reg_start + reg as usize] = closure_value;
+                                        } else {
+                                            return Err("SetupSelfReference: no closure object available".to_string());
+                                        }
             
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::LoadUpvalue { dest_register, upvalue_index } => {
-                        // Load upvalue from closure object
-                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
-                            self.register_stack[current_frame.reg_start + dest_register as usize] = *upvalue;
-                        } else {
-                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
-                        }
+                                        // Load upvalue from closure object
+                                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
+                                            self.register_stack[current_frame.reg_start + dest_register as usize] = *upvalue;
+                                        } else {
+                                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                                        }
             
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::StoreUpvalue { upvalue_index, src_register } => {
-                        // Store upvalue back to closure object
-                        let value = self.register_stack[current_frame.reg_start + src_register as usize];
+                                        // Store upvalue back to closure object
+                                        let value = self.register_stack[current_frame.reg_start + src_register as usize];
                         
-                        if let Some(obj_ref) = obj_ref {
-                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
-                        } else {
-                            return Err("StoreUpvalue: no closure object available".to_string());
-                        }
+                                        if let Some(obj_ref) = obj_ref {
+                                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                                        } else {
+                                            return Err("StoreUpvalue: no closure object available".to_string());
+                                        }
             
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
                     InstructionResult::CreateClosure { dest_register, template_register, captures } => {
                         
     
-                        // Handle nested closure creation (same as in CompiledFunction case)
-                        let template_value = self.register_stack[current_frame.reg_start + template_register as usize];
-                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
-                            heap_ptr.0
-                        } else {
-                            return Err("Template must be a heap object".to_string());
-                        };
+                                        // Handle nested closure creation (same as in CompiledFunction case)
+                                        let template_value = self.register_stack[current_frame.reg_start + template_register as usize];
+                                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                                            heap_ptr.0
+                                        } else {
+                                            return Err("Template must be a heap object".to_string());
+                                        };
             
-                        // Capture upvalues directly from registers
-                        let mut upvalues = Vec::new();
-                        for (parent_reg, _symbol_id) in captures {
-                            let captured_value = self.register_stack[current_frame.reg_start + parent_reg as usize];
-                            upvalues.push(captured_value);
-                        }
+                                        // Capture upvalues directly from registers
+                                        let mut upvalues = Vec::new();
+                                        for (parent_reg, _symbol_id) in captures {
+                                            let captured_value = self.register_stack[current_frame.reg_start + parent_reg as usize];
+                                            upvalues.push(captured_value);
+                                        }
 
-                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
-                        for upvalue in upvalues.iter() {
-                            println!("{}", upvalue);
-                        }
+                                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                                        for upvalue in upvalues.iter() {
+                                            println!("{}", upvalue);
+                                        }
             
-                        // Create closure
-                        let closure_obj = ClosureObject {
-                            template: template_obj_ref,
-                            upvalues,
-                        };
+                                        // Create closure
+                                        let closure_obj = ClosureObject {
+                                            template: template_obj_ref,
+                                            upvalues,
+                                        };
             
-                        let closure_ref = self.vm.alloc_closure(closure_obj);
-                        self.register_stack[current_frame.reg_start + dest_register as usize] = 
-                            ValueRef::Heap(GcPtr::new(closure_ref));
+                                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                                        self.register_stack[current_frame.reg_start + dest_register as usize] = 
+                                            ValueRef::Heap(GcPtr::new(closure_ref));
             
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                                        if let Some(frame) = self.call_stack.last_mut() {
+                                            frame.pc = current_frame.pc;
+                                        }
+                                    }
+InstructionResult::Suspend { future, resume_pc } => todo!(),
                 }
                 
                 continue; // Continue to next iteration of the main execution loop
@@ -562,359 +531,358 @@ impl ExecutionContext {
     ) -> Result<InstructionResult, String> {
         match opcode {
             Opcode::LoadImm8 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u8(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u8(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImm16 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u16(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u16(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImm32 => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let value = Self::read_u32(bytecode, pc)?;
-                register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
-                Ok(InstructionResult::Continue)
-            }
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let value = Self::read_u32(bytecode, pc)?;
+                        register_stack[reg_base + reg as usize] = ValueRef::number(value as f64);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadImmConst => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let const_index = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let const_index = Self::read_u8(bytecode, pc)?;
                 
-                if const_index as usize >= constants.len() {
-                    return Err(format!("Constant index {} out of bounds (have {} constants)", 
-                                      const_index, constants.len()));
-                }
+                        if const_index as usize >= constants.len() {
+                            return Err(format!("Constant index {} out of bounds (have {} constants)", 
+                                              const_index, constants.len()));
+                        }
                 
-                let constant = constants[const_index as usize];
-                register_stack[reg_base + dest_reg as usize] = constant;
-                Ok(InstructionResult::Continue)
-            }
+                        let constant = constants[const_index as usize];
+                        register_stack[reg_base + dest_reg as usize] = constant;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadLocal => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let src_reg = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let src_reg = Self::read_u8(bytecode, pc)?;
                 
-                // Check bounds before accessing
-                if reg_base + src_reg as usize >= register_stack.len() {
+                        // Check bounds before accessing
+                        if reg_base + src_reg as usize >= register_stack.len() {
                     
-                    return Err(format!("Register {} out of bounds", src_reg));
-                }
+                            return Err(format!("Register {} out of bounds", src_reg));
+                        }
                 
-                let value = register_stack[reg_base + src_reg as usize];
+                        let value = register_stack[reg_base + src_reg as usize];
                 
                 
-                register_stack[reg_base + dest_reg as usize] = value;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + dest_reg as usize] = value;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LoadGlobal => {
-                let dest_reg = Self::read_u8(bytecode, pc)?; // Register to store result
-                let symbol_id = Self::read_u32(bytecode, pc)?; // Symbol ID to look up
+                        let dest_reg = Self::read_u8(bytecode, pc)?; // Register to store result
+                        let symbol_id = Self::read_u32(bytecode, pc)?; // Symbol ID to look up
 
-                // Look up the global symbol (not use it as register index!)
-                match vm.resolve_global_symbol(current_module, symbol_id) {
-                    Some(value) => {
-                        register_stack[reg_base + dest_reg as usize] = value; // Use dest_reg, not symbol_id
+                        // Look up the global symbol (not use it as register index!)
+                        match vm.resolve_global_symbol(current_module, symbol_id) {
+                            Some(value) => {
+                                register_stack[reg_base + dest_reg as usize] = value; // Use dest_reg, not symbol_id
+                            }
+                            None => {
+                                let symbol = vm.symbol_table.read().get_symbol(symbol_id);
+                                return Err(format!(
+                                    "Global symbol {} not found",
+                                    symbol.unwrap_or("Unknown symbol.".to_string())
+                                ));
+                            }
+                        }
+                        Ok(InstructionResult::Continue)
                     }
-                    None => {
-                        let symbol = vm.symbol_table.read().get_symbol(symbol_id);
-                        return Err(format!(
-                            "Global symbol {} not found",
-                            symbol.unwrap_or("Unknown symbol.".to_string())
-                        ));
-                    }
-                }
-                Ok(InstructionResult::Continue)
-            }
             Opcode::StoreGlobal => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let symbol_id = Self::read_u32(bytecode, pc)?;
-                let value = register_stack[reg_base + reg as usize];
-                let module_id = current_module;
-                vm.update_module(module_id, symbol_id, value);
-                Ok(InstructionResult::Continue)
-            }
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let symbol_id = Self::read_u32(bytecode, pc)?;
+                        let value = register_stack[reg_base + reg as usize];
+                        let module_id = current_module;
+                        vm.update_module(module_id, symbol_id, value);
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Add => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num + right_num);
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num + right_num);
 
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Sub => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num - right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num - right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Mul => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                let result = ValueRef::number(left_num * right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
+                        let result = ValueRef::number(left_num * right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Div => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
 
-                if right_num == 0.0 {
-                    return Err("Division by zero".to_string());
-                }
+                        if right_num == 0.0 {
+                            return Err("Division by zero".to_string());
+                        }
 
-                let result = ValueRef::number(left_num / right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        let result = ValueRef::number(left_num / right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Jump => {
-                let offset = Self::read_i16(bytecode, pc)?;
-                // Use current PC (after reading offset) as base for jump
-                *pc = (*pc as i32 + offset as i32) as usize;
-                Ok(InstructionResult::Continue)
-            }
+                        let offset = Self::read_i16(bytecode, pc)?;
+                        // Use current PC (after reading offset) as base for jump
+                        *pc = (*pc as i32 + offset as i32) as usize;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::JumpIfTrue => {
-                let test_reg = Self::read_u8(bytecode, pc)?;
-                let offset = Self::read_i16(bytecode, pc)?;
-                let test_value = register_stack[reg_base + test_reg as usize];
-                if test_value.is_truthy() {
-                    *pc = (*pc as i32 + offset as i32) as usize;  // Fixed: (*pc) not (pc*)
-                }
-                Ok(InstructionResult::Continue)
-            }
+                        let test_reg = Self::read_u8(bytecode, pc)?;
+                        let offset = Self::read_i16(bytecode, pc)?;
+                        let test_value = register_stack[reg_base + test_reg as usize];
+                        if test_value.is_truthy() {
+                            *pc = (*pc as i32 + offset as i32) as usize;  // Fixed: (*pc) not (pc*)
+                        }
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::JumpIfFalse => {
-                let test_reg = Self::read_u8(bytecode, pc)?;
-                let offset = Self::read_i16(bytecode, pc)?;
+                        let test_reg = Self::read_u8(bytecode, pc)?;
+                        let offset = Self::read_i16(bytecode, pc)?;
                 
-                let test_value = register_stack[reg_base + test_reg as usize];
+                        let test_value = register_stack[reg_base + test_reg as usize];
                 
                 
-                if !test_value.is_truthy() {
-                    let new_pc = (*pc as i32 + offset as i32) as usize;
-                    *pc = new_pc;
-                } 
+                        if !test_value.is_truthy() {
+                            let new_pc = (*pc as i32 + offset as i32) as usize;
+                            *pc = new_pc;
+                        } 
                 
-                Ok(InstructionResult::Continue)
-            }
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Call => {
-                let func_reg = Self::read_u8(bytecode, pc)?;
-                let arg_count = Self::read_u8(bytecode, pc)?;
-                let _result_reg = Self::read_u8(bytecode, pc)?; // Ignored - always use reg 0
+                        let func_reg = Self::read_u8(bytecode, pc)?;
+                        let arg_count = Self::read_u8(bytecode, pc)?;
+                        let _result_reg = Self::read_u8(bytecode, pc)?; // Ignored - always use reg 0
 
-                let func_value = register_stack[reg_base + func_reg as usize];
+                        let func_value = register_stack[reg_base + func_reg as usize];
 
-                let frame = Self::setup_function_call(
-                    register_stack,
-                    current_module,
-                    func_value,
-                    func_reg,
-                    arg_count,
-                    reg_base,
-                )?;
-                Ok(InstructionResult::Call(frame))
-            }
+                        let frame = Self::setup_function_call(
+                            register_stack,
+                            current_module,
+                            func_value,
+                            func_reg,
+                            arg_count,
+                            reg_base,
+                        )?;
+                        Ok(InstructionResult::Call(frame))
+                    }
             Opcode::Return => {
-                let reg = Self::read_u8(bytecode, pc)?;
-                let return_value = register_stack[reg_base + reg as usize];
-                register_stack[reg_base] = return_value;
-                Ok(InstructionResult::Return)
-            }
+                        let reg = Self::read_u8(bytecode, pc)?;
+                        let return_value = register_stack[reg_base + reg as usize];
+                        register_stack[reg_base] = return_value;
+                        Ok(InstructionResult::Return)
+                    }
             Opcode::ReturnNil => {
-                register_stack[reg_base] = ValueRef::nil();
-                Ok(InstructionResult::Return)
-            }
+                        register_stack[reg_base] = ValueRef::nil();
+                        Ok(InstructionResult::Return)
+                    }
             Opcode::Lt => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
                 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
                 
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
-                
-                
-                
-                let result = if left_num < right_num {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
-                
-                register_stack[reg_base + result_reg as usize] = result;
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
                 
                 
-                Ok(InstructionResult::Continue)
-            }
+                
+                        let result = if left_num < right_num {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
+                
+                        register_stack[reg_base + result_reg as usize] = result;
+                
+                
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Gt => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
 
-                let result = if left_num > right_num {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left_num > right_num {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
 
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Eq => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let result = if left == right {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left == right {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
 
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::SetupSelfReference => {
-                let self_ref_reg = Self::read_u8(bytecode, pc)?;
-                Ok(InstructionResult::SetupSelfReference(self_ref_reg))
-            }
+                        let self_ref_reg = Self::read_u8(bytecode, pc)?;
+                        Ok(InstructionResult::SetupSelfReference(self_ref_reg))
+                    }
             Opcode::CreateClosure => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let template_reg = Self::read_u8(bytecode, pc)?;
-                let upvalue_count = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let template_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_count = Self::read_u8(bytecode, pc)?;
 
-                let mut captures = Vec::new();
-                for _ in 0..upvalue_count {
-                    let parent_reg = Self::read_u8(bytecode, pc)?;
-                    let symbol_id = Self::read_u32(bytecode, pc)?;
-                    captures.push((parent_reg, symbol_id));
-                }
+                        let mut captures = Vec::new();
+                        for _ in 0..upvalue_count {
+                            let parent_reg = Self::read_u8(bytecode, pc)?;
+                            let symbol_id = Self::read_u32(bytecode, pc)?;
+                            captures.push((parent_reg, symbol_id));
+                        }
 
-                Ok(InstructionResult::CreateClosure {
-                    dest_register: dest_reg,
-                    template_register: template_reg,
-                    captures,
-                })
-            }
+                        Ok(InstructionResult::CreateClosure {
+                            dest_register: dest_reg,
+                            template_register: template_reg,
+                            captures,
+                        })
+                    }
             Opcode::LoadUpvalue => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let upvalue_index = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_index = Self::read_u8(bytecode, pc)?;
 
-                Ok(InstructionResult::LoadUpvalue {
-                    dest_register: dest_reg,
-                    upvalue_index,
-                })
-            }
+                        Ok(InstructionResult::LoadUpvalue {
+                            dest_register: dest_reg,
+                            upvalue_index,
+                        })
+                    }
             Opcode::StoreUpvalue => {
-                let upvalue_index = Self::read_u8(bytecode, pc)?;
-                let src_reg = Self::read_u8(bytecode, pc)?;
+                        let upvalue_index = Self::read_u8(bytecode, pc)?;
+                        let src_reg = Self::read_u8(bytecode, pc)?;
 
-                Ok(InstructionResult::StoreUpvalue {
-                    upvalue_index,
-                    src_register: src_reg,
-                })
-            }
+                        Ok(InstructionResult::StoreUpvalue {
+                            upvalue_index,
+                            src_register: src_reg,
+                        })
+                    }
             Opcode::GtEq => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
 
-                let result = ValueRef::boolean(left_num >= right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-
+                        let result = ValueRef::boolean(left_num >= right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::LtEq => {
-                let result_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let result_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let left_num = Self::extract_number(left)?;
-                let right_num = Self::extract_number(right)?;
+                        let left_num = Self::extract_number(left)?;
+                        let right_num = Self::extract_number(right)?;
 
-                let result = ValueRef::boolean(left_num <= right_num);
-                register_stack[reg_base + result_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        let result = ValueRef::boolean(left_num <= right_num);
+                        register_stack[reg_base + result_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::StoreLocal => todo!(),
             Opcode::AddImm8 => todo!(),
             Opcode::SubImm8 => todo!(),
             Opcode::MulImm8 => todo!(),
             Opcode::DivImm8 => todo!(),
             Opcode::TailCall => {
-                let func_reg = Self::read_u8(bytecode, pc)?;
-                let arg_count = Self::read_u8(bytecode, pc)?;
+                        let func_reg = Self::read_u8(bytecode, pc)?;
+                        let arg_count = Self::read_u8(bytecode, pc)?;
 
-                let func = register_stack[reg_base + func_reg as usize];
+                        let func = register_stack[reg_base + func_reg as usize];
 
-                // For tail calls, we reuse the current stack frame
-                // Move arguments to the beginning of the current register window
-                for i in 0..arg_count {
-                    let arg_reg = func_reg + 1 + i; // Args follow function register
-                    let arg_value = register_stack[reg_base + arg_reg as usize];
-                    register_stack[reg_base + i as usize] = arg_value;
-                }
+                        // For tail calls, we reuse the current stack frame
+                        // Move arguments to the beginning of the current register window
+                        for i in 0..arg_count {
+                            let arg_reg = func_reg + 1 + i; // Args follow function register
+                            let arg_value = register_stack[reg_base + arg_reg as usize];
+                            register_stack[reg_base + i as usize] = arg_value;
+                        }
 
-                // Set up for function call - this replaces the current frame
-                match func {
-                    ValueRef::Heap(gc_ptr) => {
-                        // Handle compiled functions, closures, etc.
-                        // This would integrate with existing function call logic
-                        // but without creating a new stack frame
+                        // Set up for function call - this replaces the current frame
+                        match func {
+                            ValueRef::Heap(gc_ptr) => {
+                                // Handle compiled functions, closures, etc.
+                                // This would integrate with existing function call logic
+                                // but without creating a new stack frame
 
-                        // For now, let's handle the basic case
-                        todo!("Handle compiled function tail calls")
+                                // For now, let's handle the basic case
+                                todo!("Handle compiled function tail calls")
+                            }
+                            _ => {
+                                return Err("TailCall: not a function".to_string());
+                            }
+                        }
                     }
-                    _ => {
-                        return Err("TailCall: not a function".to_string());
-                    }
-                }
-            }
             Opcode::CallDynamic => todo!(),
             Opcode::TailCallDynamic => todo!(),
             Opcode::PrepareArgs => todo!(),
@@ -927,54 +895,139 @@ impl ExecutionContext {
             Opcode::LoopTest => todo!(),
             Opcode::LoopIncr => todo!(),
             Opcode::And => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let result = if left.is_truthy() && right.is_truthy() {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left.is_truthy() && right.is_truthy() {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
 
-                register_stack[reg_base + dest_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Or => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let left_reg = Self::read_u8(bytecode, pc)?;
-                let right_reg = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let left_reg = Self::read_u8(bytecode, pc)?;
+                        let right_reg = Self::read_u8(bytecode, pc)?;
 
-                let left = register_stack[reg_base + left_reg as usize];
-                let right = register_stack[reg_base + right_reg as usize];
+                        let left = register_stack[reg_base + left_reg as usize];
+                        let right = register_stack[reg_base + right_reg as usize];
 
-                let result = if left.is_truthy() || right.is_truthy() {
-                    ValueRef::boolean(true)
-                } else {
-                    ValueRef::boolean(false)
-                };
+                        let result = if left.is_truthy() || right.is_truthy() {
+                            ValueRef::boolean(true)
+                        } else {
+                            ValueRef::boolean(false)
+                        };
 
-                register_stack[reg_base + dest_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
             Opcode::Not => {
-                let dest_reg = Self::read_u8(bytecode, pc)?;
-                let value_reg = Self::read_u8(bytecode, pc)?;
+                        let dest_reg = Self::read_u8(bytecode, pc)?;
+                        let value_reg = Self::read_u8(bytecode, pc)?;
 
-                let value = register_stack[reg_base + value_reg as usize];
-                let result = if value.is_truthy() {
-                    ValueRef::boolean(false)
-                } else {
-                    ValueRef::boolean(true)
-                };
+                        let value = register_stack[reg_base + value_reg as usize];
+                        let result = if value.is_truthy() {
+                            ValueRef::boolean(false)
+                        } else {
+                            ValueRef::boolean(true)
+                        };
 
-                register_stack[reg_base + dest_reg as usize] = result;
-                Ok(InstructionResult::Continue)
-            }
-        }
+                        register_stack[reg_base + dest_reg as usize] = result;
+                        Ok(InstructionResult::Continue)
+                    }
+            Opcode::Spawn => {
+                        let result_reg = bytecode[*pc] as usize;
+                        let func_index = u32::from_le_bytes([
+                            bytecode[*pc + 1],
+                            bytecode[*pc + 2], 
+                            bytecode[*pc + 3],
+                            bytecode[*pc + 4],
+                        ]);
+                        *pc += 5;
+
+                        // Get compiled function from constants
+                        let func_ref = constants[func_index as usize];
+                
+                        if let Some(compiled_func) = func_ref .get_compiled_function() {
+                            // Spawn new goroutine with the compiled function
+                            let goroutine_id = scheduler.spawn(self.clone(), move |vm| {
+                                vm.execute_function(compiled_func, &[])
+                            });
+                    
+                            registers[result_reg] = ValueRef::number(goroutine_id as f64);
+                            Ok(InstructionResult::Continue)
+                        } else {
+                            return Err(RuntimeError::TypeError("Expected compiled function".to_string()));
+                        }
+                    }
+            Opcode::Await => {
+                        let result_reg = bytecode[*pc] as usize;
+                        let future_reg = bytecode[*pc + 1] as usize;
+                        *pc += 2;
+
+                        let future_ref = register_stack[reg_base + future_reg];
+
+                
+                
+                        if let Some(future) = future_ref.get_future() {
+                            // Try fast path first
+                            if let Some(value) = future.try_poll() {
+                                // Future is ready - store result and continue
+                                register_stack[reg_base + result_reg] = value;
+                                Ok(InstructionResult::Continue)
+                            } else {
+                                // Future not ready - SUSPEND EXECUTION
+                                Ok(InstructionResult::Suspend {
+                                    future: future.clone(),
+                                    resume_pc: *pc, // Resume after this instruction
+                                })
+                            }
+                        } else {
+                            Err("Expected future".to_string())
+                        }
+                    }
+            Opcode::CreateFuture => {
+                        let result_reg = bytecode[*pc] as usize;
+                        *pc += 1;
+                
+                        let future = BlinkFuture::new();
+                        let future_ref = vm.alloc_future(future);
+                        register_stack[reg_base + result_reg] = future_ref;
+                        Ok(InstructionResult::Continue)
+                    }
+            Opcode::CompleteFuture => {
+                        let result_reg = bytecode[*pc] as usize;
+                        let future_reg = bytecode[*pc + 1] as usize;
+                        let value_reg = bytecode[*pc + 2] as usize;
+                        *pc += 3;
+
+                        let future_ref = register_stack[reg_base + future_reg];
+                        let value = register_stack[reg_base + value_reg];
+
+                        if let Some(future) = future_ref.get_future() {
+                            match future.complete(value) {
+                                Ok(()) => {
+                                    register_stack[reg_base + result_reg] = ValueRef::boolean(true);
+                                }
+                                Err(_) => {
+                                    register_stack[reg_base + result_reg] = ValueRef::boolean(false);
+                                }
+                            }
+                            Ok(InstructionResult::Continue)
+                        } else {
+                            Err("Expected future".to_string())
+                        }
+                    }
+            Opcode::Suspend => todo!(),
+            Opcode::Resume => todo!(),
+                    }
     }
 
     fn setup_function_call(

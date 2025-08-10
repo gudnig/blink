@@ -6,7 +6,7 @@ mod reference_glue;
 mod slot;
 mod gc_work;
 mod upcalls;
-
+mod object_header;
 
 use mmtk::vm::VMBinding;
 pub use object_model::*;
@@ -17,6 +17,7 @@ pub use reference_glue::*;
 pub use slot::*;
 pub use gc_work::*;
 pub use upcalls::*;
+pub use object_header::*;
 
 use crate::{runtime::BlinkVM, value::pack_number, value::ValueRef};
 

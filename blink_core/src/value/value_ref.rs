@@ -7,15 +7,11 @@ use std::{
 use mmtk::util::ObjectReference;
 
 use crate::{
-    error::BlinkError,
-    future::BlinkFuture,
-    runtime::{TypeTag},
-    value::{
+    collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{CompiledFunction, TypeTag}, value::{
         is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_nil, pack_number,
         pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue,
         IsolatedNativeFn, NativeFn,
-    },
-    collections::{BlinkHashMap, BlinkHashSet},
+    }
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -239,6 +235,17 @@ impl ValueRef {
             None
         }
     }
+
+    pub fn get_compiled_function(&self) -> Option<CompiledFunction> {
+        match self {
+            ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
+                HeapValue::Function(function) => Some(function),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn get_string(&self) -> Option<String> {
         if self.is_string() {
             match self {

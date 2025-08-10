@@ -1,6 +1,6 @@
 use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, RootsWorkFactory, Scanning, VMBinding}, Mutator};
 
-use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, ObjectHeader, TypeTag, GLOBAL_RUNTIME, GLOBAL_VM}, value::{SourceRange, ValueRef}};
+use crate::{runtime::{BlinkMemorySlice, BlinkObjectModel, BlinkSlot, BlinkVM, FunctionRef, ObjectHeader, TypeTag, GLOBAL_RUNTIME, GLOBAL_VM}, value::{SourceRange, ValueRef}};
 
 use mmtk::vm::slot::Slot;
 
@@ -56,33 +56,65 @@ impl Scanning<BlinkVM> for BlinkScanning {
     
     fn scan_vm_specific_roots(
         _tls: mmtk::util::VMWorkerThread,
-        mut factory: impl RootsWorkFactory<BlinkSlot>
+        mut factory: impl RootsWorkFactory<BlinkSlot>,
     ) {
-        println!("Scanning VM specific roots - MINIMAL VERSION");
-        
+        const CHUNK: usize = 1024;
+        let mut batch: Vec<BlinkSlot> = Vec::with_capacity(CHUNK);
+    
         let runtime = GLOBAL_RUNTIME.get().expect("BlinkRuntime not initialized");
-        let mut root_slots = Vec::new();
-
-        let vm = runtime.vm.clone();
+        let exec = &runtime.execution_context;
     
-        // ONLY scan the global_env field for now
-
-        let binding = vm.get_roots();
-        let vm_roots = binding.iter().map(|root| BlinkSlot::ObjectRef(root.to_raw_address()));
-        root_slots.extend(vm_roots);
-        let binding = runtime.execution_context.get_stack_roots();
-        let execution_context_roots = binding.iter().map(|root| BlinkSlot::ObjectRef(root.to_raw_address()));
-        root_slots.extend(execution_context_roots);
-        
-        
-
-
+        // 1) Call stack: take the *address of the inner ObjectReference* when Some(_)
+        for frame in exec.call_stack.iter() {
+            match &frame.func {
+                FunctionRef::Closure(_, obj_ref_opt)
+                | FunctionRef::CompiledFunction(_, obj_ref_opt) => {
+                    if let Some(obj_ref) = obj_ref_opt {
+                        // Address of the *cell* that stores the ObjectReference inside the Option
+                        let cell_addr = Address::from_ptr(obj_ref as *const ObjectReference);
+                        batch.push(BlinkSlot::ObjectRef(cell_addr));
+                        if batch.len() == CHUNK {
+                            factory.create_process_roots_work(std::mem::take(&mut batch));
+                        }
+                    }
+                }
+                FunctionRef::Native(_) => {}
+            }
+        }
     
-        if !root_slots.is_empty() {
-            println!("Enqueuing {} root slots", root_slots.len());
-            factory.create_process_roots_work(root_slots);
+        // 2) Register stack: ValueRef cells (only push Heap variants)
+        for reg_cell in exec.register_stack.iter() {
+            if let ValueRef::Heap(_) = reg_cell {
+                let cell_addr = Address::from_ptr(reg_cell as *const ValueRef);
+                batch.push(BlinkSlot::ValueRef(cell_addr));
+                if batch.len() == CHUNK {
+                    factory.create_process_roots_work(std::mem::take(&mut batch));
+                }
+            }
+        }
+    
+        // 3) Any other VM roots stored out-of-heap (example: your module exports)
+        {
+            let modules = runtime.vm.module_registry.read();
+            for module in modules.modules.values() {
+                for value in module.exports.values() {
+                    if let ValueRef::Heap(_) = value {
+                        let cell_addr = Address::from_ptr(value as *const ValueRef);
+                        batch.push(BlinkSlot::ValueRef(cell_addr));
+                        if batch.len() == CHUNK {
+                            factory.create_process_roots_work(std::mem::take(&mut batch));
+                        }
+                    }
+                }
+            }
+        }
+    
+        if !batch.is_empty() {
+            factory.create_process_roots_work(batch);
         }
     }
+    
+    
     
     fn supports_return_barrier() -> bool {
         false // No return barriers for NoGC

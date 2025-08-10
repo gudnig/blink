@@ -374,4 +374,30 @@ impl BlinkVM {
 
         
     }
+
+    
+}
+
+
+// Future API
+impl BlinkVM {
+    pub fn spawn_goroutine(&self, func: FunctionRef, args: Vec<ValueRef>) -> ValueRef {
+        let goroutine_id = self.scheduler.spawn(self.clone(), move |vm| {
+            vm.execute_function(func, &args)
+        });
+        ValueRef::number(goroutine_id as f64)
+    }
+
+    pub fn future_from_rust_future(rust_future: Pin<Box<dyn Future<Output = ValueRef> + Send>>) -> ValueRef {
+        let blink_future = BlinkFuture::new();
+        let object_reference = self.alloc_future(blink_future);
+        
+        // Spawn the Rust future on Tokio runtime
+        tokio::spawn(async move {
+            let result = rust_future.await;
+            
+            
+            
+        })
+    }
 }
