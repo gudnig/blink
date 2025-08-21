@@ -6,7 +6,7 @@ use mmtk::util::ObjectReference;
 use parking_lot::RwLock;
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::module::{Module, SerializedModuleSource};
-use crate::runtime::{BlinkObjectModel, ClosureObject, CompiledFunction, Macro};
+use crate::runtime::{BlinkObjectModel, ClosureObject, CompiledFunction, Macro, GLOBAL_VM};
 use crate::value::{Callable, SourceRange};
 use crate::env::Env;
 use crate::{collections::{BlinkHashMap, BlinkHashSet}, value::ValueRef};
@@ -62,10 +62,10 @@ impl GcPtr {
                                                             HeapValue::Str(self.read_string(data_size))
                                                         }
             TypeTag::List => {
-                                                            HeapValue::List(self.read_vec(data_size))
+                                                            HeapValue::List(self.get_list().unwrap())
                                                         }
             TypeTag::Vector => {
-                                                            HeapValue::Vector(self.read_vec(data_size))
+                                                            HeapValue::Vector(self.get_vec().unwrap())
                                                         }
             TypeTag::Map => {
                                                             HeapValue::Map(self.read_blink_hash_map())
@@ -331,15 +331,67 @@ impl GcPtr {
         }
     }
 
-    pub fn read_vec(&self, data_size: usize) -> Vec<ValueRef> {
-        unsafe {
-            let vec_data_ptr = self.0.to_raw_address().as_usize() as *const ValueRef;
-            let item_count = data_size / std::mem::size_of::<ValueRef>();
-            let items = std::slice::from_raw_parts(vec_data_ptr, item_count);
-            items.to_vec()
+    pub fn get_list(&self) -> Option<Vec<ValueRef>> {
+        if let GcPtr(gc_ptr) = self {
+            let obj_ref = gc_ptr;
+            
+            // Check if this is actually a list
+            let type_tag = BlinkObjectModel::get_type_tag(*obj_ref);
+            if type_tag != TypeTag::List {
+                return None;
+            }
+            
+            // Use the VM's safe API instead of direct memory access
+            if let Some(vm) = GLOBAL_VM.get() {
+                let length = vm.vector_get_length(*obj_ref);
+                let mut items = Vec::with_capacity(length as usize);
+                
+                for i in 0..length {
+                    match vm.vector_get_at(*obj_ref, i) {
+                        Ok(item) => items.push(item),
+                        Err(_) => return None, // Bounds error shouldn't happen
+                    }
+                }
+                
+                Some(items)
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
-
+    
+    /// Get vector contents using the new API-based approach
+    pub fn get_vec(&self) -> Option<Vec<ValueRef>> {
+        if let GcPtr(obj_ref) = self {
+            
+            // Check if this is actually a vector
+            let type_tag = BlinkObjectModel::get_type_tag(*obj_ref);
+            if type_tag != TypeTag::Vector {
+                return None;
+            }
+            
+            // Use the VM's safe API
+            if let Some(vm) = GLOBAL_VM.get() {
+                let length = vm.vector_get_length(*obj_ref);
+                let mut items = Vec::with_capacity(length as usize);
+                
+                for i in 0..length {
+                    match vm.vector_get_at(*obj_ref, i) {
+                        Ok(item) => items.push(item),
+                        Err(_) => return None,
+                    }
+                }
+                
+                Some(items)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 
     pub fn read_macro(&self) -> Macro {
         unsafe {

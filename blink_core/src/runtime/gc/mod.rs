@@ -1,23 +1,26 @@
+mod vector;
+
+use mmtk::util::Address;
+pub use vector::*;
+
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
+use std::sync::Condvar;
+use std::collections::HashMap;
+
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 use crate::future::BlinkFuture;
-use crate::module::{Module, SerializedModuleSource};
-use crate::runtime::mmtk::ObjectHeader;
-use crate::runtime::{BlinkActivePlan, BlinkObjectModel, BlinkSlot, ClosureObject, CompiledFunction, Macro, TypeTag, GLOBAL_MMTK};
-use crate::value::{Callable, GcPtr, ParsedValue, ParsedValueWithPos, SourceRange};
+use crate::module::SerializedModuleSource;
+use crate::runtime::{BlinkActivePlan, BlinkObjectModel, BlinkSlot, BlinkVM, ClosureObject, CompiledFunction, Macro, ObjectHeader, TypeTag, GLOBAL_MMTK};
+use crate::value::{ ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
-use crate::{runtime::BlinkVM, value::ValueRef};
-use mmtk::memory_manager::alloc;
-use mmtk::util::{alloc, Address, OpaquePointer, VMThread};
-use mmtk::MutatorContext;
-use mmtk::{util::ObjectReference, Mutator, util::VMMutatorThread, memory_manager};
-use parking_lot::{Condvar, Mutex};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use crate::{ value::ValueRef};
+
+use mmtk::{util::ObjectReference, Mutator};
+
 
 static GC_PARK: OnceLock<Arc<(Mutex<bool>, Condvar)>> = OnceLock::new();
 
@@ -54,20 +57,7 @@ impl BlinkVM {
             .expect("Failed to create fake ObjectReference")
     }
 
-    pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool) -> ObjectReference {
-        self.with_mutator(|mutator| {
-            let vec_data_size = items.len() * std::mem::size_of::<ValueRef>();
-            let total_data_size = vec_data_size;
-            let total_size = total_data_size;
-            let type_tag = if is_list { TypeTag::List } else { TypeTag::Vector };
-            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
-            unsafe {
-                let data_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
-                std::ptr::copy_nonoverlapping(items.as_ptr(), data_ptr, items.len());
-            }
-            data_start
-        })
-    }
+
 
     pub fn alloc_user_defined_fn(&self, function: CompiledFunction) -> ObjectReference {
         self.alloc_callable(function, false)
@@ -99,7 +89,7 @@ impl BlinkVM {
             std::mem::size_of::<u32>();                               // module
 
             let type_tag = TypeTag::Macro;
-            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &type_tag, &total_size);
 
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -132,6 +122,11 @@ impl BlinkVM {
             data_start
         })
     }
+
+   
+
+
+
 
 
     pub fn alloc_callable(&self, function: CompiledFunction, is_macro: bool) -> ObjectReference {
@@ -173,7 +168,7 @@ impl BlinkVM {
             
             
             let type_tag = if is_macro { TypeTag::Macro } else { TypeTag::UserDefinedFunction };
-            let data_start = BlinkActivePlan::alloc(mutator, &type_tag, &total_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &type_tag, &total_size);
 
 
             
@@ -390,7 +385,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         
         let total_size = counts_size + refs_size + keys_size;
         
-        let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Env, &total_size);
+        let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Env, &total_size);
         
         unsafe {
             let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -438,7 +433,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let data_size = string_bytes.len();
             let total_size =  data_size;
 
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Str, &total_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Str, &total_size);
             
             unsafe {
                 let  base_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -470,7 +465,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let pairs_size = item_count * 2 * std::mem::size_of::<ValueRef>(); // key-value pairs
             let total_data_size = metadata_size + buckets_size + pairs_size;
             
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Map, &total_data_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Map, &total_data_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -532,7 +527,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let total_data_size = header_size + buckets_size + items_size;
             
             // Use consistent allocation method like other types
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Set, &total_data_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Set, &total_data_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -589,7 +584,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             let error_type_size = Self::calculate_error_type_size(&error.error_type);
             
             let total_size = message_size + pos_size + error_type_size;
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Error, &total_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Error, &total_size);
             
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
@@ -742,6 +737,8 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         Self::fake_object_reference(0x70000)
     }
 
+   
+
     pub fn update_env_variable(&self, env_ref: ObjectReference, symbol: u32, new_value: ValueRef) {
         self.with_mutator(|mutator| {
             unsafe {
@@ -818,7 +815,7 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
                 + padding  // Add padding
                 + closure_object.upvalues.len() * std::mem::size_of::<ValueRef>();
                 
-            let data_start = BlinkActivePlan::alloc(mutator, &TypeTag::Closure, &total_size);
+            let data_start = BlinkActivePlan::alloc_object(mutator, &TypeTag::Closure, &total_size);
             unsafe {
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut u8;
                 let mut offset = 0;
@@ -849,10 +846,10 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
 
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
-            HeapValue::List(list) => self.alloc_vec_or_list(list, true),
+            HeapValue::List(list) => self.alloc_vec_or_list(list, true, None), // true = list
             HeapValue::Str(str) => self.alloc_str(&str),
             HeapValue::Map(map) => self.alloc_blink_hash_map(map),
-            HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false),
+            HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false, None), // false = vector
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),

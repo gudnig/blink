@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ffi::c_void, path::PathBuf, sync::{Arc, OnceLock}};
+use std::{collections::HashMap, ffi::c_void, future::Future, path::PathBuf, pin::Pin, sync::{Arc, OnceLock}};
 use mmtk::{
     util::{address, options::PlanSelector, Address, ObjectReference}, MMTKBuilder, Mutator, MMTK
     
@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::{
     env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, CompiledFunction, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
+        BlinkActivePlan, BlinkObjectModel, CompiledFunction, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
     }, telemetry::TelemetryEvent, value::{Callable, FunctionHandle, FutureHandle, GcPtr, SourceRange, ValueRef}
 };
 
@@ -136,6 +136,7 @@ impl BlinkVM {
     pub fn get_or_init_mmtk() -> &'static MMTK<BlinkVM> {
         GLOBAL_MMTK.get_or_init(|| {
             let mut builder = MMTKBuilder::new();
+            
             builder.options.plan.set(PlanSelector::MarkSweep);
             let threads = *builder.options.threads;
             println!("Threads: {:?}", threads);
@@ -183,7 +184,7 @@ impl BlinkVM {
         };
 
         vm.module_registry.write().register_module(core_module);
-
+        vm.initialize_side_metadata();
 
         vm.register_special_forms();
         vm.init_global_env();
@@ -191,8 +192,13 @@ impl BlinkVM {
         vm.register_builtins(core_module_id);
         vm.register_builtin_macros(core_module_id);
         vm.register_complex_macros(core_module_id);
-
+        
         vm
+    }
+
+    fn initialize_side_metadata(&self) {
+        let side_metadata_specs = BlinkObjectModel::register_side_metadata_specs();
+        let side_metadata_specs = mmtk::util::metadata::extract_side_metadata(&vm_global_specs);
     }
 
     pub fn new_arc() -> Arc<BlinkVM> {
@@ -381,23 +387,11 @@ impl BlinkVM {
 
 // Future API
 impl BlinkVM {
-    pub fn spawn_goroutine(&self, func: FunctionRef, args: Vec<ValueRef>) -> ValueRef {
-        let goroutine_id = self.scheduler.spawn(self.clone(), move |vm| {
-            vm.execute_function(func, &args)
-        });
-        ValueRef::number(goroutine_id as f64)
+    pub fn spawn_goroutine(&self, func: ValueRef, args: Vec<ValueRef>) -> ValueRef {
+        todo!()
     }
 
     pub fn future_from_rust_future(rust_future: Pin<Box<dyn Future<Output = ValueRef> + Send>>) -> ValueRef {
-        let blink_future = BlinkFuture::new();
-        let object_reference = self.alloc_future(blink_future);
-        
-        // Spawn the Rust future on Tokio runtime
-        tokio::spawn(async move {
-            let result = rust_future.await;
-            
-            
-            
-        })
+        todo!()
     }
 }

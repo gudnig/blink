@@ -13,7 +13,7 @@ use crate::{
     env::Env,
 };
 
-pub type GoroutineId = u64;
+pub type GoroutineId = u32;
 
 // Box the context to avoid lifetime issues
 pub struct GoroutineTask {
@@ -42,6 +42,7 @@ pub trait GoroutineScheduler {
     // Creation and lifecycle
     fn start(&mut self);  
     fn shutdown(&mut self);  
+    
 
     // Goroutine management  
     fn spawn<F>(&self, vm: Arc<BlinkVM>, task: F) -> GoroutineId

@@ -10,6 +10,7 @@ mod module;
 mod future;
 mod collections;
 mod runtime;
+mod compiler;
 
 #[tokio::main]
 async fn main() {

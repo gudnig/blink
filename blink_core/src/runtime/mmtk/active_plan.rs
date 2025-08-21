@@ -85,7 +85,36 @@ impl BlinkActivePlan {
         })
     }
 
-    pub fn alloc(mutator: &mut Mutator<BlinkVM>, type_tag: &TypeTag, data_size: &usize) -> ObjectReference {
+    pub fn alloc(mutator: &mut Mutator<BlinkVM>, size: &usize) -> ObjectReference {
+        let total_size = (size + 7) & !7; // Add alignment here too
+        
+        let mut start = mmtk::memory_manager::alloc(
+            mutator,
+            total_size, // Use total_size, not size
+            8,
+            0,
+            mmtk::AllocationSemantics::Default,
+        );
+        
+        if start.is_zero() {
+            start = mmtk::memory_manager::alloc_slow(
+                mutator,
+                total_size,
+                8,
+                0,
+                mmtk::AllocationSemantics::Default,
+            );
+        }
+        
+        if start.is_zero() {
+            panic!("Failed to allocate raw memory of size {}", total_size);
+        }
+        
+        // For raw allocation, return the start address directly as ObjectReference
+        ObjectReference::from_raw_address(start).unwrap()
+    }
+
+    pub fn alloc_object(mutator: &mut Mutator<BlinkVM>, type_tag: &TypeTag, data_size: &usize) -> ObjectReference {
         let total_size = (ObjectHeader::SIZE + data_size + 7) & !7;
         
         // Try fast path

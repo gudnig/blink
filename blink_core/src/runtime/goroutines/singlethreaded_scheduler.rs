@@ -1,291 +1,207 @@
-use std::{
-    sync::{atomic::Ordering, Arc},
-    thread::{self, JoinHandle},
-};
+// Single-threaded cooperative goroutine scheduler
+// This gives you the API structure for later multi-threading
 
-use parking_lot::Mutex;
-use tokio::sync::oneshot;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
+use crate::value::ValueRef;
+use crate::runtime::{set_current_goroutine_id, BlinkVM, CallFrame};
 
-use crate::runtime::{BlinkVM, EvalResult, GoroutineScheduler, SchedulerState};
+// === Goroutine State ===
 
-// use crate::{
-//     eval::{EvalContext, EvalResult},
-//     runtime::{
-//         BlinkVM, GoroutineId, GoroutineScheduler, GoroutineState, GoroutineTask, SchedulerState,
-//     },
-//     value::ValueRef,
-// };
-
-pub struct SingleThreadScheduler {
-    state: Arc<Mutex<SchedulerState>>,
-    tokio_runtime: tokio::runtime::Handle,
-    scheduler_thread: Option<JoinHandle<()>>,
-    vm: Arc<BlinkVM>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GoroutineState {
+    Ready,      // Can be scheduled
+    Running,    // Currently executing
+    Blocked,    // Waiting on future/channel
+    Completed,  // Finished execution
 }
 
-impl GoroutineScheduler for SingleThreadScheduler {
-    fn start(&mut self) {
-        // no-op
+#[derive(Debug)]
+pub struct Goroutine {
+    pub id: u32,
+    pub state: GoroutineState,
+    pub call_stack: Vec<CallFrame>,
+    pub register_stack: Vec<ValueRef>,
+    pub current_module: u32,
+    pub instruction_pointer: usize,
+    pub result: Option<ValueRef>,
+}
+
+impl Goroutine {
+    pub fn new(id: u32, initial_function: ValueRef) -> Self {
+        Self {
+            id,
+            state: GoroutineState::Ready,
+            call_stack: todo!(),//vec![CallFrame::new(initial_function, 0)],
+            register_stack: Vec::new(),
+            current_module: 0,
+            instruction_pointer: 0,
+            result: None,
+        }
+    }
+}
+
+// === Scheduler ===
+
+pub struct SingleThreadedScheduler {
+    ready_queue: VecDeque<u32>,
+    goroutines: Vec<Option<Goroutine>>,
+    current_goroutine: Option<u32>,
+    next_id: AtomicU32,
+}
+
+impl SingleThreadedScheduler {
+    pub fn new() -> Self {
+        Self {
+            ready_queue: VecDeque::new(),
+            goroutines: Vec::new(),
+            current_goroutine: None,
+            next_id: AtomicU32::new(1),
+        }
     }
     
-    fn shutdown(&mut self) {
-        // no-op
-    }
-    
-    fn spawn<F>(&self, vm: Arc<BlinkVM>, task: F) -> super::GoroutineId
-    where 
-        F: FnOnce(Arc<BlinkVM>) -> EvalResult + Send + 'static {
+    /// Spawn a new goroutine
+    pub fn spawn(&mut self, function: ValueRef) -> u32 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let goroutine = Goroutine::new(id, function);
         
-        0
+        // Set the goroutine ID for locking purposes
+        set_current_goroutine_id(id);
+        
+        // Add to ready queue
+        self.ready_queue.push_back(id);
+        
+        // Store in goroutines vector
+        //make sure the goroutines vector is long enough
+        if id as usize >= self.goroutines.len() {
+            let additional = (id as usize) - self.goroutines.len() + 1;
+            self.goroutines.reserve(additional);
+
+        }
+        self.goroutines[id as usize] = Some(goroutine);
+        
+        id
     }
     
-    fn stop_for_gc(&self) {
-        // no-op
+    /// Get the next goroutine to run
+    pub fn schedule(&mut self) -> Option<u32> {
+        if let Some(next_id) = self.ready_queue.pop_front() {
+            if let Some(goroutine) = &mut self.goroutines[next_id as usize] {
+                goroutine.state = GoroutineState::Running;
+                self.current_goroutine = Some(next_id);
+                
+                // Update thread-local goroutine ID
+                set_current_goroutine_id(next_id);
+                
+                return Some(next_id);
+            }
+        }
+        None
     }
     
-    fn resume_after_gc(&self) {
-        // no-op
+    /// Yield current goroutine back to ready queue
+    pub fn yield_current(&mut self) {
+        if let Some(current_id) = self.current_goroutine {
+            if let Some(goroutine) = &mut self.goroutines[current_id as usize] {
+                goroutine.state = GoroutineState::Ready;
+                self.ready_queue.push_back(current_id);
+            }
+            self.current_goroutine = None;
+        }
+    }
+    
+    /// Block current goroutine (waiting on future/channel)
+    pub fn block_current(&mut self) {
+        if let Some(current_id) = self.current_goroutine {
+            if let Some(goroutine) = &mut self.goroutines[current_id as usize] {
+                goroutine.state = GoroutineState::Blocked;
+            }
+            self.current_goroutine = None;
+        }
+    }
+    
+    /// Unblock a goroutine (future completed/channel ready)
+    pub fn unblock(&mut self, goroutine_id: u32) {
+        if let Some(goroutine) = &mut self.goroutines[goroutine_id as usize] {
+            if goroutine.state == GoroutineState::Blocked {
+                goroutine.state = GoroutineState::Ready;
+                self.ready_queue.push_back(goroutine_id);
+            }
+        }
+    }
+    
+    /// Complete current goroutine
+    pub fn complete_current(&mut self, result: ValueRef) {
+        if let Some(current_id) = self.current_goroutine {
+            if let Some(goroutine) = &mut self.goroutines[current_id as usize] {
+                goroutine.state = GoroutineState::Completed;
+                goroutine.result = Some(result);
+            }
+            self.current_goroutine = None;
+        }
+    }
+    
+    /// Get current running goroutine
+    pub fn current(&self) -> Option<&Goroutine> {
+        self.current_goroutine.and_then(|id| {
+            self.goroutines[id as usize].as_ref()
+        })
+    }
+    
+    /// Get mutable reference to current goroutine
+    pub fn current_mut(&mut self) -> Option<&mut Goroutine> {
+        self.current_goroutine.and_then(|id| {
+            self.goroutines[id as usize].as_mut()
+        })
+    }
+    
+    /// Check if scheduler has work to do
+    pub fn has_work(&self) -> bool {
+        !self.ready_queue.is_empty() || self.current_goroutine.is_some()
+    }
+    
+    /// Run scheduler until all goroutines complete
+    pub fn run_to_completion<F>(&mut self, mut execute_step: F) 
+    where 
+        F: FnMut(&mut Goroutine) -> SchedulerAction
+    {
+        while self.has_work() {
+            if let Some(goroutine_id) = self.schedule() {
+                loop {
+                    let action = {
+                        let goroutine = self.current_mut().unwrap();
+                        execute_step(goroutine)
+                    };
+                    
+                    match action {
+                        SchedulerAction::Continue => {
+                            // Keep running this goroutine
+                        }
+                        SchedulerAction::Yield => {
+                            self.yield_current();
+                            break;
+                        }
+                        SchedulerAction::Block => {
+                            self.block_current();
+                            break;
+                        }
+                        SchedulerAction::Complete(result) => {
+                            self.complete_current(result);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-// impl GoroutineScheduler for SingleThreadScheduler {
-//     fn start(&mut self) {
-//         let state = self.state.clone();
-//         let tokio_runtime = self.tokio_runtime.clone();
+// === Scheduler Action ===
 
-//         let handle = thread::spawn(move || {
-//             Self::run_scheduler_loop(state, tokio_runtime);
-//         });
-
-//         self.scheduler_thread = Some(handle);
-//     }
-
-//     fn spawn<F>(&self, vm: Arc<BlinkVM>, task: F) -> GoroutineId
-//     where
-//         F: FnOnce(Arc<BlinkVM>) -> EvalResult + Send + 'static,
-//     {
-//         let mut state = self.state.lock();
-//         let id = state.next_id.fetch_add(1, Ordering::SeqCst);
-
-//         let goroutine = GoroutineTask {
-//             id,
-//             vm,
-//             state: GoroutineState::Ready {
-//                 task: Box::new(task),
-//             },
-//         };
-
-//         state.ready_queue.push_back(goroutine);
-//         id
-//     }
-
-//     // GC coordination methods
-//     fn stop_for_gc(&self) {
-//         let state = self.state.lock();
-//         state.stopped_for_gc.store(true, Ordering::SeqCst);
-//     }
-
-//     fn resume_after_gc(&self) {
-//         let state = self.state.lock();
-//         state.stopped_for_gc.store(false, Ordering::SeqCst);
-//     }
-
-//     fn shutdown(&mut self) {
-//         {
-//             let state = self.state.lock();
-//             state.running.store(false, Ordering::SeqCst);
-//         }
-
-//         if let Some(handle) = self.scheduler_thread.take() {
-//             let _ = handle.join();
-//         }
-//     }
-// }
-
-// // Integration with BlinkVM
-// impl BlinkVM {
-//     pub fn spawn_goroutine<F>(&self, task: F) -> GoroutineId
-//     where
-//         F: FnOnce(&mut EvalContext) -> EvalResult + Send + 'static,
-//     {
-//         // Access scheduler from VM - you'll need to add this field
-//         // self.goroutine_scheduler.spawn(self, task)
-//         todo!("Add scheduler field to BlinkVM")
-//     }
-// }
-
-// impl SingleThreadScheduler {
-//     fn gc_pause(state: &Arc<Mutex<SchedulerState>>) {
-//         // Pause execution until GC is complete
-//         loop {
-//             let state = state.lock();
-//             if !state.stopped_for_gc.load(Ordering::SeqCst) {
-//                 break;
-//             }
-//             drop(state);
-//             thread::yield_now();
-//         }
-//     }
-//     // Main scheduler loop - runs in dedicated thread
-//     fn run_scheduler_loop(
-//         state: Arc<Mutex<SchedulerState>>,
-//         tokio_runtime: tokio::runtime::Handle,
-//     ) {
-//         {
-//             let state = state.lock();
-//             state.running.store(true, Ordering::SeqCst);
-//         }
-
-//         loop {
-//             let should_continue = {
-//                 let state = state.lock();
-//                 state.running.load(Ordering::SeqCst)
-//             };
-
-//             if !should_continue {
-//                 break;
-//             }
-
-//             // Check if GC requested a stop
-//             {
-//                 let state_guard = state.lock();
-//                 if state_guard.stopped_for_gc.load(Ordering::SeqCst) {
-//                     drop(state_guard);
-//                     Self::gc_pause(&state);
-//                     continue;
-//                 }
-//             }
-
-//             // Process ready tasks
-//             let goroutine_opt = {
-//                 let mut state = state.lock();
-//                 state.ready_queue.pop_front()
-//             };
-
-//             if let Some(goroutine) = goroutine_opt {
-//                 Self::execute_goroutine(goroutine, &state, &tokio_runtime);
-//             }
-
-//             // Check suspended tasks for completion
-//             Self::poll_suspended_tasks(&state);
-
-//             // If no work, yield briefly
-//             let has_work = {
-//                 let state = state.lock();
-//                 !state.ready_queue.is_empty() || !state.suspended_tasks.is_empty()
-//             };
-
-//             if !has_work {
-//                 thread::yield_now();
-//             }
-//         }
-//     }
-
-//     fn execute_goroutine(
-//         goroutine: GoroutineTask, // Take ownership instead of &mut
-//         state: &Arc<Mutex<SchedulerState>>,
-//         _tokio_runtime: &tokio::runtime::Handle,
-//     ) -> Option<GoroutineTask> {
-//         // Return the goroutine if it needs to be suspended
-//         let mut goroutine = goroutine;
-
-//         let result = match std::mem::replace(&mut goroutine.state, GoroutineState::Completed) {
-//             GoroutineState::Ready { task } => task(goroutine.vm),
-//             GoroutineState::WaitingForTokio {
-//                 mut receiver,
-//                 resume,
-//             } => {
-//                 match receiver.try_recv() {
-//                     Ok(value) => {
-//                         // Future completed, resume execution
-//                         resume(value, goroutine.vm)
-//                     }
-//                     Err(oneshot::error::TryRecvError::Empty) => {
-//                         // Still waiting, return to suspended queue
-//                         goroutine.state = GoroutineState::WaitingForTokio { receiver, resume };
-//                         return Some(goroutine); // Return for re-queuing
-//                     }
-//                     Err(oneshot::error::TryRecvError::Closed) => {
-//                         EvalResult::Value(ValueRef::Immediate(crate::value::pack_nil()))
-//                     }
-//                 }
-//             }
-//             GoroutineState::Suspended { future, resume } => {
-//                 if future.needs_tokio_bridge() {
-//                     let (tx, rx) = oneshot::channel();
-
-//                     tokio::spawn(async move {
-//                         let result = future.await;
-//                         let _ = tx.send(result);
-//                     });
-
-//                     goroutine.state = GoroutineState::WaitingForTokio {
-//                         receiver: rx,
-//                         resume,
-//                     };
-//                     return Some(goroutine); // Return for re-queuing
-//                 } else {
-//                     match future.try_poll() {
-//                         Some(value) => resume(value, goroutine.vm),
-//                         None => {
-//                             goroutine.state = GoroutineState::Suspended { future, resume };
-//                             return Some(goroutine); // Return for re-queuing
-//                         }
-//                     }
-//                 }
-//             }
-//             GoroutineState::Completed => return None, // Task done
-//         };
-
-//         // Handle the result from execution
-//         match result {
-//             EvalResult::Value(_val) => {
-//                 // Task completed
-//                 None // Don't re-queue
-//             }
-//             EvalResult::Suspended { future, resume } => {
-//                 if future.needs_tokio_bridge() {
-//                     let (tx, rx) = oneshot::channel();
-
-//                     tokio::spawn(async move {
-//                         let result = future.await;
-//                         let _ = tx.send(result);
-//                     });
-
-//                     goroutine.state = GoroutineState::WaitingForTokio {
-//                         receiver: rx,
-//                         resume,
-//                     };
-//                 } else {
-//                     goroutine.state = GoroutineState::Suspended { future, resume };
-//                 }
-
-//                 Some(goroutine) // Return for re-queuing
-//             }
-//         }
-//     }
-
-//     fn poll_suspended_tasks(state: &Arc<Mutex<SchedulerState>>) {
-//         let mut state = state.lock();
-//         let mut i = 0;
-
-//         while i < state.suspended_tasks.len() {
-//             let should_move_to_ready = {
-//                 if let GoroutineState::Suspended { future, .. } = &state.suspended_tasks[i].state {
-//                     future.try_poll().is_some()
-//                 } else {
-//                     false
-//                 }
-//             };
-
-//             if should_move_to_ready {
-//                 // Remove and move to ready queue
-//                 let goroutine = state.suspended_tasks.swap_remove(i);
-//                 state.ready_queue.push_back(goroutine);
-//                 // Don't increment i since we removed an element
-//             } else {
-//                 i += 1;
-//             }
-//         }
-//     }
-// }
+#[derive(Debug)]
+pub enum SchedulerAction {
+    Continue,           // Keep running current goroutine
+    Yield,              // Yield to other goroutines
+    Block,              // Block on future/channel
+    Complete(ValueRef), // Goroutine completed with result
+}

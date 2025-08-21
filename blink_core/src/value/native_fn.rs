@@ -105,13 +105,13 @@ impl<'a> NativeContext<'a> {
     
     /// Allocate a list value
     pub fn list(&self, items: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.vm.alloc_vec_or_list(items, true);
+        let object_ref = self.vm.alloc_vec_or_list(items, true, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     
     /// Allocate a vector value
     pub fn vector(&self, items: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.vm.alloc_vec_or_list(items, false);
+        let object_ref = self.vm.alloc_vec_or_list(items, false, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     

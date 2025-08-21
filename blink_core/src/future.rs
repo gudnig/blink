@@ -49,17 +49,15 @@ pub struct SuspendedContinuation {
     pub current_module: u32,
 }
 
-// Your existing FutureState enum, but simpler
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FutureState {
     Pending = 0,
-    Ready = 1,     // Keeping your "Ready" terminology
-    Error = 2,     // For rejected futures
+    Ready = 1,
+    Error = 2,
 }
 
 impl BlinkFuture {
-    // Keep your existing constructor API
     pub fn new() -> Self {
         Self {
             inner: BlinkFutureInner {
@@ -73,7 +71,6 @@ impl BlinkFuture {
         }
     }
     
-    // Keep your existing API - now with atomic implementation
     pub fn try_poll(&self) -> Option<ValueRef> {
         let state = FutureState::from_u8(self.inner.state.load(Ordering::Acquire));
         match state {
@@ -85,7 +82,7 @@ impl BlinkFuture {
         }
     }
     
-    // Keep your existing complete API - now write-once
+
     pub fn complete(&self, value: ValueRef) -> Result<(), String> {
         let old_state = self.inner.state.compare_exchange(
             FutureState::Pending as u8,
@@ -125,7 +122,7 @@ impl BlinkFuture {
         }
     }
     
-    // Keep your existing API
+    
     pub fn is_completed(&self) -> bool {
         self.inner.state.load(Ordering::Acquire) != FutureState::Pending as u8
     }

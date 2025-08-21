@@ -1,6 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{runtime::{BlinkVM, Macro}, value::unpack_immediate, HeapValue, ImmediateValue, ValueRef};
+use crate::{
+    runtime::{BlinkVM, Macro},
+    value::unpack_immediate,
+    value::{HeapValue, ImmediateValue, ValueRef},
+};
 
 pub struct MacroExpander {
     vm: Arc<BlinkVM>,
@@ -23,19 +27,19 @@ impl MacroExpander {
     pub fn expand(&mut self, expr: ValueRef) -> Result<ValueRef, String> {
         let mut current = expr;
         let mut iterations = 0;
-        
+
         // Keep expanding until no more changes (fixpoint)
         loop {
             let expanded = self.expand_once(current)?;
-            
+
             // Check if anything changed
             if self.values_equal(expanded, current) {
                 return Ok(current);
             }
-            
+
             current = expanded;
             iterations += 1;
-            
+
             if iterations > self.max_expansion_depth {
                 return Err("Maximum macro expansion depth exceeded".to_string());
             }
@@ -51,9 +55,7 @@ impl MacroExpander {
             }
             ValueRef::Heap(gc_ptr) => {
                 match gc_ptr.to_heap_value() {
-                    HeapValue::List(list_obj) => {
-                        self.expand_list(&list_obj)
-                    }
+                    HeapValue::List(list_obj) => self.expand_list(&list_obj),
                     HeapValue::Vector(vec_obj) => {
                         // Expand elements in vectors too
                         let mut expanded_items = Vec::new();
@@ -94,7 +96,6 @@ impl MacroExpander {
         // Check if first element is a symbol that might be a macro
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
-                
                 // Try to expand as macro
                 if let Some(expanded) = self.try_expand_macro(symbol_id, &items[1..])? {
                     return Ok(expanded);
@@ -112,14 +113,23 @@ impl MacroExpander {
         for &item in items {
             expanded_items.push(self.expand_once(item)?);
         }
-        
+
         Ok(self.vm.list_value(expanded_items))
     }
 
     /// Try to expand a symbol as a macro
-    fn try_expand_macro(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<Option<ValueRef>, String> {
+    fn try_expand_macro(
+        &mut self,
+        symbol_id: u32,
+        args: &[ValueRef],
+    ) -> Result<Option<ValueRef>, String> {
         // Look up symbol in module registry
-        let symbol_value = match self.vm.module_registry.read().resolve_symbol(self.current_module, symbol_id) {
+        let symbol_value = match self
+            .vm
+            .module_registry
+            .read()
+            .resolve_symbol(self.current_module, symbol_id)
+        {
             Some(val) => val,
             None => return Ok(None), // Symbol not found
         };
@@ -129,12 +139,22 @@ impl MacroExpander {
             if let HeapValue::Macro(macro_def) = gc_ptr.to_heap_value() {
                 // Execute macro expansion
                 let expanded = self.expand_macro_call(&macro_def, args)?;
-                
-                println!("DEBUG: Macro {} expanded from ({} ...) to {}", 
-                        self.vm.symbol_table.read().get_symbol(symbol_id).unwrap_or_default(),
-                        self.vm.symbol_table.read().get_symbol(symbol_id).unwrap_or_default(),
-                        expanded);
-                        
+
+                println!(
+                    "DEBUG: Macro {} expanded from ({} ...) to {}",
+                    self.vm
+                        .symbol_table
+                        .read()
+                        .get_symbol(symbol_id)
+                        .unwrap_or_default(),
+                    self.vm
+                        .symbol_table
+                        .read()
+                        .get_symbol(symbol_id)
+                        .unwrap_or_default(),
+                    expanded
+                );
+
                 return Ok(Some(expanded));
             }
         }
@@ -143,28 +163,33 @@ impl MacroExpander {
     }
 
     /// Expand a macro call
-    fn expand_macro_call(&mut self, macro_def: &Macro, args: &[ValueRef]) -> Result<ValueRef, String> {
+    fn expand_macro_call(
+        &mut self,
+        macro_def: &Macro,
+        args: &[ValueRef],
+    ) -> Result<ValueRef, String> {
         // Validate arity
         macro_def.validate_arity(args.len())?;
-        
+
         // Create parameter bindings
         let mut bindings = HashMap::new();
-        
+
         // Bind regular parameters
         for (i, &param_id) in macro_def.regular_params().iter().enumerate() {
             bindings.insert(param_id, args[i]);
         }
-        
+
         // Bind variadic parameter (if any)
         if let Some(variadic_param) = macro_def.variadic_param() {
-            let variadic_args: Vec<ValueRef> = args.iter()
+            let variadic_args: Vec<ValueRef> = args
+                .iter()
                 .skip(macro_def.regular_params().len())
                 .cloned()
                 .collect();
             let variadic_list = self.vm.list_value(variadic_args);
             bindings.insert(variadic_param, variadic_list);
         }
-        
+
         // Expand macro body using substitution
         if macro_def.body.len() == 1 {
             self.substitute_in_ast(macro_def.body[0], &bindings)
@@ -174,16 +199,15 @@ impl MacroExpander {
                 let mut symbol_table = self.vm.symbol_table.write();
                 ValueRef::symbol(symbol_table.intern("do"))
             };
-            
+
             let mut expanded_body = vec![do_symbol];
             for &body_expr in &macro_def.body {
                 expanded_body.push(self.substitute_in_ast(body_expr, &bindings)?);
             }
-            
+
             Ok(self.vm.list_value(expanded_body))
         }
     }
-
 
     /// Check if two values are equal (for fixpoint detection)
     fn values_equal(&self, a: ValueRef, b: ValueRef) -> bool {
@@ -194,15 +218,31 @@ impl MacroExpander {
     /// Check if symbol is a special form
     fn is_special_form(&self, symbol_id: u32) -> bool {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
-            matches!(symbol_name.as_str(), 
-                "def" | "fn" | "if" | "let" | "quote" | "do" | "try" | 
-                "macro" | "go" | "deref" | "and" | "or")
+            matches!(
+                symbol_name.as_str(),
+                "def"
+                    | "fn"
+                    | "if"
+                    | "let"
+                    | "quote"
+                    | "do"
+                    | "try"
+                    | "macro"
+                    | "go"
+                    | "deref"
+                    | "and"
+                    | "or"
+            )
         } else {
             false
         }
     }
 
-    fn substitute_in_ast(&mut self, expr: ValueRef, bindings: &HashMap<u32, ValueRef>) -> Result<ValueRef, String> {
+    fn substitute_in_ast(
+        &mut self,
+        expr: ValueRef,
+        bindings: &HashMap<u32, ValueRef>,
+    ) -> Result<ValueRef, String> {
         match expr {
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
@@ -218,9 +258,7 @@ impl MacroExpander {
             }
             ValueRef::Heap(gc_ptr) => {
                 match gc_ptr.to_heap_value() {
-                    HeapValue::List(list_obj) => {
-                        self.substitute_in_list(&list_obj, bindings)
-                    }
+                    HeapValue::List(list_obj) => self.substitute_in_list(&list_obj, bindings),
                     HeapValue::Vector(vec_obj) => {
                         let mut substituted = Vec::new();
                         for &item in &vec_obj {
@@ -245,7 +283,11 @@ impl MacroExpander {
     }
 
     /// Handle list substitution with special quasiquote support
-    fn substitute_in_list(&mut self, items: &[ValueRef], bindings: &HashMap<u32, ValueRef>) -> Result<ValueRef, String> {
+    fn substitute_in_list(
+        &mut self,
+        items: &[ValueRef],
+        bindings: &HashMap<u32, ValueRef>,
+    ) -> Result<ValueRef, String> {
         if items.is_empty() {
             return Ok(self.vm.list_value(vec![]));
         }
@@ -287,7 +329,11 @@ impl MacroExpander {
     }
 
     /// Expand quasiquote template with unquote and unquote-splicing support
-    fn expand_quasiquote(&mut self, template: ValueRef, bindings: &HashMap<u32, ValueRef>) -> Result<ValueRef, String> {
+    fn expand_quasiquote(
+        &mut self,
+        template: ValueRef,
+        bindings: &HashMap<u32, ValueRef>,
+    ) -> Result<ValueRef, String> {
         match template {
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
@@ -300,9 +346,7 @@ impl MacroExpander {
             }
             ValueRef::Heap(gc_ptr) => {
                 match gc_ptr.to_heap_value() {
-                    HeapValue::List(list_obj) => {
-                        self.expand_quasiquote_list(&list_obj, bindings)
-                    }
+                    HeapValue::List(list_obj) => self.expand_quasiquote_list(&list_obj, bindings),
                     HeapValue::Vector(vec_obj) => {
                         let mut expanded = Vec::new();
                         for &item in &vec_obj {
@@ -318,7 +362,11 @@ impl MacroExpander {
     }
 
     /// Expand quasiquote list with unquote and splicing support
-    fn expand_quasiquote_list(&mut self, items: &[ValueRef], bindings: &HashMap<u32, ValueRef>) -> Result<ValueRef, String> {
+    fn expand_quasiquote_list(
+        &mut self,
+        items: &[ValueRef],
+        bindings: &HashMap<u32, ValueRef>,
+    ) -> Result<ValueRef, String> {
         if items.is_empty() {
             return Ok(self.vm.list_value(vec![]));
         }
@@ -340,7 +388,8 @@ impl MacroExpander {
                                     "unquote" => {
                                         // ~expr - evaluate and substitute
                                         if list_items.len() == 2 {
-                                            let substituted = self.substitute_in_ast(list_items[1], bindings)?;
+                                            let substituted =
+                                                self.substitute_in_ast(list_items[1], bindings)?;
                                             result.push(substituted);
                                             i += 1;
                                             continue;
@@ -349,15 +398,20 @@ impl MacroExpander {
                                     "unquote-splicing" => {
                                         // ~@expr - evaluate and splice
                                         if list_items.len() == 2 {
-                                            let substituted = self.substitute_in_ast(list_items[1], bindings)?;
-                                            
+                                            let substituted =
+                                                self.substitute_in_ast(list_items[1], bindings)?;
+
                                             // The substituted value should be a list to splice
                                             if let Some(splice_items) = substituted.get_list() {
                                                 result.extend_from_slice(&splice_items);
-                                            } else if let Some(splice_items) = substituted.get_vec() {
+                                            } else if let Some(splice_items) = substituted.get_vec()
+                                            {
                                                 result.extend_from_slice(&splice_items);
                                             } else {
-                                                return Err("unquote-splicing requires a list or vector".to_string());
+                                                return Err(
+                                                    "unquote-splicing requires a list or vector"
+                                                        .to_string(),
+                                                );
                                             }
                                             i += 1;
                                             continue;
@@ -383,18 +437,18 @@ impl MacroExpander {
     fn expand_let_bindings(&mut self, bindings: ValueRef) -> Result<ValueRef, String> {
         if let Some(binding_vec) = bindings.get_vec() {
             let mut expanded_bindings = Vec::new();
-            
+
             // Bindings come in pairs: [symbol value symbol value ...]
             for chunk in binding_vec.chunks(2) {
                 if chunk.len() != 2 {
                     return Err("let bindings must be pairs".to_string());
                 }
-                
+
                 // Symbol doesn't get expanded, but value does
                 expanded_bindings.push(chunk[0]); // binding symbol
                 expanded_bindings.push(self.expand_once(chunk[1])?); // binding value
             }
-            
+
             Ok(self.vm.vector_value(expanded_bindings))
         } else {
             Err("let bindings must be a vector".to_string())
@@ -402,8 +456,15 @@ impl MacroExpander {
     }
 
     /// Update expand_special_form to handle quasiquote properly
-    fn expand_special_form(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<ValueRef, String> {
-        let symbol_name = self.vm.symbol_table.read()
+    fn expand_special_form(
+        &mut self,
+        symbol_id: u32,
+        args: &[ValueRef],
+    ) -> Result<ValueRef, String> {
+        let symbol_name = self
+            .vm
+            .symbol_table
+            .read()
             .get_symbol(symbol_id)
             .unwrap_or_default();
 
@@ -430,10 +491,10 @@ impl MacroExpander {
                 if args.len() < 2 {
                     return Err("let expects at least 2 arguments".to_string());
                 }
-                
+
                 // Expand binding values but not symbols
                 let bindings = self.expand_let_bindings(args[0])?;
-                
+
                 // Expand body
                 let mut expanded_body = Vec::new();
                 for &body_expr in &args[1..] {
@@ -454,7 +515,7 @@ impl MacroExpander {
                 for &body_expr in &args[1..] {
                     result.push(self.expand_once(body_expr)?);
                 }
-                
+
                 Ok(self.vm.list_value(result))
             }
             _ => {

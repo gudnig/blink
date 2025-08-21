@@ -1,15 +1,16 @@
 // blink_core/src/runtime/mmtk/object_model.rs
-// Updated implementation that switches from side metadata to header metadata
-// while preserving your type tag system
-
 use mmtk::{
     util::{
-        copy::{CopySemantics, GCWorkerCopyContext}, Address, ObjectReference
+        copy::{CopySemantics, GCWorkerCopyContext}, 
+        metadata::side_metadata::{SideMetadataSpec, SideMetadataOffset}, 
+        Address, ObjectReference
     },
     vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, 
-        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}, MutatorContext
+        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}, 
+    MutatorContext
 };
-use crate::{runtime::BlinkVM, value::ValueRef};
+use crate::runtime::{BlinkVM, mmtk::object_header::{ObjectHeader, OBJ_ID_METADATA_SPEC}};
+use crate::value::ValueRef;
 
 #[repr(i8)]
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -45,19 +46,17 @@ impl TypeTag {
     }
 }
 
-
-
 pub struct BlinkObjectModel;
 
 impl ObjectModel<BlinkVM> for BlinkObjectModel {
     // CRITICAL CHANGE: This must be header size to skip over header
     const OBJECT_REF_OFFSET_LOWER_BOUND: isize = ObjectHeader::SIZE as isize;
     
-    
+    // Fixed: Use VMGlobalLogBitSpec::side_first() which exists
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
     const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::side_first();
-    //const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::in_header(0);
-    //const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::in_header(1);
+    
+    // Header-based metadata specs
     const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec = VMLocalForwardingBitsSpec::in_header(2);
     const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec = VMLocalForwardingPointerSpec::in_header(8);
     const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec = VMLocalLOSMarkNurserySpec::in_header(3);
@@ -83,7 +82,15 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
                 to_start.to_mut_ptr::<u8>(),
                 total_size
             );
+            
+            // Reset lockword in the copy (objects start unlocked)
+            let to_header = to_start.to_mut_ptr::<ObjectHeader>();
+            (*to_header).lockword.store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        
+        // Copy side metadata (object ID) - manually copy the ID
+        let obj_id = crate::runtime::mmtk::object_header::obj_id(from);
+        crate::runtime::mmtk::object_header::store_obj_id(obj_ref, obj_id);
         
         obj_ref
     }
@@ -103,7 +110,15 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
                 to_start.to_mut_ptr::<u8>(),
                 total_size
             );
+            
+            // Reset lockword in the copy
+            let to_header = to_start.to_mut_ptr::<ObjectHeader>();
+            (*to_header).lockword.store(0, std::sync::atomic::Ordering::Relaxed);
         }
+        
+        // Copy side metadata
+        let obj_id = crate::runtime::mmtk::object_header::obj_id(from);
+        crate::runtime::mmtk::object_header::store_obj_id(to, obj_id);
         
         to_start + total_size
     }
@@ -187,12 +202,11 @@ impl BlinkObjectModel {
     pub fn get_type_tag(object: ObjectReference) -> TypeTag {
         unsafe {
             let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
-            
             (*header_ptr).get_type()
         }
     }
 
-    pub fn get_header(object: ObjectReference) ->  (ObjectHeader, TypeTag) {
+    pub fn get_header(object: ObjectReference) -> (ObjectHeader, TypeTag) {
         unsafe {
             let header_ptr = Self::ref_to_header(object).to_ptr::<ObjectHeader>();
             let header = std::ptr::read(header_ptr);
@@ -200,12 +214,31 @@ impl BlinkObjectModel {
             (header, type_tag)
         }
     }
-
-    
     
     /// Get just the data size (excluding header)
     pub fn get_data_size(object: ObjectReference) -> usize {
         Self::get_current_size(object) - ObjectHeader::SIZE
     }
+    
+    /// Called during object allocation to assign object ID
+    pub fn initialize_object_metadata(obj: ObjectReference) {
+        let id = crate::runtime::mmtk::object_header::new_obj_id();
+        crate::runtime::mmtk::object_header::store_obj_id(obj, id);
+    }
+    
+    /// Get stable object ID (survives GC moves)
+    pub fn get_object_id(obj: ObjectReference) -> crate::runtime::mmtk::object_header::ObjId {
+        crate::runtime::mmtk::object_header::obj_id(obj)
+    }
 }
 
+// === Side Metadata Registration ===
+
+// This needs to be in a separate file or module that gets loaded early
+// You'll need to call this during VM initialization
+pub fn register_side_metadata_specs() -> Vec<SideMetadataSpec> {
+    vec![
+        OBJ_ID_METADATA_SPEC,
+        // Add any other VM-specific side metadata specs here
+    ]
+}

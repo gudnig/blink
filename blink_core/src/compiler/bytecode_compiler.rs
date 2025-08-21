@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    compiler::MacroExpander, error::BlinkError, runtime::{BlinkVM, CompiledFunction, ExecutionContext, LabelPatch, Macro, Opcode}, value::{unpack_immediate, GcPtr}, HeapValue, ImmediateValue, ValueRef
+    error::BlinkError,
+    runtime::{BlinkVM, CompiledFunction, LabelPatch, Macro, Opcode},
+    value::{unpack_immediate, GcPtr, ImmediateValue, ValueRef},
 };
 
 #[derive(Debug, Clone)]
@@ -23,7 +25,7 @@ pub struct BytecodeCompiler {
     loop_stack: Vec<LoopFrame>,
     // For closure support
     upvalue_stack: Vec<HashMap<u32, u8>>, // symbol_id -> upvalue_index
-    captured_symbols: Vec<(u32, u8)>,  // (symbol_id, parent_register)
+    captured_symbols: Vec<(u32, u8)>,     // (symbol_id, parent_register)
 
     // Label management
     next_label: u16,
@@ -33,14 +35,13 @@ pub struct BytecodeCompiler {
 
 #[derive(Debug)]
 enum SplicePart {
-    Item(ValueRef),      // Regular item (gets quoted if symbol)
-    Splice(ValueRef),    // Expression to be spliced
+    Item(ValueRef),         // Regular item (gets quoted if symbol)
+    Splice(ValueRef),       // Expression to be spliced
     UnquotedItem(ValueRef), // From unquote (never gets quoted)
 }
 
 impl BytecodeCompiler {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
-        
         Self {
             vm,
             bytecode: Vec::new(),
@@ -84,12 +85,17 @@ impl BytecodeCompiler {
                 return Err("Local binding".to_string());
             }
         }
-        
+
         // Check module-level definitions (where macros would be)
-        if let Some(value) = self.vm.module_registry.read().resolve_symbol(self.current_module, symbol_id) {
+        if let Some(value) = self
+            .vm
+            .module_registry
+            .read()
+            .resolve_symbol(self.current_module, symbol_id)
+        {
             return Ok(value);
         }
-        
+
         Err("Symbol not found".to_string())
     }
 
@@ -528,7 +534,7 @@ impl BytecodeCompiler {
         let param_start_reg = if function_name.is_some() { 2 } else { 1 };
         for (i, &param_symbol) in param_symbols.iter().enumerate() {
             let target_reg = (param_start_reg + i) as u8;
-            
+
             self.bind_local_symbol(param_symbol, target_reg);
         }
 
@@ -648,7 +654,7 @@ impl BytecodeCompiler {
                 _ => Err("Parameters must be symbols".to_string()),
             })
             .collect();
-        
+
         param_symbols
     }
 
@@ -657,13 +663,16 @@ impl BytecodeCompiler {
     fn detect_variadic_params(&self, param_symbols: &[u32]) -> (Vec<u32>, bool) {
         let mut final_params = Vec::new();
         let mut is_variadic = false;
-        
+
         let mut i = 0;
         while i < param_symbols.len() {
-            let symbol_name = self.vm.symbol_table.read()
+            let symbol_name = self
+                .vm
+                .symbol_table
+                .read()
                 .get_symbol(param_symbols[i])
                 .unwrap_or_default();
-            
+
             if symbol_name == "&" {
                 // Found variadic marker
                 if i + 1 < param_symbols.len() {
@@ -681,7 +690,7 @@ impl BytecodeCompiler {
             }
             i += 1;
         }
-        
+
         (final_params, is_variadic)
     }
 
@@ -700,7 +709,7 @@ impl BytecodeCompiler {
         // Create MacroDefinition with raw AST
         let macro_def = Macro {
             params: variadic_params,
-            body: body.to_vec(),  // Store raw AST - no compilation!
+            body: body.to_vec(), // Store raw AST - no compilation!
             is_variadic,
             module: self.current_module,
         };
@@ -712,8 +721,8 @@ impl BytecodeCompiler {
         // Store in constants and return register
         let constant_idx = self.add_constant(macro_value);
         let result_reg = self.alloc_register();
-        
-        self.emit_u8(Opcode::LoadImmConst as u8);  
+
+        self.emit_u8(Opcode::LoadImmConst as u8);
         self.emit_u8(result_reg);
         self.emit_u8(constant_idx);
 
@@ -722,23 +731,34 @@ impl BytecodeCompiler {
 
     fn find_free_variables(&mut self, expr: ValueRef) -> Result<(), String> {
         println!("🔍 Analyzing expression: {}", expr);
-        
+
         match expr {
             ValueRef::Immediate(packed) => {
                 if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
-                    let symbol_name = self.vm.symbol_table.read()
+                    let symbol_name = self
+                        .vm
+                        .symbol_table
+                        .read()
                         .get_symbol(symbol_id)
                         .unwrap_or_default();
                     println!("   → Found symbol: {} (id: {})", symbol_name, symbol_id);
-                    
+
                     let local_result = self.resolve_local_symbol(symbol_id);
                     println!("     Local scope result: {}", local_result.unwrap_or(0));
-                    
+
                     if self.resolve_local_symbol(symbol_id).is_none() {
                         if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
-                            if !self.captured_symbols.iter().any(|(sym, _)| *sym == symbol_id) {
-                                println!("     ✅ CAPTURING as upvalue: {} at register {}", symbol_name, parent_reg);
-                                self.captured_symbols.push((symbol_id, parent_reg)); // Store both!
+                            if !self
+                                .captured_symbols
+                                .iter()
+                                .any(|(sym, _)| *sym == symbol_id)
+                            {
+                                println!(
+                                    "     ✅ CAPTURING as upvalue: {} at register {}",
+                                    symbol_name, parent_reg
+                                );
+                                self.captured_symbols.push((symbol_id, parent_reg));
+                                // Store both!
                             }
                         } else {
                             println!("     → Not in parent scopes, might be global");
@@ -779,24 +799,33 @@ impl BytecodeCompiler {
     fn debug_closure_compilation(&self, context: &str) {
         println!("=== Debug: {} ===", context);
         println!("Scope stack levels: {}", self.scope_stack.len());
-        
+
         for (level, scope) in self.scope_stack.iter().enumerate() {
             println!("Scope level {}: {} bindings", level, scope.len());
             for (&symbol_id, &register) in scope {
-                let symbol_name = self.vm.symbol_table.read()
+                let symbol_name = self
+                    .vm
+                    .symbol_table
+                    .read()
                     .get_symbol(symbol_id)
                     .unwrap_or_default();
-                println!("  {} (id: {}) -> register {}", symbol_name, symbol_id, register);
+                println!(
+                    "  {} (id: {}) -> register {}",
+                    symbol_name, symbol_id, register
+                );
             }
         }
-        
+
         println!("Captured symbols: {} total", self.captured_symbols.len());
         for &(symbol_id, _) in &self.captured_symbols {
-            let symbol_name = self.vm.symbol_table.read()
+            let symbol_name = self
+                .vm
+                .symbol_table
+                .read()
                 .get_symbol(symbol_id)
                 .unwrap_or_default();
             println!("  Captured: {} (id: {})", symbol_name, symbol_id);
-            
+
             if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
                 println!("    Found in parent scope at register: {}", parent_reg);
             } else {
@@ -805,16 +834,15 @@ impl BytecodeCompiler {
         }
         println!("=====================================");
     }
-    
 
     fn resolve_in_parent_scopes(&self, symbol_id: u32) -> Option<u8> {
         // Look through LOCAL scope stack to find symbol in parent scopes
         // We need to find the REGISTER where the value is stored, not an upvalue index
-        
+
         if self.scope_stack.len() <= 1 {
             return None; // No parent scopes
         }
-        
+
         // Look through all parent scopes (excluding current scope)
         // Go from most recent parent to oldest
         for scope in self.scope_stack.iter().rev().skip(1) {
@@ -822,7 +850,7 @@ impl BytecodeCompiler {
                 return Some(register);
             }
         }
-        
+
         None
     }
 
@@ -834,8 +862,11 @@ impl BytecodeCompiler {
     }
 
     fn create_closure_object(&mut self, compiled_fn: CompiledFunction) -> Result<u8, String> {
-        println!("DEBUG: create_closure_object called with {} captured symbols", self.captured_symbols.len());
-    
+        println!(
+            "DEBUG: create_closure_object called with {} captured symbols",
+            self.captured_symbols.len()
+        );
+
         if self.captured_symbols.is_empty() {
             println!("DEBUG: Taking simple function path (no upvalues)");
             // Simple function - no upvalues
@@ -855,11 +886,17 @@ impl BytecodeCompiler {
             // Collect upvalue capture information
             let mut upvalue_captures = Vec::new();
             for (symbol_id, parent_reg) in &self.captured_symbols {
-                println!("DEBUG: Using stored info: symbol {} at register {}", symbol_id, parent_reg);
+                println!(
+                    "DEBUG: Using stored info: symbol {} at register {}",
+                    symbol_id, parent_reg
+                );
                 upvalue_captures.push((*parent_reg, *symbol_id));
             }
 
-            println!("DEBUG: Final upvalue_captures: {} items", upvalue_captures.len());
+            println!(
+                "DEBUG: Final upvalue_captures: {} items",
+                upvalue_captures.len()
+            );
 
             let result_reg = self.alloc_register();
 
@@ -941,7 +978,6 @@ impl BytecodeCompiler {
     }
 
     fn compile_ordered_chain(&mut self, args: &[ValueRef], base_op: Opcode) -> Result<u8, String> {
-        
         if args.len() == 2 {
             // Binary case
             let left_reg = self.compile_expression(args[0])?;
@@ -1102,8 +1138,6 @@ impl BytecodeCompiler {
 
         // Only allocate result_reg if we need it for upvalues/globals
         let result_reg = self.alloc_register();
-
-
 
         // Fall back to global
 
@@ -1267,7 +1301,6 @@ impl BytecodeCompiler {
         Ok(None)
     }
 
-    
     fn compile_special_form(&mut self, symbol_id: u32, args: &[ValueRef]) -> Result<u8, String> {
         let symbol_name = self
             .vm
@@ -1292,7 +1325,7 @@ impl BytecodeCompiler {
             "unquote-splicing" => self.compile_unquote_splicing(args),
             "future" => self.compile_future(args),
             "complete" => self.compile_complete(args),
-            "go" => self.compile_go(args),
+            //"go" => self.compile_go(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
     }
@@ -1303,7 +1336,7 @@ impl BytecodeCompiler {
         }
 
         let result_reg = self.alloc_register();
-        
+
         // Emit CreateFuture opcode
         self.emit_u8(Opcode::CreateFuture as u8);
         self.emit_u8(result_reg);
@@ -1318,17 +1351,17 @@ impl BytecodeCompiler {
 
         // Compile future reference
         let future_reg = self.compile_expression(args[0])?;
-        
+
         // Compile value to complete with
         let value_reg = self.compile_expression(args[1])?;
-        
+
         let result_reg = self.alloc_register();
 
         // Emit CompleteFuture opcode
         self.emit_u8(Opcode::CompleteFuture as u8);
-        self.emit_u8(result_reg);    // Result register (returns success/error)
-        self.emit_u8(future_reg);    // Future to complete
-        self.emit_u8(value_reg);     // Value to complete with
+        self.emit_u8(result_reg); // Result register (returns success/error)
+        self.emit_u8(future_reg); // Future to complete
+        self.emit_u8(value_reg); // Value to complete with
 
         Ok(result_reg)
     }
@@ -1367,17 +1400,12 @@ impl BytecodeCompiler {
             return Err("Empty function call".to_string());
         }
 
-
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
-
-
                 // Check for special forms
                 if self.is_special_form(symbol_id) {
                     return self.compile_special_form(symbol_id, &items[1..]);
                 }
-
-                
 
                 // Check for arithmetic operators
                 if let Ok(result) = self.try_compile_arithmetic(symbol_id, &items[1..]) {
@@ -1397,7 +1425,6 @@ impl BytecodeCompiler {
                 return self.compile_regular_function_call(symbol_id, &items[1..]);
             }
         }
-        
 
         Err("Unsupported function call".to_string())
     }
@@ -1610,21 +1637,21 @@ impl BytecodeCompiler {
         // Compile arguments into consecutive registers
         let mut arg_registers = Vec::new();
         for arg in args {
-            let arg_reg = self.compile_expression(*arg)?;  // This puts result in register 0
-            
+            let arg_reg = self.compile_expression(*arg)?; // This puts result in register 0
+
             // Save the result before the next expression overwrites register 0
             let saved_reg = self.alloc_register();
             if arg_reg != saved_reg {
                 self.emit_u8(Opcode::LoadLocal as u8);
                 self.emit_u8(saved_reg);
-                self.emit_u8(arg_reg);  // Copy from register 0 to saved_reg
+                self.emit_u8(arg_reg); // Copy from register 0 to saved_reg
             }
-            arg_registers.push(saved_reg);  // Use the saved register, not arg_reg
+            arg_registers.push(saved_reg); // Use the saved register, not arg_reg
         }
 
         // Move arguments to consecutive positions
         for (i, &arg_reg) in arg_registers.iter().enumerate() {
-            let target_reg = func_reg + 1 + i as u8;  // Right after func_reg
+            let target_reg = func_reg + 1 + i as u8; // Right after func_reg
             if arg_reg != target_reg {
                 self.emit_u8(Opcode::LoadLocal as u8);
                 self.emit_u8(target_reg);
@@ -1647,9 +1674,21 @@ impl BytecodeCompiler {
         if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
             matches!(
                 symbol_name.as_str(),
-                "if" | "let" | "do" | "quote" | "def" | "fn" | "loop" | "recur" | 
-                "cond" | "macro" | "quasiquote" | "unquote" | "unquote-splicing" |
-                "future" | "complete" | "go"
+                "if" | "let"
+                    | "do"
+                    | "quote"
+                    | "def"
+                    | "fn"
+                    | "loop"
+                    | "recur"
+                    | "cond"
+                    | "macro"
+                    | "quasiquote"
+                    | "unquote"
+                    | "unquote-splicing"
+                    | "future"
+                    | "complete"
+                    | "go"
             )
         } else {
             false
@@ -2219,30 +2258,24 @@ impl BytecodeCompiler {
         Ok(accumulator_reg)
     }
 
-
     // QUASIQUOTE and UNQUOTE support
     fn compile_quasiquote(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-        
         if args.len() != 1 {
             return Err("quasiquote expects exactly 1 argument".to_string());
         }
-    
-        
-        
+
         if self.has_unquotes(args[0]) {
             let processed = self.process_quasiquote(args[0], 1)?;
-            
+
             self.compile_expression(processed)
         } else {
             self.compile_quote(args)
         }
     }
-    
+
     fn has_unquotes(&self, expr: ValueRef) -> bool {
         match expr {
-            ValueRef::Immediate(_) => {
-                false
-            }
+            ValueRef::Immediate(_) => false,
             ValueRef::Native(_) => false,
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
@@ -2255,7 +2288,7 @@ impl BytecodeCompiler {
             }
         }
     }
-    
+
     fn list_has_unquotes(&self, items: &[ValueRef]) -> bool {
         if items.is_empty() {
             return false;
@@ -2265,7 +2298,10 @@ impl BytecodeCompiler {
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
                 if let Some(symbol_name) = self.vm.symbol_table.read().get_symbol(symbol_id) {
-                    if matches!(symbol_name.as_str(), "unquote" | "unquote-splicing" | "quasiquote") {
+                    if matches!(
+                        symbol_name.as_str(),
+                        "unquote" | "unquote-splicing" | "quasiquote"
+                    ) {
                         return true;
                     }
                 }
@@ -2278,18 +2314,18 @@ impl BytecodeCompiler {
                 return true;
             }
         }
-        
+
         false
     }
 
     fn compile_unquote(&mut self, _args: &[ValueRef]) -> Result<u8, String> {
         Err("unquote used outside quasiquote".to_string())
     }
-    
+
     fn compile_unquote_splicing(&mut self, _args: &[ValueRef]) -> Result<u8, String> {
         Err("unquote-splicing used outside quasiquote".to_string())
     }
-    
+
     /// Process a quasiquoted expression, handling nested quasiquotes
     /// depth: current nesting level of quasiquotes (1 = top level)
     fn process_quasiquote(&mut self, expr: ValueRef, depth: i32) -> Result<ValueRef, String> {
@@ -2318,13 +2354,17 @@ impl BytecodeCompiler {
             ValueRef::Native(_) => Ok(expr),
         }
     }
-    
-    fn process_quasiquote_list(&mut self, items: &[ValueRef], depth: i32) -> Result<ValueRef, String> {
+
+    fn process_quasiquote_list(
+        &mut self,
+        items: &[ValueRef],
+        depth: i32,
+    ) -> Result<ValueRef, String> {
         if items.is_empty() {
             // Empty list - just return a quoted empty list
             return Ok(self.create_quoted_list(vec![]));
         }
-    
+
         // Check if first item is a special quasiquote form
         if let ValueRef::Immediate(packed) = items[0] {
             if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
@@ -2360,10 +2400,10 @@ impl BytecodeCompiler {
                 }
             }
         }
-    
+
         // Process all items, collecting them and checking for splicing
         let mut result_parts = Vec::new();
-        
+
         for item in items {
             // Check for unquote-splicing and unquote
             if let Some(list_items) = item.get_list() {
@@ -2378,8 +2418,10 @@ impl BytecodeCompiler {
                                     continue;
                                 } else {
                                     // Nested unquote-splicing - decrease depth
-                                    let processed = self.process_quasiquote(list_items[1], depth - 1)?;
-                                    let new_item = self.create_quoted_list(vec![list_items[0], processed]);
+                                    let processed =
+                                        self.process_quasiquote(list_items[1], depth - 1)?;
+                                    let new_item =
+                                        self.create_quoted_list(vec![list_items[0], processed]);
                                     result_parts.push(SplicePart::Item(new_item));
                                     continue;
                                 }
@@ -2392,8 +2434,10 @@ impl BytecodeCompiler {
                                     continue;
                                 } else {
                                     // Nested unquote - decrease depth
-                                    let processed = self.process_quasiquote(list_items[1], depth - 1)?;
-                                    let new_item = self.create_quoted_list(vec![list_items[0], processed]);
+                                    let processed =
+                                        self.process_quasiquote(list_items[1], depth - 1)?;
+                                    let new_item =
+                                        self.create_quoted_list(vec![list_items[0], processed]);
                                     result_parts.push(SplicePart::Item(new_item));
                                     continue;
                                 }
@@ -2402,39 +2446,37 @@ impl BytecodeCompiler {
                     }
                 }
             }
-            
+
             // Regular item - process recursively
             let processed = self.process_quasiquote(*item, depth)?;
-            
+
             let final_item = processed;
             result_parts.push(SplicePart::Item(final_item));
         }
         self.build_spliced_list(result_parts)
     }
 
-
     fn create_quoted_list(&mut self, items: Vec<ValueRef>) -> ValueRef {
         // Create a direct list structure for macro expansion
         // This should create (if condition body nil) not (list 'if condition body 'nil)
         ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(items, true) // true = list
+            self.vm.alloc_vec_or_list(items, true, None), // true = list
         ))
     }
-    
+
     fn create_quoted_vector(&mut self, items: Vec<ValueRef>) -> ValueRef {
-        // Create a simple quoted vector literal  
-        ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(items, false)
-        ))
+        // Create a simple quoted vector literal
+        ValueRef::Heap(GcPtr::new(self.vm.alloc_vec_or_list(items, false, None)))
     }
-    
+
     fn build_spliced_list(&mut self, parts: Vec<SplicePart>) -> Result<ValueRef, String> {
         // Check if we actually need splicing
         let has_splice = parts.iter().any(|p| matches!(p, SplicePart::Splice(_)));
-        
+
         if !has_splice {
             // No splicing - just build a regular quoted list
-            let items: Vec<ValueRef> = parts.into_iter()
+            let items: Vec<ValueRef> = parts
+                .into_iter()
                 .map(|p| match p {
                     SplicePart::Item(item) => item,
                     SplicePart::Splice(_) => unreachable!(),
@@ -2443,52 +2485,51 @@ impl BytecodeCompiler {
                 .collect();
             return Ok(self.create_quoted_list(items));
         }
-        
+
         // We have splicing - need to build a runtime expression
         // Transform into: (concat (list item1) spliced-expr (list item3) ...)
-        
+
         let concat_symbol = self.vm.symbol_table.write().intern("concat");
         let concat_symbol_val = ValueRef::symbol(concat_symbol);
         let list_symbol = self.vm.symbol_table.write().intern("list");
         let list_symbol_val = ValueRef::symbol(list_symbol);
-        
+
         let mut concat_args = vec![concat_symbol_val];
         let mut current_items = Vec::new();
-        
+
         for part in parts {
             match part {
                 SplicePart::Item(item) => {
-                                current_items.push(item);
-                            }
+                    current_items.push(item);
+                }
                 SplicePart::Splice(expr) => {
-                                // Flush any accumulated items as a list
-                                if !current_items.is_empty() {
-                                    let mut list_call = vec![list_symbol_val];
-                                    list_call.extend(current_items.drain(..));
-                                    concat_args.push(ValueRef::Heap(GcPtr::new(
-                                        self.vm.alloc_vec_or_list(list_call, true)
-                                    )));
-                                }
-                                // Add the spliced expression directly
-                                concat_args.push(expr);
-                            }
+                    // Flush any accumulated items as a list
+                    if !current_items.is_empty() {
+                        let mut list_call = vec![list_symbol_val];
+                        list_call.extend(current_items.drain(..));
+                        concat_args.push(ValueRef::Heap(GcPtr::new(
+                            self.vm.alloc_vec_or_list(list_call, true, None),
+                        )));
+                    }
+                    // Add the spliced expression directly
+                    concat_args.push(expr);
+                }
                 SplicePart::UnquotedItem(item) => current_items.push(item),
             }
         }
-        
+
         // Flush any remaining items
         if !current_items.is_empty() {
             let mut list_call = vec![list_symbol_val];
             list_call.extend(current_items);
             concat_args.push(ValueRef::Heap(GcPtr::new(
-                self.vm.alloc_vec_or_list(list_call, true)
+                self.vm.alloc_vec_or_list(list_call, true, None),
             )));
         }
-        
+
         // Return the concat expression
         Ok(ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(concat_args, true)
+            self.vm.alloc_vec_or_list(concat_args, true, None),
         )))
     }
-    
 }

@@ -65,7 +65,7 @@ mod tests {
             ValueRef::Immediate(pack_number(1.0)),
             ValueRef::Immediate(pack_number(2.0)),
             ValueRef::Immediate(pack_number(3.0)),
-        ], false);
+        ], false, None);
         println!("Allocated vector: {:?}", vec1);
         
         // Allocate more objects to potentially trigger GC
@@ -101,19 +101,19 @@ mod tests {
         let vec_obj = vm.alloc_vec_or_list(vec![
             ValueRef::Immediate(pack_number(42.0)),
             ValueRef::Immediate(pack_number(24.0)),
-        ], false);
+        ], false, None);
         println!("Created vector: {:?}", vec_obj);
         
         let list_obj = vm.alloc_vec_or_list(vec![
             ValueRef::Immediate(pack_number(100.0)),
             ValueRef::Immediate(pack_number(200.0)),
-        ], true);
+        ], true, None);
         println!("Created list: {:?}", list_obj);
         
         // Allocate more to stress the system
         for i in 0..20 {
             let _temp_str = vm.alloc_str(&format!("Temporary {}", i));
-            let _temp_vec = vm.alloc_vec_or_list(vec![ValueRef::Immediate(pack_number(i as f64))], false);
+            let _temp_vec = vm.alloc_vec_or_list(vec![ValueRef::Immediate(pack_number(i as f64))], false, None);
         }
         
         // Try GC after creating some objects
@@ -145,7 +145,7 @@ mod tests {
                 let _vec = vm.alloc_vec_or_list(vec![
                     ValueRef::Immediate(pack_number((round * 100 + i) as f64)),
                     ValueRef::Immediate(pack_number((round * 200 + i) as f64)),
-                ], false);
+                ], false, None);
             }
             
             // Force GC after each round
@@ -177,7 +177,7 @@ pub fn test_semispace_manually() {
         let test_vec = vm.alloc_vec_or_list(vec![
             ValueRef::Immediate(pack_number(i as f64)),
             ValueRef::Immediate(pack_number((i * 10) as f64)),
-        ], false);
+        ], false, None);
         println!("Allocated vector {}: {:?}", i, test_vec);
     }
     
