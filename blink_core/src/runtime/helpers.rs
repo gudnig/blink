@@ -70,12 +70,12 @@ impl BlinkVM {
 
     pub fn list_value( &self, values: Vec<ValueRef>) -> ValueRef {
         
-        let object_ref = self.alloc_vec_or_list(values, true, None);
+        let object_ref = self.alloc_list_from_items(values);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn vector_value( &self, values: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.alloc_vec_or_list(values, false, None);
+        let object_ref = self.alloc_vec(values, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
@@ -86,8 +86,7 @@ impl BlinkVM {
     }   
 
     pub fn set_value( &self, set: Vec<ValueRef>) -> ValueRef {
-        let set = BlinkHashSet::from_iter(set);
-        let object_ref = self.alloc_blink_hash_set(set);
+        let object_ref = self.alloc_hashset(set, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
@@ -126,13 +125,13 @@ impl BlinkVM {
 
     pub fn empty_list_value( &self) -> ValueRef {
         let list = Vec::new();
-        let object_ref = self.alloc_vec_or_list(list, true, None);
+        let object_ref = self.alloc_list_from_items(list);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
     pub fn empty_vector_value( &self) -> ValueRef {
         let vector = Vec::new();
-        let object_ref = self.alloc_vec_or_list(vector, false, None);
+        let object_ref = self.alloc_vec(vector, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     pub fn error_value( &self, error: BlinkError) -> ValueRef {

@@ -12,7 +12,7 @@ const SYMBOL_TAG: u64 = 2;
 const NIL_TAG: u64 = 3;
 const KEYWORD_TAG: u64 = 4;
 
-// Packing functions
+// Packing functions    
 pub fn pack_number(n: f64) -> u64 {
     let bits = n.to_bits();
     if (bits & NAN_MASK) == NAN_MASK {

@@ -25,18 +25,23 @@ pub struct ObjectHeader {
 
     // Word 2: synchronization mark word (thin/inflated/hash/etc.)
     pub lockword: core::sync::atomic::AtomicU64, 
+
+    // Word 3: Object ID
+    pub object_id: core::sync::atomic::AtomicU64,
 }
 
 impl ObjectHeader {
     pub const SIZE: usize = std::mem::size_of::<ObjectHeader>();
     
     pub fn new(type_tag: TypeTag, data_size: usize) -> Self {
+        let new_id: u64 = OBJ_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
             gc_metadata: 0,  // Initially zero - GC will manage this
             type_tag: type_tag as i8,
             _padding1: [0; 3],
             total_size: (Self::SIZE + data_size) as u32,
             lockword: core::sync::atomic::AtomicU64::new(0), // UNLOCKED
+            object_id: core::sync::atomic::AtomicU64::new(new_id)
         }
     }
     
@@ -44,20 +49,15 @@ impl ObjectHeader {
     pub fn get_type(&self) -> TypeTag {
         unsafe { std::mem::transmute(self.type_tag) }
     }
+
+    #[inline]
+    pub fn get_object_id(&self) -> ObjId {
+        ObjId(self.object_id.load(Ordering::Acquire))
+    }
 }
 
 // === Side Metadata Specification for Object IDs ===
 
-/// Object ID side metadata - 64 bits per object, global scope
-/// This will be placed at the VM base address automatically by MMTk
-pub const OBJ_ID_METADATA_SPEC: SideMetadataSpec = SideMetadataSpec {
-    name: "blink.obj_id",
-    is_global: true,  // Global so it survives across all spaces
-    // Use the VM base offset - MMTk will place it after core metadata
-    offset: GLOBAL_SIDE_METADATA_VM_BASE_OFFSET,
-    log_num_of_bits: 6,  // 2^6 = 64 bits per entry
-    log_bytes_in_region: 3,  // 2^3 = 8 bytes per object (min object size)
-};
 
 // === Lock State Definitions ===
 
@@ -89,35 +89,6 @@ struct MonHandle(u64); // Monitor handle that fits in lockword payload
 
 static OBJ_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Get or create object ID for an object using side metadata
-pub fn obj_id(obj: ObjectReference) -> ObjId {
-    // Try to load existing ID
-    let existing_id = OBJ_ID_METADATA_SPEC.load_atomic::<u64>(obj.to_raw_address(), Ordering::Acquire);
-    
-    if existing_id != 0 {
-        return ObjId(existing_id);
-    }
-    
-    // Create new ID
-    let new_id = OBJ_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    
-    // Try to store it (atomic compare-exchange to handle race conditions)
-    match OBJ_ID_METADATA_SPEC.compare_exchange_atomic::<u64>(
-        obj.to_raw_address(), 
-        0,  // expected (uninitialized)
-        new_id,  // new value
-        Ordering::Release, 
-        Ordering::Acquire
-    ) {
-        Ok(_) => ObjId(new_id),  // We won the race
-        Err(actual) => ObjId(actual),  // Someone else won, use their ID
-    }
-}
-
-/// Store object ID when object is allocated (called from allocation path)
-pub fn store_obj_id(obj: ObjectReference, id: ObjId) {
-    OBJ_ID_METADATA_SPEC.store_atomic::<u64>(obj.to_raw_address(), id.0, Ordering::Release);
-}
 
 /// Generate a new unique object ID (for allocation)
 pub fn new_obj_id() -> ObjId {
@@ -291,6 +262,14 @@ fn monitor_unlock(monitor: &Monitor, goroutine_id: u32) {
 }
 
 // === Inflation Functions ===
+
+#[inline]
+pub fn obj_id(obj: ObjectReference) -> ObjId {
+    unsafe {
+        let header_ptr = BlinkObjectModel::ref_to_header(obj).to_ptr::<ObjectHeader>();
+        (*header_ptr).get_object_id()
+    }
+}
 
 fn inflate_and_lock(obj: ObjectReference, lw: &core::sync::atomic::AtomicU64, me: u32) {
     let id = obj_id(obj);

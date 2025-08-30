@@ -1,3 +1,5 @@
+// blink_core/src/runtime/heap/vector.rs
+
 use crate::runtime::{is_object_shared, obj_lock, obj_unlock, BlinkActivePlan, BlinkObjectModel, BlinkSlot, ObjectLockGuard, TypeTag };
 use crate::{runtime::BlinkVM, value::ValueRef};
 
@@ -327,13 +329,11 @@ impl BlinkVM {
         }
     }
 
-    // Add debug version of allocation
-    pub fn alloc_vec_or_list(&self, items: Vec<ValueRef>, is_list: bool, capacity: Option<usize>) -> ObjectReference {
-        println!("🔍 DEBUG: Allocating {} with {} items", if is_list { "list" } else { "vector" }, items.len());
+    pub fn alloc_vec(&self, items: Vec<ValueRef>, capacity: Option<usize>) -> ObjectReference {
         
         self.with_mutator(|mutator| {
             let capacity = capacity.unwrap_or(items.len().max(8));
-            println!("🔍 DEBUG: Capacity: {}", capacity);
+            
 
             let header_size =
                 std::mem::size_of::<u32>() +      // length
@@ -341,28 +341,21 @@ impl BlinkVM {
                 std::mem::size_of::<ObjectReference>(); // data_ptr
 
             let data_size = capacity * std::mem::size_of::<ValueRef>();
-            println!("🔍 DEBUG: Header size: {}, Data size: {}", header_size, data_size);
             
-            let type_tag = if is_list { TypeTag::List } else { TypeTag::Vector };
+            
+            let type_tag = TypeTag::Vector;
             
             // Allocate header object
-            println!("🔍 DEBUG: Allocating header object...");
-            let object_start = BlinkActivePlan::alloc_object(mutator, &type_tag, &header_size);
-            println!("🔍 DEBUG: Header allocated at: {:?}", object_start);
             
+            let object_start = BlinkActivePlan::alloc_object(mutator, &type_tag, &header_size);
+
             // Allocate separate data array
-            println!("🔍 DEBUG: Allocating data array...");
             let data_start = BlinkActivePlan::alloc(mutator, &data_size);
-            println!("🔍 DEBUG: Data allocated at: {:?}", data_start);
             
             // Initialize metadata for both allocations
-            println!("🔍 DEBUG: Initializing object metadata...");
-            BlinkObjectModel::initialize_object_metadata(object_start);
-            BlinkObjectModel::initialize_object_metadata(data_start);
-            println!("🔍 DEBUG: Metadata initialized");
+            
             
             unsafe {
-                println!("🔍 DEBUG: Writing header...");
                 let header_ptr = object_start.to_raw_address().as_usize() as *mut u8;
                 let mut offset = 0;
 
@@ -376,13 +369,10 @@ impl BlinkVM {
 
                 // Write data pointer
                 std::ptr::write_unaligned(header_ptr.add(offset) as *mut ObjectReference, data_start);
-                println!("🔍 DEBUG: Header written successfully");
 
                 // Write data array
-                println!("🔍 DEBUG: Writing data array...");
                 let data_ptr = data_start.to_raw_address().as_usize() as *mut ValueRef;
                 for (i, item) in items.iter().enumerate() {
-                    println!("🔍 DEBUG: Writing item {} at offset {}", i, i);
                     std::ptr::write(data_ptr.add(i), *item);
                 }
                 
@@ -390,10 +380,8 @@ impl BlinkVM {
                 for i in items.len()..capacity {
                     std::ptr::write(data_ptr.add(i), ValueRef::nil());
                 }
-                println!("🔍 DEBUG: Data written successfully");
             }
             
-            println!("🔍 DEBUG: Allocation complete, returning: {:?}", object_start);
             object_start
         })
     }

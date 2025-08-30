@@ -79,6 +79,11 @@ impl<'a> NativeContext<'a> {
     pub fn get_pos(&self, value: ValueRef) -> Option<SourceRange> {
        self.vm.get_pos(value)
     }
+    
+    /// Get VM reference for direct API access
+    pub fn vm(&self) -> &Arc<BlinkVM> {
+        self.vm
+    }
 
     // === VALUE CREATION ===
     
@@ -105,13 +110,13 @@ impl<'a> NativeContext<'a> {
     
     /// Allocate a list value
     pub fn list(&self, items: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.vm.alloc_vec_or_list(items, true, None);
+        let object_ref = self.vm.alloc_list_from_items(items);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     
     /// Allocate a vector value
     pub fn vector(&self, items: Vec<ValueRef>) -> ValueRef {
-        let object_ref = self.vm.alloc_vec_or_list(items, false, None);
+        let object_ref = self.vm.alloc_vec(items, None);
         ValueRef::Heap(GcPtr::new(object_ref))
     }
     

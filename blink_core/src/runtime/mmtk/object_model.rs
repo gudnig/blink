@@ -9,7 +9,7 @@ use mmtk::{
         VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}, 
     MutatorContext
 };
-use crate::runtime::{BlinkVM, mmtk::object_header::{ObjectHeader, OBJ_ID_METADATA_SPEC}};
+use crate::runtime::{BlinkVM, mmtk::object_header::{ObjectHeader}};
 use crate::value::ValueRef;
 
 #[repr(i8)]
@@ -26,6 +26,7 @@ pub enum TypeTag {
     Closure = 8,
     Future = 9, 
     Env = 10,
+    ListNode = 11,
 }
 
 impl TypeTag {
@@ -42,6 +43,7 @@ impl TypeTag {
             TypeTag::Future => "future",
             TypeTag::Env => "env",
             TypeTag::Closure => "closure",
+            TypeTag::ListNode => "list-node",
         }
     }
 }
@@ -49,10 +51,9 @@ impl TypeTag {
 pub struct BlinkObjectModel;
 
 impl ObjectModel<BlinkVM> for BlinkObjectModel {
-    // CRITICAL CHANGE: This must be header size to skip over header
     const OBJECT_REF_OFFSET_LOWER_BOUND: isize = ObjectHeader::SIZE as isize;
     
-    // Fixed: Use VMGlobalLogBitSpec::side_first() which exists
+    // Keep your existing side-based specs for GC metadata
     const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
     const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::side_first();
     
@@ -60,6 +61,8 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
     const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec = VMLocalForwardingBitsSpec::in_header(2);
     const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec = VMLocalForwardingPointerSpec::in_header(8);
     const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec = VMLocalLOSMarkNurserySpec::in_header(3);
+    
+    // ... rest of your implementation stays the same
     
     fn copy(
         from: ObjectReference,
@@ -86,21 +89,17 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
             // Reset lockword in the copy (objects start unlocked)
             let to_header = to_start.to_mut_ptr::<ObjectHeader>();
             (*to_header).lockword.store(0, std::sync::atomic::Ordering::Relaxed);
+            
+            // Object ID is copied automatically with the header - no extra work needed!
         }
-        
-        // Copy side metadata (object ID) - manually copy the ID
-        let obj_id = crate::runtime::mmtk::object_header::obj_id(from);
-        crate::runtime::mmtk::object_header::store_obj_id(obj_ref, obj_id);
         
         obj_ref
     }
     
-    fn copy_to(
-        from: ObjectReference,
-        to: ObjectReference,
-        _region: Address,
-    ) -> Address {
+    fn copy_to(from: ObjectReference, to: ObjectReference, region: Address) -> Address {
         let total_size = Self::get_current_size(from);
+        
+        // Copy the entire object including header
         let from_start = Self::ref_to_header(from);
         let to_start = Self::ref_to_header(to);
         
@@ -111,24 +110,25 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
                 total_size
             );
             
-            // Reset lockword in the copy
+            // Reset lockword in the copy (objects start unlocked)
             let to_header = to_start.to_mut_ptr::<ObjectHeader>();
             (*to_header).lockword.store(0, std::sync::atomic::Ordering::Relaxed);
+            
+            // Object ID is automatically copied with the header - no extra work needed!
         }
         
-        // Copy side metadata
-        let obj_id = crate::runtime::mmtk::object_header::obj_id(from);
-        crate::runtime::mmtk::object_header::store_obj_id(to, obj_id);
-        
-        to_start + total_size
+        // Return the address after the copied object
+        to.to_raw_address() + total_size
     }
+
     
-    fn get_reference_when_copied_to(
-        _from: ObjectReference,
-        to: Address,
-    ) -> ObjectReference {
-        // 'to' points to the start of allocation, we need to skip header
-        ObjectReference::from_raw_address(to + ObjectHeader::SIZE).unwrap()
+    fn get_reference_when_copied_to(from: ObjectReference, to: Address) -> ObjectReference {
+        // The object reference should point to the same offset within the object
+        // as it did in the original object
+        let from_start = Self::ref_to_object_start(from);
+        let offset = from.to_raw_address() - from_start;
+        
+        ObjectReference::from_raw_address(to + offset).unwrap()
     }
     
     fn get_current_size(object: ObjectReference) -> usize {
@@ -178,7 +178,15 @@ impl ObjectModel<BlinkVM> for BlinkObjectModel {
     
     fn ref_to_header(object: ObjectReference) -> Address {
         // Go back from object data to header
-        object.to_raw_address() - ObjectHeader::SIZE
+        let object_addr = object.to_raw_address();
+        let header_size = ObjectHeader::SIZE;
+        
+        // Validate that the address is valid and won't cause underflow
+        if object_addr.as_usize() < header_size {
+            panic!("Invalid object address: {:?} is too small to contain header of size {}", object_addr, header_size);
+        }
+        
+        object_addr - header_size
     }
     
     fn dump_object(object: ObjectReference) {
@@ -219,26 +227,5 @@ impl BlinkObjectModel {
     pub fn get_data_size(object: ObjectReference) -> usize {
         Self::get_current_size(object) - ObjectHeader::SIZE
     }
-    
-    /// Called during object allocation to assign object ID
-    pub fn initialize_object_metadata(obj: ObjectReference) {
-        let id = crate::runtime::mmtk::object_header::new_obj_id();
-        crate::runtime::mmtk::object_header::store_obj_id(obj, id);
-    }
-    
-    /// Get stable object ID (survives GC moves)
-    pub fn get_object_id(obj: ObjectReference) -> crate::runtime::mmtk::object_header::ObjId {
-        crate::runtime::mmtk::object_header::obj_id(obj)
-    }
 }
 
-// === Side Metadata Registration ===
-
-// This needs to be in a separate file or module that gets loaded early
-// You'll need to call this during VM initialization
-pub fn register_side_metadata_specs() -> Vec<SideMetadataSpec> {
-    vec![
-        OBJ_ID_METADATA_SPEC,
-        // Add any other VM-specific side metadata specs here
-    ]
-}

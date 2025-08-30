@@ -2460,13 +2460,13 @@ impl BytecodeCompiler {
         // Create a direct list structure for macro expansion
         // This should create (if condition body nil) not (list 'if condition body 'nil)
         ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(items, true, None), // true = list
+            self.vm.alloc_list_from_items(items), // true = list
         ))
     }
 
     fn create_quoted_vector(&mut self, items: Vec<ValueRef>) -> ValueRef {
         // Create a simple quoted vector literal
-        ValueRef::Heap(GcPtr::new(self.vm.alloc_vec_or_list(items, false, None)))
+        ValueRef::Heap(GcPtr::new(self.vm.alloc_list_from_items(items)))
     }
 
     fn build_spliced_list(&mut self, parts: Vec<SplicePart>) -> Result<ValueRef, String> {
@@ -2508,7 +2508,7 @@ impl BytecodeCompiler {
                         let mut list_call = vec![list_symbol_val];
                         list_call.extend(current_items.drain(..));
                         concat_args.push(ValueRef::Heap(GcPtr::new(
-                            self.vm.alloc_vec_or_list(list_call, true, None),
+                            self.vm.alloc_list_from_items(list_call),
                         )));
                     }
                     // Add the spliced expression directly
@@ -2523,13 +2523,13 @@ impl BytecodeCompiler {
             let mut list_call = vec![list_symbol_val];
             list_call.extend(current_items);
             concat_args.push(ValueRef::Heap(GcPtr::new(
-                self.vm.alloc_vec_or_list(list_call, true, None),
+                self.vm.alloc_list_from_items(list_call),
             )));
         }
 
         // Return the concat expression
         Ok(ValueRef::Heap(GcPtr::new(
-            self.vm.alloc_vec_or_list(concat_args, true, None),
+            self.vm.alloc_list_from_items(concat_args),
         )))
     }
 }

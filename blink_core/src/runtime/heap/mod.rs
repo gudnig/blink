@@ -1,6 +1,10 @@
 mod vector;
+mod list;
+mod map;
+mod set;
 
 use mmtk::util::Address;
+pub use list::*;
 pub use vector::*;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -846,10 +850,10 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
 
     pub fn alloc_val(&self, val: HeapValue) -> ObjectReference {
         match val {
-            HeapValue::List(list) => self.alloc_vec_or_list(list, true, None), // true = list
+            HeapValue::List(list) => self.alloc_list_from_items(list), // true = list
             HeapValue::Str(str) => self.alloc_str(&str),
             HeapValue::Map(map) => self.alloc_blink_hash_map(map),
-            HeapValue::Vector(value_refs) => self.alloc_vec_or_list(value_refs, false, None), // false = vector
+            HeapValue::Vector(value_refs) => self.alloc_vec(value_refs, None), // false = vector
             HeapValue::Set(blink_hash_set) => self.alloc_blink_hash_set(blink_hash_set),
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
@@ -869,8 +873,44 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         }
     }
     
-    
-
+    /// Convert map to BlinkHashMap for compatibility with existing code
+    pub fn map_to_blink_hash_map(&self, map: ObjectReference) -> BlinkHashMap {
+        // Check if it's using the new hashmap implementation in map.rs
+        let type_tag = crate::runtime::BlinkObjectModel::get_type_tag(map);
+        if type_tag == crate::runtime::TypeTag::Map {
+            // Try using the new hashmap API if available
+            // For now we'll use the old layout conversion method
+            unsafe {
+                let header_ptr = map.to_raw_address().as_usize() as *const u8;
+                let mut offset = 0;
+                
+                let bucket_count = std::ptr::read_unaligned(header_ptr.add(offset) as *const usize);
+                offset += std::mem::size_of::<usize>();
+                
+                let item_count = std::ptr::read_unaligned(header_ptr.add(offset) as *const usize);
+                offset += std::mem::size_of::<usize>();
+                
+                if item_count == 0 {
+                    return BlinkHashMap::new();
+                }
+                
+                offset += bucket_count * std::mem::size_of::<u32>(); // Skip bucket offsets
+                
+                let mut map = BlinkHashMap::new();
+                let pairs_ptr = header_ptr.add(offset) as *const ValueRef;
+                
+                for i in 0..item_count {
+                    let key = std::ptr::read_unaligned(pairs_ptr.add(i * 2));
+                    let value = std::ptr::read_unaligned(pairs_ptr.add(i * 2 + 1));
+                    map.insert(key, value);
+                }
+                
+                map
+            }
+        } else {
+            BlinkHashMap::new()
+        }
+    }
 
 }
 
@@ -897,37 +937,7 @@ impl ValueRef {
     }
 
 
-    pub fn read_vec(&self, address: ObjectReference) -> Vec<ValueRef> {
-        unsafe {
-            let base_ptr = address.to_raw_address().as_usize() as *mut u8;
-            let header_ptr = base_ptr as *mut ObjectHeader;
-            let header = std::ptr::read(header_ptr);
-            
-            // Verify this is actually a vector/list
-            debug_assert_eq!(header.type_tag, TypeTag::List as i8);
-            
-            let data_start = base_ptr.add(std::mem::size_of::<ObjectHeader>());
-            
-            // Read vector metadata
-            let len_ptr = data_start as *const usize;
-            let len = std::ptr::read(len_ptr);
-            
-            let cap_ptr = data_start.add(std::mem::size_of::<usize>()) as *const usize;
-            let _capacity = std::ptr::read(cap_ptr); // Read but don't need to use
-            
-            // Read vector data
-            let vec_data_ptr = data_start.add(std::mem::size_of::<usize>() * 2) as *const ValueRef;
-            let mut items = Vec::with_capacity(len);
-            
-            for i in 0..len {
-                let item = std::ptr::read(vec_data_ptr.add(i));
-                items.push(item);
-            }
-            
-            items
-        }
-    }
-
+    
     
 
     pub fn read_string(&self, address: ObjectReference) -> String {

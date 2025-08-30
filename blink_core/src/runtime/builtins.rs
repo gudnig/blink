@@ -1,7 +1,7 @@
 use crate::{
     env::Env, native_functions::{
         native_add, native_complete_future, native_concat, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
-    }, runtime::{BlinkVM, EvalResult}, value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}
+    }, runtime::{BlinkVM, EvalResult, Macro}, value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}
 };
 
 impl BlinkVM {
@@ -88,7 +88,7 @@ impl BlinkVM {
 
     //     // when - expands to (if condition (do ...))
     //     let cons_expr = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![cons_sym_val, do_sym_val, body_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![cons_sym_val, do_sym_val, body_sym_val], true),
     //     ));
     //     let when_body = vec![if_sym_val, condition_sym_val, cons_expr];
     //     let empty_env = self.alloc_env(Env::new());
@@ -107,7 +107,7 @@ impl BlinkVM {
 
     //     // unless - expands to (if (not condition) (do ...))
     //     let not_expr = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![not_sym_val, condition_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![not_sym_val, condition_sym_val], true),
     //     ));
     //     let unless_body = vec![if_sym_val, not_expr, cons_expr];
     //     let empty_env = self.alloc_env(Env::new());
@@ -124,39 +124,39 @@ impl BlinkVM {
 
     //     // and - expands to nested ifs
     //     let empty_check = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![empty_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![empty_sym_val, forms_sym_val], true),
     //     ));
     //     let count_check = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![count_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![count_sym_val, forms_sym_val], true),
     //     ));
     //     let one = ValueRef::Immediate(pack_number(1.0));
     //     let single_check = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![eq_sym_val, count_check, one], true),
+    //         self.alloc_list_from_items_or_list(vec![eq_sym_val, count_check, one], true),
     //     ));
     //     let first_form = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![first_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![first_sym_val, forms_sym_val], true),
     //     ));
     //     let rest_forms = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![rest_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![rest_sym_val, forms_sym_val], true),
     //     ));
     //     let recursive_and = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![and_sym_val, rest_forms], true),
+    //         self.alloc_list_from_items_or_list(vec![and_sym_val, rest_forms], true),
     //     ));
 
     //     // Build the innermost if first
-    //     let inner_if = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+    //     let inner_if = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
     //         vec![if_sym_val, first_form, recursive_and, first_form],
     //         true,
     //     )));
 
     //     // Build the middle if
     //     let middle_if = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![if_sym_val, single_check, first_form, inner_if], true),
+    //         self.alloc_list_from_items_or_list(vec![if_sym_val, single_check, first_form, inner_if], true),
     //     ));
 
     //     // Build the outermost if (the complete expansion)
     //     let and_body = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![if_sym_val, empty_check, true_sym_val, middle_if], true),
+    //         self.alloc_list_from_items_or_list(vec![if_sym_val, empty_check, true_sym_val, middle_if], true),
     //     ));
 
     //     let empty_env = self.alloc_env(Env::new());
@@ -175,16 +175,16 @@ impl BlinkVM {
 
     //     // or - expands to nested ifs: (if (empty? forms) nil (if (first forms) (first forms) (or (rest forms))))
     //     let first_form = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![first_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![first_sym_val, forms_sym_val], true),
     //     ));
     //     let rest_forms = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![rest_sym_val, forms_sym_val], true),
+    //         self.alloc_list_from_items_or_list(vec![rest_sym_val, forms_sym_val], true),
     //     ));
     //     let recursive_or = ValueRef::Heap(GcPtr::new(
-    //         self.alloc_vec_or_list(vec![or_sym_val, rest_forms], true),
+    //         self.alloc_list_from_items_or_list(vec![or_sym_val, rest_forms], true),
     //     ));
 
-    //     let inner_or_if = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+    //     let inner_or_if = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
     //         vec![
     //             if_sym_val,
     //             first_form.clone(), // condition
@@ -194,7 +194,7 @@ impl BlinkVM {
     //         true,
     //     )));
 
-    //     let or_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+    //     let or_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
     //         vec![if_sym_val, empty_check, nil_sym_val, inner_or_if],
     //         true,
     //     )));
@@ -221,7 +221,7 @@ impl BlinkVM {
 
     pub fn register_complex_macros(&mut self, module: u32) {
         
-        // let mut symbol_table = self.symbol_table.write();
+        let mut symbol_table = self.symbol_table.write();
 
         // // Pre-allocate all the symbols and values we'll need
         // let if_sym_val = ValueRef::symbol(symbol_table.intern("if"));
@@ -231,8 +231,8 @@ impl BlinkVM {
         // let rest_sym_val = ValueRef::symbol(symbol_table.intern("rest"));
         // let empty_sym_val = ValueRef::symbol(symbol_table.intern("empty?"));
         // let nil_sym_val = ValueRef::symbol(symbol_table.intern("nil"));
-        // let def_sym_val = ValueRef::symbol(symbol_table.intern("def"));
-        // let fn_sym_val = ValueRef::symbol(symbol_table.intern("fn"));
+        let def_sym_val = ValueRef::symbol(symbol_table.intern("def"));
+        let fn_sym_val = ValueRef::symbol(symbol_table.intern("fn"));
         // let let_sym_val = ValueRef::symbol(symbol_table.intern("let"));
         // let list_check_sym_val = ValueRef::symbol(symbol_table.intern("list?"));
 
@@ -244,25 +244,25 @@ impl BlinkVM {
 
         // // Build the macro body step by step to avoid nested ctx borrows
         // let empty_check = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![empty_sym_val.clone(), clauses_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![empty_sym_val.clone(), clauses_sym_val.clone()], true),
         // ));
         // let first_clause = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![first_sym_val.clone(), clauses_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![first_sym_val.clone(), clauses_sym_val.clone()], true),
         // ));
         // let rest_clauses = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![rest_sym_val.clone(), clauses_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![rest_sym_val.clone(), clauses_sym_val.clone()], true),
         // ));
         // let second_clause = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![first_sym_val.clone(), rest_clauses.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![first_sym_val.clone(), rest_clauses.clone()], true),
         // ));
         // let remaining_clauses = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![rest_sym_val.clone(), rest_clauses], true),
+        //     self.alloc_list_from_items_or_list(vec![rest_sym_val.clone(), rest_clauses], true),
         // ));
         // let recursive_cond = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![cond_sym_val, remaining_clauses], true),
+        //     self.alloc_list_from_items_or_list(vec![cond_sym_val, remaining_clauses], true),
         // ));
 
-        // let inner_if = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let inner_if = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         if_sym_val.clone(),
         //         first_clause,
@@ -272,7 +272,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let cond_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let cond_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         if_sym_val.clone(),
         //         empty_check,
@@ -296,77 +296,76 @@ impl BlinkVM {
         // let value = ValueRef::Heap(GcPtr::new(cond_macro_val));
         // self.update_module(module, cond_sym, value);
 
-        // // defn macro - complete implementation with quasiquote/unquote
-        // let defn_sym_val = ValueRef::symbol(symbol_table.intern("defn"));
-        // let name_sym_val = ValueRef::symbol(symbol_table.intern("name"));
-        // let args_sym_val = ValueRef::symbol(symbol_table.intern("args"));
-        // let body_sym_val = ValueRef::symbol(symbol_table.intern("body"));
+        // defn macro - complete implementation with quasiquote/unquote
+        let defn_sym_val = ValueRef::symbol(symbol_table.intern("defn"));
+        let name_sym_val = ValueRef::symbol(symbol_table.intern("name"));
+        let args_sym_val = ValueRef::symbol(symbol_table.intern("args"));
+        let body_sym_val = ValueRef::symbol(symbol_table.intern("body"));
 
-        // let defn_sym = symbol_table.intern("defn");
-        // let name_sym = symbol_table.intern("name");
-        // let args_sym = symbol_table.intern("args");
-        // let body_sym = symbol_table.intern("body");
+        let defn_sym = symbol_table.intern("defn");
+        let name_sym = symbol_table.intern("name");
+        let args_sym = symbol_table.intern("args");
+        let body_sym = symbol_table.intern("body");
 
-        // // Get the required symbols for quasiquote/unquote
-        // let quasiquote_sym_val = ValueRef::symbol(symbol_table.intern("quasiquote"));
-        // let unquote_sym_val = ValueRef::symbol(symbol_table.intern("unquote"));
-        // let unquote_splicing_sym_val = ValueRef::symbol(symbol_table.intern("unquote-splicing"));
+        // Get the required symbols for quasiquote/unquote
+        let quasiquote_sym_val = ValueRef::symbol(symbol_table.intern("quasiquote"));
+        let unquote_sym_val = ValueRef::symbol(symbol_table.intern("unquote"));
+        let unquote_splicing_sym_val = ValueRef::symbol(symbol_table.intern("unquote-splicing"));
 
-        // // Build: `(def ~name (fn ~name ~args ~@body))
-        // //
-        // // This creates a quasiquote expression that will be evaluated to produce:
-        // // (def actual-name (fn actual-name actual-args body-form1 body-form2 ...))
+        // Build: `(def ~name (fn ~name ~args ~@body))
+        //
+        // This creates a quasiquote expression that will be evaluated to produce:
+        // (def actual-name (fn actual-name actual-args body-form1 body-form2 ...))
 
-        // // Build ~name (unquote name)
-        // let unquote_name = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![unquote_sym_val.clone(), name_sym_val.clone()], true),
-        // ));
+        // Build ~name (unquote name)
+        let unquote_name = ValueRef::Heap(GcPtr::new(
+            self.alloc_list_from_items(vec![unquote_sym_val.clone(), name_sym_val.clone()]),
+        ));
 
-        // // Build ~args (unquote args)
-        // let unquote_args = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![unquote_sym_val.clone(), args_sym_val.clone()], true),
-        // ));
+        // Build ~args (unquote args)
+        let unquote_args = ValueRef::Heap(GcPtr::new(
+            self.alloc_list_from_items(vec![unquote_sym_val.clone(), args_sym_val.clone()]),
+        ));
 
-        // // Build ~@body (unquote-splicing body)
-        // let unquote_splicing_body = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![unquote_splicing_sym_val, body_sym_val.clone()], true),
-        // ));
+        // Build ~@body (unquote-splicing body)
+        let unquote_splicing_body = ValueRef::Heap(GcPtr::new(
+            self.alloc_list_from_items(vec![unquote_splicing_sym_val, body_sym_val.clone()]),
+        ));
 
-        // // Build the fn expression: (fn ~name ~args ~@body)
-        // let fn_expr = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
-        //     vec![
-        //         fn_sym_val.clone(),
-        //         unquote_name.clone(),
-        //         unquote_args,
-        //         unquote_splicing_body,
-        //     ],
-        //     true,
-        // )));
+        // Build the fn expression: (fn ~name ~args ~@body)
+        let fn_expr = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items(
+            vec![
+                fn_sym_val.clone(),
+                unquote_name.clone(),
+                unquote_args,
+                unquote_splicing_body,
+            ]
+        )));
 
-        // // Build the complete def expression: (def ~name (fn ~name ~args ~@body))
-        // let def_expr = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![def_sym_val.clone(), unquote_name, fn_expr], true),
-        // ));
+        // Build the complete def expression: (def ~name (fn ~name ~args ~@body))
+        let def_expr = ValueRef::Heap(GcPtr::new(
+            self.alloc_list_from_items(vec![def_sym_val.clone(), unquote_name, fn_expr]),
+        ));
 
-        // // Wrap the entire thing in quasiquote: `(def ~name (fn ~name ~args ~@body))
-        // let defn_body = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![quasiquote_sym_val, def_expr], true),
-        // ));
+        // Wrap the entire thing in quasiquote: `(def ~name (fn ~name ~args ~@body))
+        let defn_body = ValueRef::Heap(GcPtr::new(
+            self.alloc_list_from_items(vec![quasiquote_sym_val, def_expr]),
+        ));
 
-        // let empty_env = self.alloc_env(Env::new());
+        
 
-        // // Create the macro
-        // let defn_macro = Callable {
-        //     params: vec![name_sym, args_sym, body_sym],
-        //     is_variadic: true, // body can have multiple forms
-        //     body: vec![defn_body],
-        //     env: empty_env,
-        //     module: module,
-        // };
+        // Create the macro
+        let defn_macro = Macro {
+            params: vec![name_sym, args_sym, body_sym],
+            is_variadic: true, // body can have multiple forms
+            body: vec![defn_body],
+            
+            module: module,
+        };
 
-        // let defn_macro_val = self.alloc_macro(defn_macro);
-        // let value = ValueRef::Heap(GcPtr::new(defn_macro_val));
-        // self.update_module(module, defn_sym, value);
+        let defn_macro_val = self.alloc_macro(defn_macro);
+        let value: ValueRef = ValueRef::Heap(GcPtr::new(defn_macro_val));
+        self.update_module(module, defn_sym, value);
 
         // // -> (thread-first) macro
 
@@ -387,32 +386,32 @@ impl BlinkVM {
 
         // // Build all the sub-expressions step by step
         // let empty_forms_check = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![empty_sym_val.clone(), forms_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![empty_sym_val.clone(), forms_sym_val.clone()], true),
         // ));
         // let first_forms = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![first_sym_val.clone(), forms_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![first_sym_val.clone(), forms_sym_val.clone()], true),
         // ));
         // let rest_forms_expr = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![rest_sym_val.clone(), forms_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![rest_sym_val.clone(), forms_sym_val.clone()], true),
         // ));
         // let first_form = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![first_sym_val.clone(), form_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![first_sym_val.clone(), form_sym_val.clone()], true),
         // ));
         // let rest_form = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![rest_sym_val.clone(), form_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![rest_sym_val.clone(), form_sym_val.clone()], true),
         // ));
         // let list_check = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![list_check_sym_val, form_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![list_check_sym_val, form_sym_val.clone()], true),
         // ));
 
-        // let cons_x_rest = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let cons_x_rest = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![cons_sym_val.clone(), x_sym_val.clone(), rest_form],
         //     true,
         // )));
         // let threaded_list = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![cons_sym_val.clone(), first_form, cons_x_rest], true),
+        //     self.alloc_list_from_items_or_list(vec![cons_sym_val.clone(), first_form, cons_x_rest], true),
         // ));
-        // let simple_thread = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let simple_thread = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         list_sym_val.clone(),
         //         form_sym_val.clone(),
@@ -421,12 +420,12 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let threading_if = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let threading_if = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![if_sym_val.clone(), list_check, threaded_list, simple_thread],
         //     true,
         // )));
 
-        // let recursive_thread = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let recursive_thread = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         thread_first_sym_val.clone(),
         //         threaded_sym_val.clone(),
@@ -435,7 +434,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let let_bindings = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let let_bindings = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         form_sym_val,
         //         first_forms,
@@ -447,12 +446,12 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let let_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let let_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![let_sym_val.clone(), let_bindings, recursive_thread],
         //     true,
         // )));
 
-        // let thread_first_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_first_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         if_sym_val.clone(),
         //         empty_forms_check,
@@ -486,15 +485,15 @@ impl BlinkVM {
 
         // // Pre-build all the pieces
         // let x_list = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![list_sym_val.clone(), x_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![list_sym_val.clone(), x_sym_val.clone()], true),
         // ));
         // let form_plus_x = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![concat_sym_val, form_sym_val.clone(), x_list], true),
+        //     self.alloc_list_from_items_or_list(vec![concat_sym_val, form_sym_val.clone(), x_list], true),
         // ));
         // let list_check_form = ValueRef::Heap(GcPtr::new(
-        //     self.alloc_vec_or_list(vec![list_check_sym_val.clone(), form_sym_val.clone()], true),
+        //     self.alloc_list_from_items_or_list(vec![list_check_sym_val.clone(), form_sym_val.clone()], true),
         // ));
-        // let simple_thread_last = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let simple_thread_last = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         list_sym_val.clone(),
         //         form_sym_val.clone(),
@@ -504,7 +503,7 @@ impl BlinkVM {
         // )));
 
         // // Build the conditional for thread-last
-        // let thread_last_if = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_last_if = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         if_sym_val.clone(),
         //         list_check_form,
@@ -514,7 +513,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let thread_last_recursive = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_last_recursive = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         thread_last_sym_val.clone(),
         //         threaded_sym_val.clone(),
@@ -523,7 +522,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let thread_last_let_bindings = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_last_let_bindings = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         form_sym_val.clone(),
         //         first_forms.clone(),
@@ -535,7 +534,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let thread_last_let_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_last_let_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         let_sym_val.clone(),
         //         thread_last_let_bindings,
@@ -544,7 +543,7 @@ impl BlinkVM {
         //     true,
         // )));
 
-        // let thread_last_body = ValueRef::Heap(GcPtr::new(self.alloc_vec_or_list(
+        // let thread_last_body = ValueRef::Heap(GcPtr::new(self.alloc_list_from_items_or_list(
         //     vec![
         //         if_sym_val,
         //         empty_forms_check.clone(),

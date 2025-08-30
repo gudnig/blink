@@ -77,6 +77,7 @@ impl GcPtr {
             TypeTag::Env => HeapValue::Env(self.read_env()),
             TypeTag::Closure => HeapValue::Closure(self.read_closure()),
             TypeTag::Macro => HeapValue::Macro(self.read_macro()),
+            TypeTag::ListNode => unreachable!(), // should not happen but if I want to support it it'd need to create a new header
         }
     }
 
@@ -341,19 +342,9 @@ impl GcPtr {
                 return None;
             }
             
-            // Use the VM's safe API instead of direct memory access
+            // Use the VM's list API instead of vector API
             if let Some(vm) = GLOBAL_VM.get() {
-                let length = vm.vector_get_length(*obj_ref);
-                let mut items = Vec::with_capacity(length as usize);
-                
-                for i in 0..length {
-                    match vm.vector_get_at(*obj_ref, i) {
-                        Ok(item) => items.push(item),
-                        Err(_) => return None, // Bounds error shouldn't happen
-                    }
-                }
-                
-                Some(items)
+                Some(vm.list_to_vec(*obj_ref))
             } else {
                 None
             }
@@ -385,6 +376,46 @@ impl GcPtr {
                 }
                 
                 Some(items)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Get map contents using the new heap API
+    pub fn get_map(&self) -> Option<BlinkHashMap> {
+        if let GcPtr(obj_ref) = self {
+            // Check if this is actually a map
+            let type_tag = BlinkObjectModel::get_type_tag(*obj_ref);
+            if type_tag != TypeTag::Map {
+                return None;
+            }
+            
+            // Use the VM's map API to convert to BlinkHashMap
+            if let Some(vm) = GLOBAL_VM.get() {
+                Some(vm.map_to_blink_hash_map(*obj_ref))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    /// Get set contents using the new heap API
+    pub fn get_set(&self) -> Option<BlinkHashSet> {
+        if let GcPtr(obj_ref) = self {
+            // Check if this is actually a set
+            let type_tag = BlinkObjectModel::get_type_tag(*obj_ref);
+            if type_tag != TypeTag::Set {
+                return None;
+            }
+            
+            // Use the VM's set API to convert to BlinkHashSet
+            if let Some(vm) = GLOBAL_VM.get() {
+                Some(vm.hashset_to_blink_hash_set(*obj_ref))
             } else {
                 None
             }

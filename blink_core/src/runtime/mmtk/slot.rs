@@ -30,7 +30,6 @@ impl Slot for BlinkSlot {
     }
     
     fn store(&self, object: ObjectReference) {
-        println!("BlinkSlot::store called for {:?}", self);
         unsafe {
             match self {
                 BlinkSlot::ObjectRef(addr) => {

@@ -184,7 +184,6 @@ impl BlinkVM {
         };
 
         vm.module_registry.write().register_module(core_module);
-        vm.initialize_side_metadata();
 
         vm.register_special_forms();
         vm.init_global_env();
@@ -194,11 +193,6 @@ impl BlinkVM {
         vm.register_complex_macros(core_module_id);
         
         vm
-    }
-
-    fn initialize_side_metadata(&self) {
-        let side_metadata_specs = BlinkObjectModel::register_side_metadata_specs();
-        let side_metadata_specs = mmtk::util::metadata::extract_side_metadata(&vm_global_specs);
     }
 
     pub fn new_arc() -> Arc<BlinkVM> {

@@ -165,32 +165,70 @@ pub fn native_cons(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
     if args.len() != 2 {
         return EvalResult::Value(ctx.arity_error(2, args.len(), "cons"));
     }
-    let mut new_list = vec![args[1]];
-    let old_list =  if let Some(v)  = args[0].get_list(){
-        v 
-    } else if let Some(v) = args[1].get_vec(){
-        v
+    
+    let element = args[0];
+    let collection = args[1];
+    
+    // Create a new list with element prepended to collection
+    if collection.is_list() {
+        if let ValueRef::Heap(gc_ptr) = collection {
+            let list_ref = gc_ptr.0;
+            // Convert list to vector, prepend element, then create new list
+            let list_items = ctx.vm().list_to_vec(list_ref);
+            let mut new_items = vec![element];
+            new_items.extend(list_items);
+            EvalResult::Value(ctx.list(new_items))
+        } else {
+            EvalResult::Value(ctx.eval_error("Invalid list reference"))
+        }
+    } else if collection.is_vec() {
+        if let ValueRef::Heap(gc_ptr) = collection {
+            let vec_ref = gc_ptr.0;
+            let mut items = vec![element];
+            
+            // Add all vector elements
+            let length = ctx.vm().vector_get_length(vec_ref);
+            for i in 0..length {
+                match ctx.vm().vector_get_at(vec_ref, i) {
+                    Ok(item) => items.push(item),
+                    Err(e) => return EvalResult::Value(ctx.eval_error(&e)),
+                }
+            }
+            
+            EvalResult::Value(ctx.list(items))
+        } else {
+            EvalResult::Value(ctx.eval_error("Invalid vector reference"))
+        }
     } else {
-        return EvalResult::Value(ctx.eval_error("second argument to cons must be a list or vector"));
-    };
-    new_list.extend(old_list);
-    EvalResult::Value(ctx.list(new_list))
+        EvalResult::Value(ctx.eval_error("second argument to cons must be a list or vector"))
+    }
 }
 
 pub fn native_concat(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
+    let mut all_items = Vec::new();
     
-    
-    let mut lists = vec![];
     for arg in args {
-        if let Some(v) = arg.get_list(){
-            lists.push(v);
-        } else if let Some(v) = arg.get_vec(){
-            lists.push(v);
+        if arg.is_list() {
+            if let ValueRef::Heap(gc_ptr) = arg {
+                let list_ref = gc_ptr.0;
+                let items = ctx.vm().list_to_vec(list_ref);
+                all_items.extend(items);
+            }
+        } else if arg.is_vec() {
+            if let ValueRef::Heap(gc_ptr) = arg {
+                let vec_ref = gc_ptr.0;
+                let length = ctx.vm().vector_get_length(vec_ref);
+                for i in 0..length {
+                    match ctx.vm().vector_get_at(vec_ref, i) {
+                        Ok(item) => all_items.push(item),
+                        Err(_) => continue, // Skip invalid items
+                    }
+                }
+            }
         }
     }
-    let new_list = lists.concat();
     
-    EvalResult::Value(ctx.list(new_list))
+    EvalResult::Value(ctx.list(all_items))
 }
 
 pub fn native_first(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
@@ -198,24 +236,30 @@ pub fn native_first(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult 
         return EvalResult::Value(ctx.arity_error(1, args.len(), "first"));
     }
     
-    match args[0].get_list() {
-        Some(list) => {
-            if list.is_empty() {
-                EvalResult::Value(ctx.nil())
-            } else {
-                EvalResult::Value(list[0])
+    let collection = args[0];
+    
+    if collection.is_list() {
+        if let ValueRef::Heap(gc_ptr) = collection {
+            let list_ref = gc_ptr.0;
+            match ctx.vm().list_first(list_ref) {
+                Ok(value) => EvalResult::Value(value),
+                Err(_) => EvalResult::Value(ctx.nil()), // Empty list returns nil
             }
-        },
-        None => match args[0].get_vec() {
-            Some(vec) => {
-                if vec.is_empty() {
-                    EvalResult::Value(ctx.nil())
-                } else {
-                    EvalResult::Value(vec[0])
-                }
-            },
-            None => EvalResult::Value(ctx.eval_error("first expects a list or vector"))
+        } else {
+            EvalResult::Value(ctx.eval_error("Invalid list reference"))
         }
+    } else if collection.is_vec() {
+        if let ValueRef::Heap(gc_ptr) = collection {
+            let vec_ref = gc_ptr.0;
+            match ctx.vm().vector_get_at(vec_ref, 0) {
+                Ok(value) => EvalResult::Value(value),
+                Err(_) => EvalResult::Value(ctx.nil()), // Empty vector returns nil
+            }
+        } else {
+            EvalResult::Value(ctx.eval_error("Invalid vector reference"))
+        }
+    } else {
+        EvalResult::Value(ctx.eval_error("first expects a list or vector"))
     }
 }
 
