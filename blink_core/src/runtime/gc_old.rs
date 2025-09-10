@@ -912,7 +912,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     }
 
     pub fn alloc_closure(&self, closure_object: ClosureObject) -> ObjectReference {
-        println!("DEBUG: Storing closure with {} upvalues", closure_object.upvalues.len());
         self.with_mutator(|mutator| {
             // Calculate padding needed for ValueRef alignment
             let template_size = std::mem::size_of::<ObjectReference>();

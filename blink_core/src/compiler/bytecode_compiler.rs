@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     error::BlinkError,
     runtime::{BlinkVM, CompiledFunction, LabelPatch, Macro, Opcode},
-    value::{unpack_immediate, GcPtr, ImmediateValue, ValueRef},
+    value::{unpack_immediate, GcPtr, HeapValue, ImmediateValue, ValueRef},
 };
 
 #[derive(Debug, Clone)]
@@ -517,7 +517,6 @@ impl BytecodeCompiler {
 
         self.enter_scope();
 
-        self.debug_closure_compilation("After entering function scope");
 
         // If named function, bind the name to itself for recursion
         // We'll use a special register slot that gets set up at function call time
@@ -538,14 +537,12 @@ impl BytecodeCompiler {
             self.bind_local_symbol(param_symbol, target_reg);
         }
 
-        self.debug_closure_compilation("After binding parameters");
         self.next_register = (param_start_reg + param_symbols.len()) as u8;
 
         // Analyze closure requirements - no need for upvalue array register anymore
         let body_exprs = &args[(params_index + 1)..];
         self.analyze_closures(body_exprs)?;
 
-        self.debug_closure_compilation("After analyzing closures");
 
         // For named functions, emit instruction to load self-reference
         if let Some(_name_symbol) = function_name {
@@ -730,7 +727,6 @@ impl BytecodeCompiler {
     }
 
     fn find_free_variables(&mut self, expr: ValueRef) -> Result<(), String> {
-        println!("🔍 Analyzing expression: {}", expr);
 
         match expr {
             ValueRef::Immediate(packed) => {
@@ -772,68 +768,23 @@ impl BytecodeCompiler {
             }
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
-                    println!("   → Analyzing list with {} items", list_items.len());
                     // Recursively analyze ALL list elements
-                    for (i, &item) in list_items.iter().enumerate() {
-                        println!("     Analyzing list item {}: {}", i, item);
+                    for &item in list_items.iter() {
                         self.find_free_variables(item)?;
                     }
                 } else if let Some(vec_items) = expr.get_vec() {
-                    println!("   → Analyzing vector with {} items", vec_items.len());
                     // Recursively analyze vector elements
-                    for (i, &item) in vec_items.iter().enumerate() {
-                        println!("     Analyzing vector item {}: {}", i, item);
+                    for &item in vec_items.iter() {
                         self.find_free_variables(item)?;
                     }
-                } else {
-                    println!("   → Heap value (not list/vector)");
                 }
             }
             _ => {
-                println!("   → Other value type");
             }
         }
         Ok(())
     }
 
-    fn debug_closure_compilation(&self, context: &str) {
-        println!("=== Debug: {} ===", context);
-        println!("Scope stack levels: {}", self.scope_stack.len());
-
-        for (level, scope) in self.scope_stack.iter().enumerate() {
-            println!("Scope level {}: {} bindings", level, scope.len());
-            for (&symbol_id, &register) in scope {
-                let symbol_name = self
-                    .vm
-                    .symbol_table
-                    .read()
-                    .get_symbol(symbol_id)
-                    .unwrap_or_default();
-                println!(
-                    "  {} (id: {}) -> register {}",
-                    symbol_name, symbol_id, register
-                );
-            }
-        }
-
-        println!("Captured symbols: {} total", self.captured_symbols.len());
-        for &(symbol_id, _) in &self.captured_symbols {
-            let symbol_name = self
-                .vm
-                .symbol_table
-                .read()
-                .get_symbol(symbol_id)
-                .unwrap_or_default();
-            println!("  Captured: {} (id: {})", symbol_name, symbol_id);
-
-            if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
-                println!("    Found in parent scope at register: {}", parent_reg);
-            } else {
-                println!("    ERROR: NOT FOUND in parent scopes!");
-            }
-        }
-        println!("=====================================");
-    }
 
     fn resolve_in_parent_scopes(&self, symbol_id: u32) -> Option<u8> {
         // Look through LOCAL scope stack to find symbol in parent scopes
@@ -862,13 +813,8 @@ impl BytecodeCompiler {
     }
 
     fn create_closure_object(&mut self, compiled_fn: CompiledFunction) -> Result<u8, String> {
-        println!(
-            "DEBUG: create_closure_object called with {} captured symbols",
-            self.captured_symbols.len()
-        );
 
         if self.captured_symbols.is_empty() {
-            println!("DEBUG: Taking simple function path (no upvalues)");
             // Simple function - no upvalues
             let func_obj = self.vm.alloc_user_defined_fn(compiled_fn);
             let result_reg = self.alloc_register();
@@ -876,7 +822,6 @@ impl BytecodeCompiler {
             Ok(result_reg)
         } else {
             // Closure - emit single instruction with all upvalue capture info
-            println!("DEBUG: Taking closure path with upvalues");
             // First, allocate the template CompiledFunction
             let template_obj = self.vm.alloc_user_defined_fn(compiled_fn);
             let template_reg = self.alloc_register();
@@ -1325,7 +1270,8 @@ impl BytecodeCompiler {
             "unquote-splicing" => self.compile_unquote_splicing(args),
             "future" => self.compile_future(args),
             "complete" => self.compile_complete(args),
-            //"go" => self.compile_go(args),
+            "go" => self.compile_go(args),
+            "deref" => self.compile_deref(args),
             _ => Err(format!("Special form '{}' not implemented", symbol_name)),
         }
     }
@@ -1362,6 +1308,94 @@ impl BytecodeCompiler {
         self.emit_u8(result_reg); // Result register (returns success/error)
         self.emit_u8(future_reg); // Future to complete
         self.emit_u8(value_reg); // Value to complete with
+
+        Ok(result_reg)
+    }
+
+    fn compile_go(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() != 1 {
+            return Err("go expects exactly 1 argument: expression to run in goroutine".to_string());
+        }
+
+        let func_reg = if self.is_function_expression(args[0])? {
+            // If it's already a function expression like (fn [] ...), use it directly
+            self.compile_expression(args[0])?
+        } else {
+            // Otherwise, wrap the expression in an implicit (fn [] ...)
+            self.compile_implicit_goroutine_function(args[0])?
+        };
+
+        let result_reg = self.alloc_register();
+
+        // Emit Spawn opcode
+        self.emit_u8(Opcode::Spawn as u8);
+        self.emit_u8(result_reg); // Result register (returns goroutine id) 
+        self.emit_u8(func_reg); // Function to execute in goroutine
+
+        Ok(result_reg)
+    }
+
+    /// Check if an expression is already a function (fn [] ...) or macro
+    fn is_function_expression(&self, expr: ValueRef) -> Result<bool, String> {
+        match expr {
+            ValueRef::Heap(gc_ptr) => {
+                let heap_val = gc_ptr.to_heap_value();
+                match heap_val {
+                    // Check if it's a list starting with "fn" 
+                    HeapValue::List(list) if !list.is_empty() => {
+                        if let ValueRef::Immediate(packed) = list[0] {
+                            if let ImmediateValue::Symbol(symbol_id) = unpack_immediate(packed) {
+                                let symbol_name = self.vm.symbol_table.read().get_symbol(symbol_id);
+                                if let Some(name) = symbol_name {
+                                    return Ok(name == "fn");
+                                }
+                            }
+                        }
+                        Ok(false)
+                    }
+                    // Could also be a symbol referring to an existing function
+                    _ => Ok(false)
+                }
+            }
+            ValueRef::Immediate(packed) => {
+                // Could be a symbol referring to a function
+                Ok(false)
+            }
+            _ => Ok(false)
+        }
+    }
+
+    /// Compile an expression wrapped in an implicit (fn [] ...)  
+    fn compile_implicit_goroutine_function(&mut self, body_expr: ValueRef) -> Result<u8, String> {
+        // Create a synthetic (fn [] body_expr) and compile it
+        // Build the parameter vector (empty)
+        let empty_params = self.vm.vector_value(vec![]);
+        
+        // Build the synthetic fn call: (fn [] body_expr)
+        let fn_symbol = ValueRef::symbol(self.vm.symbol_table.write().intern("fn"));
+        let synthetic_fn_call = self.vm.list_value(vec![fn_symbol, empty_params, body_expr]);
+        
+        // Compile the synthetic function
+        self.compile_expression(synthetic_fn_call)
+    }
+
+    fn compile_deref(&mut self, args: &[ValueRef]) -> Result<u8, String> {
+        if args.len() != 1 {
+            return Err("deref expects exactly 1 argument".to_string());
+        }
+
+        // Compile the expression to deref
+        let value_reg = self.compile_expression(args[0])?;
+
+        let result_reg = self.alloc_register();
+
+        // Emit Await opcode - the runtime will handle type checking:
+        // - If it's a future: suspend and await
+        // - If it's an atom/ref: get the value  
+        // - If it's a regular value: return as-is
+        self.emit_u8(Opcode::Await as u8);
+        self.emit_u8(result_reg); // Result register 
+        self.emit_u8(value_reg);  // Value to deref
 
         Ok(result_reg)
     }

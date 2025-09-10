@@ -2,6 +2,7 @@ mod vector;
 mod list;
 mod map;
 mod set;
+mod future;
 
 use mmtk::util::Address;
 pub use list::*;
@@ -737,9 +738,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
         }
     }
 
-    pub fn alloc_future(&self, future: BlinkFuture) -> ObjectReference {
-        Self::fake_object_reference(0x70000)
-    }
 
    
 
@@ -803,7 +801,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
     }
 
     pub fn alloc_closure(&self, closure_object: ClosureObject) -> ObjectReference {
-        println!("DEBUG: Storing closure with {} upvalues", closure_object.upvalues.len());
         self.with_mutator(|mutator| {
             // Calculate padding needed for ValueRef alignment
             let template_size = std::mem::size_of::<ObjectReference>();

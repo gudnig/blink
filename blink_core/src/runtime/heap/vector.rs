@@ -388,14 +388,11 @@ impl BlinkVM {
     
     // Debug version of vector access
     pub fn vector_get_length_debug(&self, vector: ObjectReference) -> u32 {
-        println!("🔍 DEBUG: Getting length of vector: {:?}", vector);
         
         unsafe {
             let header_ptr = vector.to_raw_address().as_usize() as *const u8;
-            println!("🔍 DEBUG: Header ptr: {:p}", header_ptr);
             
             let length = std::ptr::read_unaligned(header_ptr as *const u32);
-            println!("🔍 DEBUG: Length read: {}", length);
             
             length
         }

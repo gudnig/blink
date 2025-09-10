@@ -4,9 +4,9 @@
 
 - [ ] Basic compilation
   - [x] Expressions to bytecode with register allocation
-- [ ] Arithmetic
+- [x] Arithmetic
   - [x] +, -, *, / opcodes compile and execute
-- [ ] Comparison operators
+- [x] Comparison operators
   - [x] <, >, <=, >=, !=, =
 - [ ] Special forms
   - [x] def - Global variable definition

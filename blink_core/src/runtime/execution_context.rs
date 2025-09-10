@@ -1,19 +1,18 @@
-use mmtk::util::ObjectReference;
-use std::sync::Arc;
 use crate::compiler::{BytecodeCompiler, MacroExpander};
 use crate::{
-    
     error::BlinkError,
     future::BlinkFuture,
     runtime::{
-        BlinkVM, ClosureObject, CompiledFunction, ContextualBoundary, EvalResult, Opcode, TypeTag,
-        ValueBoundary,
+        blink_runtime::GLOBAL_RUNTIME, BlinkVM, ClosureObject, CompiledFunction,
+        ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary,
     },
     value::{
         unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn,
         NativeContext, ValueRef,
     },
 };
+use mmtk::util::ObjectReference;
+use std::sync::Arc;
 
 // Updated call frame for byte-sized bytecode
 #[derive(Clone, Debug)]
@@ -49,6 +48,7 @@ enum InstructionResult {
     Suspend {
         future: BlinkFuture,
         resume_pc: usize,
+        dest_register: u8, // The register where the result should be stored when resumed
     },
 }
 
@@ -69,9 +69,10 @@ struct PendingUpvalue {
 #[derive(Clone, Debug)]
 pub struct ExecutionContext {
     pub vm: Arc<BlinkVM>,
-    current_module: u32,
+    pub current_module: u32,
     pub register_stack: Vec<ValueRef>,
     pub call_stack: Vec<CallFrame>,
+    pub current_goroutine_id: Option<u32>, // Track the current goroutine ID
 }
 
 impl ExecutionContext {
@@ -81,6 +82,7 @@ impl ExecutionContext {
             current_module,
             register_stack: Vec::new(),
             call_stack: Vec::new(),
+            current_goroutine_id: None, // Default to no goroutine (main thread execution)
         }
     }
 
@@ -116,6 +118,308 @@ impl ExecutionContext {
         let res = self.execute().map_err(|e| BlinkError::eval(e));
 
         res
+    }
+
+    /// Execute a single step (one instruction) and return whether to continue
+    pub fn execute_single_step(&mut self) -> Result<bool, String> {
+        if self.call_stack.is_empty() {
+            return Ok(false); // No more work to do
+        }
+
+        // Get current frame (don't pop yet)
+        let mut current_frame = if let Some(frame) = self.call_stack.last().cloned() {
+            frame
+        } else {
+            return Ok(false);
+        };
+
+        match &current_frame.func {
+            FunctionRef::CompiledFunction(compiled_fn, obj_ref) => {
+                // Check for end of function
+                if current_frame.pc >= compiled_fn.bytecode.len() {
+                    self.handle_function_completion()?;
+                    return Ok(!self.call_stack.is_empty());
+                }
+
+                let opcode = Opcode::from_u8(compiled_fn.bytecode[current_frame.pc])?;
+                current_frame.pc += 1;
+
+                let instruction_result = Self::execute_instruction(
+                    &mut self.register_stack,
+                    &self.vm.as_ref(),
+                    current_frame.current_module,
+                    opcode,
+                    &compiled_fn.bytecode,
+                    &compiled_fn.constants,
+                    current_frame.reg_start,
+                    &mut current_frame.pc,
+                )?;
+
+                self.handle_instruction_result(instruction_result, current_frame)?;
+                Ok(true)
+            }
+            FunctionRef::Native(tagged_ptr) => {
+                // Native functions complete in one step
+                self.execute_native_function(*tagged_ptr)?;
+                Ok(!self.call_stack.is_empty())
+            }
+            FunctionRef::Closure(closure_obj, obj_ref) => {
+                let template_fn = GcPtr::new(closure_obj.template).read_callable();
+
+                if current_frame.pc >= template_fn.bytecode.len() {
+                    self.handle_function_completion()?;
+                    return Ok(!self.call_stack.is_empty());
+                }
+
+                let opcode = Opcode::from_u8(template_fn.bytecode[current_frame.pc])?;
+                current_frame.pc += 1;
+
+                let instruction_result = Self::execute_instruction(
+                    &mut self.register_stack,
+                    &self.vm,
+                    self.current_module,
+                    opcode,
+                    &template_fn.bytecode,
+                    &template_fn.constants,
+                    current_frame.reg_start,
+                    &mut current_frame.pc,
+                )?;
+
+                self.handle_instruction_result(instruction_result, current_frame)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Handle completion of a function (natural end or explicit return)
+    fn handle_function_completion(&mut self) -> Result<(), String> {
+        let completed_frame = self.call_stack.pop().unwrap();
+        let return_value = self.register_stack[completed_frame.reg_start];
+
+        // Clean up registers
+        self.register_stack.truncate(completed_frame.reg_start);
+
+        if !self.call_stack.is_empty() {
+            // Store return value in caller's register 0
+            if let Some(caller_frame) = self.call_stack.last() {
+                self.register_stack[caller_frame.reg_start] = return_value;
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute a native function and handle its completion
+    fn execute_native_function(&mut self, tagged_ptr: usize) -> Result<(), String> {
+        // Get arguments from registers (skip register 0 which is for return value)
+        let current_frame = self.call_stack.last().unwrap();
+        let arg_count = current_frame.reg_count as usize - 1; // Subtract 1 for return register
+        let mut args = Vec::with_capacity(arg_count);
+
+        for i in 0..arg_count {
+            args.push(self.register_stack[current_frame.reg_start + 1 + i]);
+        }
+
+        // Decode tagged pointer and call appropriate function type
+        let ptr = tagged_ptr & !1; // Clear the tag bit
+        let return_value = if tagged_ptr & 1 == 0 {
+            // Tag 0 = Isolated function
+            let boxed_fn_ptr = ptr as *const IsolatedNativeFn;
+            let boxed_fn = unsafe { &*boxed_fn_ptr };
+
+            // Convert args to isolated values and call
+            let mut boundary = ContextualBoundary::new(self.vm.clone());
+            let isolated_args: Result<Vec<_>, _> = args
+                .iter()
+                .map(|arg| boundary.extract_isolated(*arg))
+                .collect();
+
+            match isolated_args {
+                Ok(isolated_args) => match boxed_fn(isolated_args) {
+                    Ok(result) => boundary.alloc_from_isolated(result),
+                    Err(e) => self.vm.eval_error(&e.to_string()),
+                },
+                Err(e) => self.vm.eval_error(&e.to_string()),
+            }
+        } else {
+            // Tag 1 = Contextual function
+            let boxed_fn_ptr = ptr as *const ContextualNativeFn;
+            let boxed_fn = unsafe { &*boxed_fn_ptr };
+            let mut ctx = NativeContext::new(&self.vm);
+
+            // Call function and extract value (ignore suspension for now)
+            match boxed_fn(args, &mut ctx) {
+                EvalResult::Value(val) => val,
+                EvalResult::Suspended { .. } => {
+                    // Convert suspension to error for now
+                    self.vm
+                        .eval_error("Native function suspension not supported")
+                }
+            }
+        };
+
+        // Native function completed - pop frame and handle return
+        self.handle_function_completion()?;
+
+        // Update return value after frame cleanup
+        if !self.call_stack.is_empty() {
+            if let Some(caller_frame) = self.call_stack.last() {
+                self.register_stack[caller_frame.reg_start] = return_value;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle the result of executing an instruction
+    fn handle_instruction_result(
+        &mut self,
+        instruction_result: InstructionResult,
+        mut current_frame: CallFrame,
+    ) -> Result<(), String> {
+        match instruction_result {
+            InstructionResult::Continue => {
+                // Update the frame in the stack
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::Return => {
+                self.handle_function_completion()?;
+            }
+            InstructionResult::Call(new_frame) => {
+                // Update current frame PC, then push new frame
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+                self.call_stack.push(new_frame);
+            }
+            InstructionResult::SetupSelfReference(reg) => {
+                // Handle self-reference setup here where we have access to function context
+                if let FunctionRef::CompiledFunction(_, Some(obj_ref))
+                | FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func
+                {
+                    let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                    self.register_stack[current_frame.reg_start + reg as usize] = function_value;
+                } else {
+                    return Err("SetupSelfReference: no function object available".to_string());
+                }
+
+                // Update frame PC and continue
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::LoadUpvalue {
+                dest_register,
+                upvalue_index,
+            } => {
+                match &current_frame.func {
+                    FunctionRef::Closure(closure_obj, _) => {
+                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                *upvalue;
+                        } else {
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                        }
+                    }
+                    FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
+                        let closure = GcPtr(*obj_ref).read_closure();
+                        if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                *upvalue;
+                        } else {
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                        }
+                    }
+                    _ => return Err("LoadUpvalue called on non-closure function".to_string()),
+                }
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::StoreUpvalue {
+                upvalue_index,
+                src_register,
+            } => {
+                let value = self.register_stack[current_frame.reg_start + src_register as usize];
+
+                match &current_frame.func {
+                    FunctionRef::Closure(_, Some(obj_ref))
+                    | FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
+                        GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                    }
+                    _ => {
+                        return Err(
+                            "StoreUpvalue called on function without object reference".to_string()
+                        )
+                    }
+                }
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::CreateClosure {
+                dest_register,
+                template_register,
+                captures,
+            } => {
+                // Get template
+                let template_value =
+                    self.register_stack[current_frame.reg_start + template_register as usize];
+                let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                    heap_ptr.0
+                } else {
+                    return Err("Template must be a heap object".to_string());
+                };
+
+                // Capture upvalues directly from registers
+                let mut upvalues = Vec::new();
+                for (parent_reg, _symbol_id) in captures {
+                    let captured_value =
+                        self.register_stack[current_frame.reg_start + parent_reg as usize];
+                    upvalues.push(captured_value);
+                }
+
+                // Create closure
+                let closure_obj = ClosureObject {
+                    template: template_obj_ref,
+                    upvalues,
+                };
+
+                let closure_ref = self.vm.alloc_closure(closure_obj);
+                self.register_stack[current_frame.reg_start + dest_register as usize] =
+                    ValueRef::Heap(GcPtr::new(closure_ref));
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::Suspend {
+                future,
+                resume_pc: _resume_pc,
+                dest_register,
+            } => {
+                // Save the current execution state for resumption
+                use crate::future::SuspendedContinuation;
+
+                let continuation = SuspendedContinuation {
+                    goroutine_id: self.current_goroutine_id.unwrap_or(0) as u64,
+                    dest_register,
+                    call_stack: self.call_stack.clone(),
+                    register_stack: self.register_stack.clone(),
+                    current_module: self.current_module,
+                };
+
+                // Register continuation with the future
+                future.add_continuation_waiter(continuation);
+
+                // For single-step execution, we should return an error to signal suspension
+                return Err("SUSPENDED".to_string());
+            }
+        }
+        Ok(())
     }
 
     // Main execution loop - processes all frames until stack is empty
@@ -271,7 +575,6 @@ impl ExecutionContext {
                         template_register,
                         captures,
                     } => {
-                        println!("DEBUG: CreateClosure with {} captures: ", captures.len());
                         for capture in captures.iter() {
                             print!(" {:?} ", capture);
                         }
@@ -291,7 +594,6 @@ impl ExecutionContext {
                                 self.register_stack[current_frame.reg_start + parent_reg as usize];
                             upvalues.push(captured_value);
                         }
-                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
                         for upvalue in upvalues.iter() {
                             println!(" {}", upvalue);
                         }
@@ -310,7 +612,28 @@ impl ExecutionContext {
                             frame.pc = current_frame.pc;
                         }
                     }
-                    InstructionResult::Suspend { future, resume_pc } => todo!(),
+                    InstructionResult::Suspend {
+                        future,
+                        resume_pc: _resume_pc,
+                        dest_register,
+                    } => {
+                        // Save the current execution state for resumption
+                        use crate::future::SuspendedContinuation;
+
+                        let continuation = SuspendedContinuation {
+                            goroutine_id: self.current_goroutine_id.unwrap_or(0) as u64,
+                            dest_register,
+                            call_stack: self.call_stack.clone(),
+                            register_stack: self.register_stack.clone(),
+                            current_module: self.current_module,
+                        };
+
+                        // Register continuation with the future
+                        future.add_continuation_waiter(continuation);
+
+                        // Return early - execution suspended
+                        return Ok(ValueRef::nil()); // Placeholder - goroutine will resume later
+                    }
                 }
             } else if let FunctionRef::Native(tagged_ptr) = &current_frame.func {
                 // Handle native function execution using tagged pointer
@@ -514,7 +837,6 @@ impl ExecutionContext {
                             upvalues.push(captured_value);
                         }
 
-                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
                         for upvalue in upvalues.iter() {
                             println!("{}", upvalue);
                         }
@@ -533,7 +855,28 @@ impl ExecutionContext {
                             frame.pc = current_frame.pc;
                         }
                     }
-                    InstructionResult::Suspend { future, resume_pc } => todo!(),
+                    InstructionResult::Suspend {
+                        future,
+                        resume_pc: _resume_pc,
+                        dest_register,
+                    } => {
+                        // Save the current execution state for resumption
+                        use crate::future::SuspendedContinuation;
+
+                        let continuation = SuspendedContinuation {
+                            goroutine_id: self.current_goroutine_id.unwrap_or(0) as u64,
+                            dest_register,
+                            call_stack: self.call_stack.clone(),
+                            register_stack: self.register_stack.clone(),
+                            current_module: self.current_module,
+                        };
+
+                        // Register continuation with the future
+                        future.add_continuation_waiter(continuation);
+
+                        // Return early - execution suspended
+                        return Ok(ValueRef::nil()); // Placeholder - goroutine will resume later
+                    }
                 }
 
                 continue; // Continue to next iteration of the main execution loop
@@ -964,39 +1307,39 @@ impl ExecutionContext {
                 Ok(InstructionResult::Continue)
             }
             Opcode::Spawn => {
-                // let result_reg = bytecode[*pc] as usize;
-                // let func_index = u32::from_le_bytes([
-                //     bytecode[*pc + 1],
-                //     bytecode[*pc + 2],
-                //     bytecode[*pc + 3],
-                //     bytecode[*pc + 4],
-                // ]);
-                // *pc += 5;
+                let result_reg = bytecode[*pc] as usize;
+                let func_reg = bytecode[*pc + 1] as usize;
+                *pc += 2;
 
-                // // Get compiled function from constants
-                // let func_ref = constants[func_index as usize];
+                let func_value = register_stack[reg_base + func_reg];
 
-                // if let Some(compiled_func) = func_ref .get_compiled_function() {
-                //     // Spawn new goroutine with the compiled function
-                // /let goroutine_id = scheduler.spawn(self.clone(), move |vm| {
-                //         vm.execute_function(compiled_func, &[])
-                //     });
+                // Access the global runtime to spawn goroutine
+                if let Some(runtime) = GLOBAL_RUNTIME.get() {
+                    match runtime.spawn_goroutine(func_value) {
+                        Ok(goroutine_id) => {
+                            register_stack[reg_base + result_reg] =
+                                ValueRef::number(goroutine_id as f64);
+                        }
+                        Err(error) => {
+                            return Err(format!("Failed to spawn goroutine: {}", error));
+                        }
+                    }
+                } else {
+                    return Err("Runtime not initialized - cannot spawn goroutine".to_string());
+                }
 
-                //     registers[result_reg] = ValueRef::number(goroutine_id as f64);
                 Ok(InstructionResult::Continue)
-                // } else {
-                //     return Err(RuntimeError::TypeError("Expected compiled function".to_string()));
-                // }
             }
             Opcode::Await => {
                 let result_reg = bytecode[*pc] as usize;
-                let future_reg = bytecode[*pc + 1] as usize;
+                let value_reg = bytecode[*pc + 1] as usize;
                 *pc += 2;
 
-                let future_ref = register_stack[reg_base + future_reg];
+                let value_ref = register_stack[reg_base + value_reg];
 
-                if let Some(future) = future_ref.get_future() {
-                    // Try fast path first
+                // Handle different types gracefully
+                if let Some(future) = value_ref.get_future() {
+                    // It's a future - try fast path first
                     if let Some(value) = future.try_poll() {
                         // Future is ready - store result and continue
                         register_stack[reg_base + result_reg] = value;
@@ -1006,10 +1349,15 @@ impl ExecutionContext {
                         Ok(InstructionResult::Suspend {
                             future: future.clone(),
                             resume_pc: *pc, // Resume after this instruction
+                            dest_register: result_reg as u8, // Pass the destination register
                         })
                     }
                 } else {
-                    Err("Expected future".to_string())
+                    // Not a future - check if it's an atom/ref or just return the value
+                    // TODO: When atoms are implemented, add atom dereferencing here
+                    // For now, just return the value as-is (non-futures pass through unchanged)
+                    register_stack[reg_base + result_reg] = value_ref;
+                    Ok(InstructionResult::Continue)
                 }
             }
             Opcode::CreateFuture => {
@@ -1044,8 +1392,18 @@ impl ExecutionContext {
                     Err("Expected future".to_string())
                 }
             }
-            Opcode::Suspend => todo!(),
-            Opcode::Resume => todo!(),
+            Opcode::Suspend => {
+                // Suspend current execution - this will need coordination with scheduler
+                // For now, just continue execution
+                // TODO: Integrate with BlinkRuntime scheduler
+                Ok(InstructionResult::Continue)
+            }
+            Opcode::Resume => {
+                // Resume execution - this will need coordination with scheduler
+                // For now, just continue execution
+                // TODO: Integrate with BlinkRuntime scheduler
+                Ok(InstructionResult::Continue)
+            }
         }
     }
 

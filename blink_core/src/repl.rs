@@ -4,7 +4,7 @@ use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
 
 use crate::module::{Module, SerializedModuleSource};
 use crate::parser::{parse, tokenize};
-use crate::runtime::{BlinkVM, EvalResult, ExecutionContext, SymbolTable};
+use crate::runtime::{BlinkVM, BlinkRuntime, EvalResult, ExecutionContext, SymbolTable};
 use crate::value::{GcPtr, ParsedValue, ParsedValueWithPos, ValueRef};
 
 use parking_lot::RwLock;
@@ -39,6 +39,10 @@ pub async fn start_repl() {
     let user_module_name = vm_arc.symbol_table.write().intern("user");
     println!("user_module_name: {}", user_module_name);
     
+    // Initialize global runtime for goroutines
+    let _runtime = BlinkRuntime::init_global(vm_arc.clone(), user_module_name)
+        .expect("Failed to initialize global runtime");
+    
     let mut ctx = ExecutionContext::new(vm_arc.clone(), user_module_name);
 
     let user_module = Module {
@@ -54,6 +58,7 @@ pub async fn start_repl() {
     
 
     println!("🔮 Welcome to your blink REPL. Type 'exit' to quit.");
+    println!("💡 Tip: End a line with \\ to continue on the next line");
 
     loop {
         
@@ -119,23 +124,40 @@ fn read_multiline(
     ctx: &mut ExecutionContext,
 ) -> Result<ParsedValueWithPos, ReadError> {
     let mut lines = Vec::new();
+    let mut current_input = String::new();
 
     loop {
         let prompt = if lines.is_empty() { "λ> " } else { "... " };
         let line = rl.readline(prompt).map_err(|e| ReadError::Readline(e))?;
 
+        // Check if the line ends with a backslash (continuation character)
+        if line.ends_with('\\') {
+            // Remove the backslash and add the line content
+            let line_content = line[..line.len()-1].to_string();
+            current_input.push_str(&line_content);
+            current_input.push('\n');
+            lines.push(line_content);
+            continue;
+        }
+        
+        // Add the current line
+        current_input.push_str(&line);
         lines.push(line);
-        let code = lines.join("\n");
-
+        
+        // Try to parse the complete input
+        let code = current_input.clone();
         
         let mut symbol_table_guard = ctx.vm.symbol_table.write();
-        
         let reader_macros_guard = ctx.vm.reader_macros.write();
 
         match tokenize(&code).and_then(|mut toks| parse(&mut toks, &reader_macros_guard, &mut *symbol_table_guard)) {
             Ok(parsed) => return Ok(parsed),
-            Err(BlinkError { error_type: BlinkErrorType::Parse(ParseErrorType::UnclosedDelimiter(_message )), .. }) => continue,
-            Err(a) => return Err(ReadError::Blink(a)), // Let the main handler display the error
+            Err(BlinkError { error_type: BlinkErrorType::Parse(ParseErrorType::UnclosedDelimiter(_message )), .. }) => {
+                // Continue reading for unclosed delimiters
+                current_input.push('\n');
+                continue;
+            },
+            Err(a) => return Err(ReadError::Blink(a)),
         }
     }
 }
@@ -150,3 +172,4 @@ fn run_line(
     let ast =  vm.alloc_parsed_value(parsed);
     ctx.compile_and_execute(ast)
 }
+

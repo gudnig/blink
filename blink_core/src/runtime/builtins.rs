@@ -1,6 +1,6 @@
 use crate::{
     env::Env, native_functions::{
-        native_add, native_complete_future, native_concat, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_sub, native_type_of, native_vector
+        native_add, native_complete_future, native_concat, native_cons, native_div, native_eq, native_error, native_first, native_future, native_gc_stress, native_get, native_list, native_map_construct, native_mul, native_not, native_print, native_report_gc_stats, native_rest, native_run_scheduler, native_sub, native_type_of, native_vector
     }, runtime::{BlinkVM, EvalResult, Macro}, value::{pack_number, Callable, GcPtr, NativeContext, NativeFn, ValueRef}
 };
 
@@ -45,6 +45,9 @@ impl BlinkVM {
         // TODO: async module
         reg("future", native_future, module);
         reg("complete", native_complete_future, module);
+
+        // Goroutine/scheduler module
+        reg("run-scheduler", native_run_scheduler, module);
 
         
     }

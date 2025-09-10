@@ -454,3 +454,16 @@ pub fn native_error(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult 
     EvalResult::Value(ctx.error(error))
 }
 
+pub fn native_run_scheduler(_args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
+    use crate::runtime::GLOBAL_RUNTIME;
+    
+    if let Some(runtime) = GLOBAL_RUNTIME.get() {
+        match runtime.run_scheduler() {
+            Ok(()) => EvalResult::Value(ctx.nil()),
+            Err(error) => EvalResult::Value(ctx.eval_error(&format!("Scheduler error: {}", error))),
+        }
+    } else {
+        EvalResult::Value(ctx.eval_error("Runtime not initialized"))
+    }
+}
+
