@@ -45,8 +45,7 @@ enum InstructionResult {
         upvalue_index: u8,
         src_register: u8,
     },
-    Suspend,
-    ResumeAndContinue(Vec<SuspendedContinuation>)
+    Suspend
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +66,6 @@ struct PendingUpvalue {
 pub struct ExecutionContext {
     pub vm: Arc<BlinkVM>,
     pub current_module: u32,
-    pub runtime: Arc<BlinkRuntime>,
     pub register_stack: Vec<ValueRef>,
     pub call_stack: Vec<CallFrame>,
     pub current_goroutine_id: Option<u32>, // Track the current goroutine ID
@@ -77,7 +75,6 @@ impl ExecutionContext {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         Self {
             vm: vm.clone(),
-            runtime: GLOBAL_RUNTIME.get().unwrap().clone(),
             current_module,
             
             register_stack: Vec::new(),
@@ -399,13 +396,7 @@ impl ExecutionContext {
                         // For single-step execution, we should return an error to signal suspension
                         return Err("SUSPENDED".to_string());
                     }
-            InstructionResult::ResumeAndContinue(suspended_continuations) => {
-                for continuation in suspended_continuations {
-                    let mut scheduler = self.runtime.scheduler.lock();
-                    scheduler.unblock(continuation.goroutine_id);
-                }
 
-            },
         }
         Ok(())
     }
