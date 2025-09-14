@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::{
     error::BlinkError, 
-    future::BlinkFuture, 
     runtime::{BlinkVM, ContextualBoundary, ValueBoundary, GLOBAL_VM, EvalResult}, value::{GcPtr, IsolatedValue, SourceRange, ValueRef}, collections::{BlinkHashMap, BlinkHashSet}
 };
 
@@ -136,9 +135,7 @@ impl<'a> NativeContext<'a> {
 
     /// Allocate a future value
     pub fn future(&self) -> ValueRef {
-        let future = BlinkFuture::new();
-        let object_ref = self.vm.alloc_future(future);
-        ValueRef::Heap(GcPtr::new(object_ref))
+        self.vm.create_future()
     }
 
     pub fn bool(&self, b: bool) -> ValueRef {

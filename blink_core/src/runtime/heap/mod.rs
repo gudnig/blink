@@ -2,7 +2,6 @@ mod vector;
 mod list;
 mod map;
 mod set;
-mod future;
 
 use mmtk::util::Address;
 pub use list::*;
@@ -16,13 +15,14 @@ use std::sync::Condvar;
 use std::collections::HashMap;
 
 use crate::error::{BlinkError, BlinkErrorType, ParseErrorType};
-use crate::future::BlinkFuture;
+use crate::value::FutureHandle;
 use crate::module::SerializedModuleSource;
 use crate::runtime::{BlinkActivePlan, BlinkObjectModel, BlinkSlot, BlinkVM, ClosureObject, CompiledFunction, Macro, ObjectHeader, TypeTag, GLOBAL_MMTK};
 use crate::value::{ ParsedValue, ParsedValueWithPos, SourceRange};
 use crate::collections::{BlinkHashMap, BlinkHashSet};
 use crate::env::Env;
 use crate::{ value::ValueRef};
+
 
 use mmtk::{util::ObjectReference, Mutator};
 
@@ -855,7 +855,6 @@ pub fn alloc_env(&self, env: Env) -> ObjectReference {
             HeapValue::Error(blink_error) => self.alloc_error(blink_error),
             HeapValue::Function(callable) => self.alloc_user_defined_fn(callable),
             HeapValue::Macro(macro_fn) => self.alloc_macro(macro_fn),
-            HeapValue::Future(blink_future) => self.alloc_future(blink_future),
             HeapValue::Env(env) => self.alloc_env(env),
             HeapValue::Closure(closure_object) => self.alloc_closure(closure_object),
         }
@@ -929,7 +928,7 @@ impl ValueRef {
             ValueRef::Heap(gc_ptr) => {
                         Some(gc_ptr.to_heap_value())
             }
-            ValueRef::Native(_) => todo!(),
+            ValueRef::Handle(_) => todo!(),
         }
     }
 

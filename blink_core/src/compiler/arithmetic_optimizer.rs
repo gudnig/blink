@@ -4,16 +4,17 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use crate::runtime::{BlinkVM, Opcode};
 
+
 pub struct ArithmeticOptimizer {
     /// Track which arithmetic operators have been globally redefined
     redefined_operators: Arc<RwLock<HashSet<u32>>>, // symbol_ids that are redefined
     /// The original symbol IDs for core arithmetic operators
     core_arithmetic_symbols: HashSet<u32>,
-    vm: Arc<crate::runtime::BlinkVM>,
+    vm: Arc<BlinkVM>,
 }
 
 impl ArithmeticOptimizer {
-    pub fn new(vm: Arc<crate::runtime::BlinkVM>) -> Self {
+    pub fn new(vm: Arc<BlinkVM>) -> Self {
         let mut core_symbols = HashSet::new();
         
         // Register core arithmetic operators - these get special treatment

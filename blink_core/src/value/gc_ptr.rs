@@ -31,7 +31,6 @@ impl PartialEq for GcPtr {
             // ref equality for error, user defined function, macro, future, env
             TypeTag::Error => self.0 == other.0,
             TypeTag::UserDefinedFunction => self.0 == other.0,
-            TypeTag::Future => self.0 == other.0,
             TypeTag::Env => self.0 == other.0,
             _ => {
                 let heap_val = self.to_heap_value();
@@ -73,7 +72,6 @@ impl GcPtr {
             TypeTag::Set => HeapValue::Set(self.read_blink_hash_set()),
             TypeTag::Error => HeapValue::Error(self.read_error()),
             TypeTag::UserDefinedFunction => HeapValue::Function(self.read_callable()),
-            TypeTag::Future => todo!(),
             TypeTag::Env => HeapValue::Env(self.read_env()),
             TypeTag::Closure => HeapValue::Closure(self.read_closure()),
             TypeTag::Macro => HeapValue::Macro(self.read_macro()),

@@ -1,15 +1,18 @@
-use std::{collections::HashMap, ffi::c_void, future::Future, path::PathBuf, pin::Pin, sync::{Arc, OnceLock}};
+use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin, sync::{Arc, OnceLock}};
+use std::collections::HashSet;
+use std::ops::DerefMut;
+use std::sync::atomic::Ordering;
+use dashmap::DashSet;
 use mmtk::{
-    util::{address, options::PlanSelector, Address, ObjectReference}, MMTKBuilder, Mutator, MMTK
+    util::{options::PlanSelector, ObjectReference}, MMTKBuilder, MMTK
     
 };
 use parking_lot::RwLock;
-
-use crate::{
-    env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
-        BlinkActivePlan, BlinkObjectModel, CompiledFunction, ExecutionContext, HandleRegistry, SymbolTable, ValueMetadataStore
-    }, telemetry::TelemetryEvent, value::{Callable, FunctionHandle, FutureHandle, GcPtr, SourceRange, ValueRef}
-};
+use tokio::runtime::Runtime;
+use crate::{env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
+    CompiledFunction, HandleRegistry, SuspendedContinuation, SymbolTable, ValueMetadataStore
+}, telemetry::TelemetryEvent, value::{FunctionHandle, SourceRange, ValueRef}, BlinkRuntime, FutureState, GLOBAL_RUNTIME};
+use crate::value::FutureHandle;
 
 pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
 pub static GLOBAL_MMTK: OnceLock<Box<MMTK<BlinkVM>>> = OnceLock::new(); 
@@ -102,7 +105,7 @@ impl SpecialFormId {
 
 pub struct BlinkVM {
     // pub mmtk: Box<MMTK<BlinkVM>>,
-    
+    pub reachable_futures: DashSet<FutureHandle>,
     pub symbol_table: RwLock<SymbolTable>,
     pub telemetry_sink: Option<Box<dyn Fn(TelemetryEvent) + Send + Sync + 'static>>,
     pub module_registry: RwLock<ModuleRegistry>,
@@ -111,7 +114,7 @@ pub struct BlinkVM {
     pub value_metadata: RwLock<ValueMetadataStore>,
     pub gc_roots: RwLock<Vec<ObjectReference>>,  // Track all roots
     pub handle_registry: RwLock<HandleRegistry>,
-    pub core_module: Option<u32>
+    pub core_module: Option<u32>,
 }
 
 impl std::fmt::Debug for BlinkVM {
@@ -148,11 +151,12 @@ impl BlinkVM {
         Self {
             // Remove mmtk field
             symbol_table: RwLock::new(SymbolTable::new()),
+            reachable_futures: DashSet::new(),
             
             telemetry_sink: None,
             module_registry: RwLock::new(ModuleRegistry::new()),
             file_to_modules: RwLock::new(HashMap::new()),
-            
+
             reader_macros: RwLock::new(ReaderContext::new()),
             value_metadata: RwLock::new(ValueMetadataStore::new()),
             handle_registry: RwLock::new(HandleRegistry::new()),
@@ -170,7 +174,7 @@ impl BlinkVM {
         );
 
         mmtk::memory_manager::initialize_collection(mmtk, current_thread);
-        
+
         let mut vm = Self::construct_vm();
 
         let core_module_id = vm.symbol_table.write().intern("core");
@@ -226,12 +230,92 @@ impl BlinkVM {
         self.handle_registry.read().resolve_function(&handle)
     }
 
-    pub fn register_future(&self, handle: ValueRef) -> FutureHandle {
-        self.handle_registry.write().register_future(handle)
+    pub fn create_future(&self) -> ValueRef {
+        let mut registry = self.handle_registry.write();
+        let handle = registry.create_future();
+        ValueRef::future_handle(handle.id, handle.generation)
     }
 
-    pub fn resolve_future(&self, handle: FutureHandle) -> Option<ValueRef> {
-        self.handle_registry.read().resolve_future(&handle)
+
+    pub fn complete_future_value(&self, future_value: ValueRef, result: ValueRef) -> Result<(), String> {
+        if let Some(handle) = future_value.get_future_handle() {
+            let mut registry = self.handle_registry.write();
+            if let Some(entry) = registry.futures.get_mut(&handle.id) {
+                if entry.generation != handle.generation {
+                    return Err("Stale future handle".to_string());
+                }
+
+                match entry.state.compare_exchange(
+                    FutureState::Pending as u8,
+                    FutureState::Ready as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        // Successfully transitioned - safe to complete
+                        *entry.result.lock() = Some(result);
+
+                        let mut waiters = entry.waiters.lock(); // Need mut for drain
+                        let runtime = GLOBAL_RUNTIME.get().expect("Runtime not initialized");
+
+                        // Resume all continuations
+                        {
+                            let mut scheduler = runtime.scheduler.lock(); // Lock acquired once
+                            for continuation in waiters.continuations.drain(..) {
+                                scheduler.resume_goroutine_with_result(continuation, result);
+                            }
+                        }
+
+                        // Wake async tasks
+                        for waker in waiters.async_wakers.drain(..) {
+                            waker.wake();
+                        }
+
+                        Ok(())
+                    }
+                    // Should this be an error?
+                    Err(_) => Err("Future already completed".to_string()),
+                }
+            } else {
+                Err("Future not found".to_string())
+            }
+        } else {
+            Err("Not a future".to_string())
+        }
+    }
+
+
+    pub fn future_add_waiter(&self, future: FutureHandle, continuation: SuspendedContinuation) -> Result<Option<ValueRef>, String> {
+        let mut registry = self.handle_registry.write();
+        if let Some(entry) = registry.futures.get_mut(&future.id) {
+            if entry.generation != future.generation {
+                return Err("Stale future handle".to_string());
+            }
+            {
+
+                Ok(entry.register_continuation(continuation))
+
+            }
+        } else {
+            Err("Future not found".to_string())
+        }
+    }
+    // Called during GC
+
+    pub fn mark_future_handle_reachable(&self, value: ValueRef) {
+        let handle = value.get_future_handle();
+        if let Some(handle) = handle {
+            self.reachable_futures.insert(handle);
+        }
+
+    }
+
+    pub fn clear_reachable_handles(&self) {
+        self.reachable_futures.clear();
+    }
+
+    pub fn get_reachable_handles(&self) -> DashSet<FutureHandle> {
+        self.reachable_futures.iter().map(|h| *h).collect()
     }
 
     pub fn intern_keyword(&self, name: &str) -> ValueRef {

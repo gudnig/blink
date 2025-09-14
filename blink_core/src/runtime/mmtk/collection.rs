@@ -21,7 +21,8 @@ impl Collection<BlinkVM> for BlinkCollection {
         F: FnMut(&'static mut Mutator<BlinkVM>),
     {
         println!("🔒 MMTk: Stopping all mutators");
-        
+        let vm = BlinkVM::get_instance();
+        vm.clear_reachable_handles();
         // Set the flag - MMTk controls when this happens
         
         
@@ -34,7 +35,10 @@ impl Collection<BlinkVM> for BlinkCollection {
 
     fn resume_mutators(_tls: VMWorkerThread) {
         println!("🔓 MMTk: Resuming all mutators");
-        
+
+        let vm = BlinkVM::get_instance();
+        let reachable_handles = vm.get_reachable_handles();
+        vm.handle_registry.write().gc_sweep_unreachable_futures(&reachable_handles);
         // Clear the flag - MMTk controls when this happens
         GC_IN_PROGRESS.store(false, Ordering::SeqCst);
         

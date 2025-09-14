@@ -1,16 +1,13 @@
 // blink_core/src/runtime/mmtk/object_model.rs
 use mmtk::{
     util::{
-        copy::{CopySemantics, GCWorkerCopyContext}, 
-        metadata::side_metadata::{SideMetadataSpec, SideMetadataOffset}, 
+        copy::{CopySemantics, GCWorkerCopyContext},
         Address, ObjectReference
     },
     vm::{ObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec, 
         VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec}, 
-    MutatorContext
 };
 use crate::runtime::{BlinkVM, mmtk::object_header::{ObjectHeader}};
-use crate::value::ValueRef;
 
 #[repr(i8)]
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -24,9 +21,8 @@ pub enum TypeTag {
     UserDefinedFunction = 6,
     Macro = 7,
     Closure = 8,
-    Future = 9, 
-    Env = 10,
-    ListNode = 11,
+    Env = 9,
+    ListNode = 10,
 }
 
 impl TypeTag {
@@ -40,7 +36,6 @@ impl TypeTag {
             TypeTag::Error => "error",
             TypeTag::UserDefinedFunction => "user-function",
             TypeTag::Macro => "macro",
-            TypeTag::Future => "future",
             TypeTag::Env => "env",
             TypeTag::Closure => "closure",
             TypeTag::ListNode => "list-node",

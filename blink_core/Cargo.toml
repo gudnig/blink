@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 parking_lot = "0.12"
+dashmap = "6.1.0"
 rustyline = "15.0.0"
 libloading = "0.8"
 serde = { version = "1.0", features = ["derive"] }

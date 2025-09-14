@@ -30,3 +30,4 @@ pub use execution_context::*;
 pub use opcode::*;
 pub use helpers::*;
 pub use eval_result::*;
+pub use blink_vm::*;

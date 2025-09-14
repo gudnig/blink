@@ -7,8 +7,8 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     runtime::{
-        BlinkVM, EvalResult, ExecutionContext, GoroutineId, GoroutineScheduler,
-        SingleThreadedScheduler, Goroutine, SchedulerAction,
+        BlinkVM, EvalResult, ExecutionContext,
+        SingleThreadedScheduler, Goroutine, SchedulerAction, GoroutineId
     },
     value::{GcPtr, ValueRef},
 };
@@ -23,6 +23,7 @@ pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
 }
 
 // Runtime owns both VM and concrete scheduler
+#[derive(Debug)]
 pub struct BlinkRuntime {
     pub vm: Arc<BlinkVM>,
     pub scheduler: Mutex<SingleThreadedScheduler>,

@@ -130,10 +130,7 @@ impl ValueBoundary for ContextualBoundary {
                                                                     let handle = self.vm.handle_registry.write().register_function(value);
                                                                     Ok(IsolatedValue::Function(handle))
                                                                 }
-                        HeapValue::Future(blink_future) => {
-                                                                    let handle = self.vm.handle_registry.write().register_future(value);
-                                                                    Ok(IsolatedValue::Future(handle))
-                                                                }
+                        
                         HeapValue::Env(env) => {
                                                                     Err(format!("Env is not supported for boundary crossing"))
                                                                 }
@@ -198,10 +195,9 @@ impl ValueBoundary for ContextualBoundary {
                 .vm
                 .resolve_function(handle)
                 .unwrap_or(ValueRef::Immediate(pack_nil())),
-            IsolatedValue::Future(handle) => self
-                .vm
-                .resolve_future(handle)
-                .unwrap_or(ValueRef::Immediate(pack_nil())),
+            IsolatedValue::Future(handle) => {
+                ValueRef::future_handle(handle.id, handle.generation) 
+            }
             IsolatedValue::Error(msg) => {
                 let error = BlinkError::eval(msg);
                 self.vm.error_value(error)

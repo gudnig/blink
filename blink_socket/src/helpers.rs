@@ -60,7 +60,7 @@ pub fn get_var_representation(value: &ParsedValueWithPos, kind: &SymbolKind, nam
                 if elements.len() >= 2 {
                     if let ParsedValue::Symbol(sym) = elements[0].value {
                         let symbol_name = symbol_table.get_symbol(sym);
-                        if symbol_name == Some("hash-map") {
+                        if symbol_name == Some("hash-map".to_string()) {
                             let mut out = String::new();
                             out.push_str(&format!("{} => {{", name));
                             let mut is_key = true;

@@ -415,18 +415,6 @@ pub fn native_future(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult
     EvalResult::Value(ctx.future())
 }
 
-pub fn native_complete_future(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
-    if args.len() != 2 {
-        return EvalResult::Value(ctx.arity_error(2, args.len(), "complete"));
-    }
-    if let Some(future) = args[0].get_future(){
-        future.complete(args[1]).map_err(|e| BlinkError::eval(e.to_string()));
-        return EvalResult::Value(ctx.nil());
-    } else {
-        return EvalResult::Value(ctx.eval_error("complete expects a future"));
-    }
-}
-
 pub fn native_error(args: Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult {
     if args.len() < 1 {
         return EvalResult::Value(ctx.arity_error(1, args.len(), "error"));

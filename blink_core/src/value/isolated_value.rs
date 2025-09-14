@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-
+use crate::value::FutureHandle;
 
 #[derive(Clone, Debug)]
 pub struct FunctionHandle {
@@ -20,16 +20,8 @@ impl Hash for FunctionHandle {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct FutureHandle {
-    pub(crate) id: u64,
-}
 
-impl Hash for FutureHandle {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
+
 
 
 

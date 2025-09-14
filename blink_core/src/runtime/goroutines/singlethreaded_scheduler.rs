@@ -3,9 +3,12 @@
 
 use crate::runtime::execution_context::FunctionRef;
 use crate::runtime::{set_current_goroutine_id, BlinkVM, CallFrame, TypeTag};
-use crate::value::{GcPtr, ValueRef};
+use crate::value::{FutureHandle, GcPtr, ValueRef};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
+use crate::{FutureEntry, SuspendedContinuation};
+
+pub type GoroutineId = u32;
 
 // === Goroutine State ===
 
@@ -63,6 +66,7 @@ impl Goroutine {
         })
     }
 
+
     fn create_initial_frame(func_value: ValueRef) -> Result<CallFrame, String> {
         match func_value {
             ValueRef::Heap(heap) => {
@@ -98,7 +102,7 @@ impl Goroutine {
                     )),
                 }
             }
-            ValueRef::Native(native) => {
+            ValueRef::Handle(native) => {
                 Ok(CallFrame {
                     func: FunctionRef::Native(native),
                     pc: 0,
@@ -117,6 +121,7 @@ impl Goroutine {
 
 // === Scheduler ===
 
+#[derive(Debug)]
 pub struct SingleThreadedScheduler {
     ready_queue: VecDeque<u32>,
     goroutines: Vec<Option<Goroutine>>,
@@ -153,6 +158,40 @@ impl SingleThreadedScheduler {
         self.goroutines[id as usize] = Some(goroutine);
 
         Ok(id)
+    }
+
+
+
+
+    // Better version that accepts the result value
+    pub fn resume_goroutine_with_result(&mut self, continuation: SuspendedContinuation, result: ValueRef) {
+        let goroutine_id = continuation.goroutine_id;
+
+        let mut goroutine = Goroutine {
+            id: goroutine_id,
+            state: GoroutineState::Ready,
+            call_stack: continuation.call_stack,
+            register_stack: continuation.register_stack,
+            current_module: continuation.current_module,
+            instruction_pointer: continuation.resume_pc,
+        };
+
+        // Store the result in the destination register
+        let dest_reg = continuation.dest_register as usize;
+        if let Some(frame) = goroutine.call_stack.last() {
+            let reg_index = frame.reg_start + dest_reg;
+            if reg_index < goroutine.register_stack.len() {
+                goroutine.register_stack[reg_index] = result;
+            }
+        }
+
+        // MISSING: Store the goroutine back in the scheduler's storage
+        while goroutine_id as usize >= self.goroutines.len() {
+            self.goroutines.push(None);
+        }
+        self.goroutines[goroutine_id as usize] = Some(goroutine);
+
+        self.ready_queue.push_back(goroutine_id);
     }
 
     /// Check if there are any ready goroutines

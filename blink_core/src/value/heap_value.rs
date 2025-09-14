@@ -1,7 +1,7 @@
 use std::{fmt::{self, Display}, hash::{Hash, Hasher}};
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, future::BlinkFuture, module::Module, runtime::{ClosureObject, CompiledFunction, Macro}, value::{Callable, IsolatedValue, ModuleRef, NativeFn, ValueRef}
+    collections::{BlinkHashMap, BlinkHashSet}, env::Env, error::BlinkError, runtime::{ClosureObject, CompiledFunction, Macro}, value::ValueRef
 };
 
 #[derive(Debug)]
@@ -15,7 +15,6 @@ pub enum HeapValue {
     Function(CompiledFunction),
     Macro(Macro),
     Closure(ClosureObject),
-    Future(BlinkFuture),
     Env(Env),
 }
 
@@ -57,10 +56,6 @@ impl Display for HeapValue {
                                                     },
             HeapValue::Function(callable) => {
                                                         write!(f, "function")?;
-                                                        Ok(())
-                                                    },
-            HeapValue::Future(blink_future) => {
-                                                        write!(f, "future")?;
                                                         Ok(())
                                                     },
             HeapValue::Env(env) => {
@@ -149,9 +144,6 @@ impl Hash for HeapValue {
                                     upvalue.hash(state);
                                 }
                             }
-            HeapValue::Future(blink_future) => {
-                                todo!()
-                            }
             HeapValue::Env(env) => {
                                 "env".hash(state);
                                 env.vars.len().hash(state);
@@ -186,9 +178,6 @@ impl PartialEq for HeapValue {
                 panic!("Should have happened already")
                 
             },
-            (HeapValue::Future(_), HeapValue::Future(_)) => {
-                panic!("Should have happened already")
-            }
             (HeapValue::Env(_), HeapValue::Env(_)) => {
                 panic!("Should have happened already")
             }
@@ -210,7 +199,6 @@ impl HeapValue {
             HeapValue::Error(_) => "error",
             HeapValue::Function(_) => "function",
             HeapValue::Closure(_) => "closure",
-            HeapValue::Future(_) => "future",
             HeapValue::Env(_) => "env",
             HeapValue::Macro(_) => "macro",
         }

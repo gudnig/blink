@@ -5,7 +5,6 @@ use std::thread::{self, JoinHandle};
 use tokio::sync::oneshot;
 use parking_lot::RwLock;
 
-use crate::future::BlinkFuture;
 use crate::runtime::EvalResult;
 use crate::{
     value::ValueRef,
@@ -13,7 +12,7 @@ use crate::{
     env::Env,
 };
 
-pub type GoroutineId = u32;
+
 
 // Box the context to avoid lifetime issues
 pub struct GoroutineTask {

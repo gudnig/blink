@@ -80,7 +80,7 @@ impl MacroExpander {
                     }
                 }
             }
-            ValueRef::Native(_) => {
+            ValueRef::Handle(_) => {
                 // Native values can't contain macros
                 Ok(expr)
             }
@@ -278,7 +278,7 @@ impl MacroExpander {
                     _ => Ok(expr), // Strings, functions, etc. - no substitution needed
                 }
             }
-            ValueRef::Native(_) => Ok(expr), // Native functions - no substitution
+            ValueRef::Handle(_) => Ok(expr), // Native functions - no substitution
         }
     }
 
@@ -357,7 +357,7 @@ impl MacroExpander {
                     _ => Ok(template), // Strings, etc. are literal
                 }
             }
-            ValueRef::Native(_) => Ok(template),
+            ValueRef::Handle(_) => Ok(template),
         }
     }
 

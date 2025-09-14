@@ -7,10 +7,8 @@ use std::{
 use mmtk::util::ObjectReference;
 
 use crate::{
-    collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{CompiledFunction, TypeTag}, value::{
-        is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_nil, pack_number,
-        pack_symbol, unpack_immediate, ContextualNativeFn, GcPtr, HeapValue, ImmediateValue,
-        IsolatedNativeFn, NativeFn,
+    collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, runtime::{CompiledFunction, TypeTag}, value::{
+        is_bool, is_number, is_symbol, pack_bool, pack_keyword, pack_nil, pack_number, pack_symbol, unpack_immediate, ContextualNativeFn, FutureHandle, GcPtr, HeapValue, ImmediateValue, IsolatedNativeFn, NativeFn
     }
 };
 
@@ -18,8 +16,14 @@ use crate::{
 pub enum ValueRef {
     Immediate(u64),
     Heap(GcPtr),
-    Native(usize),
+    Handle(usize),
 }
+
+// Handle type tags
+const ISOLATED_FN_TAG: usize = 0;
+const CONTEXTUAL_FN_TAG: usize = 1;
+const FUTURE_HANDLE_TAG: usize = 2;
+const _RESERVED_TAG: usize = 3; // Reserved for future use
 
 #[derive(Debug)]
 pub struct ModuleRef {
@@ -41,7 +45,19 @@ impl Display for ValueRef {
         match self {
             ValueRef::Immediate(packed) => write!(f, "{}", unpack_immediate(*packed)),
             ValueRef::Heap(gc_ptr) => write!(f, "{}", gc_ptr.to_heap_value()),
-            ValueRef::Native(n) => write!(f, "native-function-{}", n),
+            ValueRef::Handle(tagged_ptr) => {
+                match tagged_ptr & 3 {
+                    ISOLATED_FN_TAG => write!(f, "isolated-function"),
+                    CONTEXTUAL_FN_TAG => write!(f, "contextual-function"),
+                    FUTURE_HANDLE_TAG => {
+                        let packed = *tagged_ptr as u64;
+                        let id = packed >> 32;
+                        let generation = ((packed >> 2) & 0x3FFFFFFF) as u32;
+                        write!(f, "future(id:{}, gen:{})", id, generation)
+                    }
+                    _ => write!(f, "unknown-handle"),
+                }
+            }
         }
     }
 }
@@ -51,8 +67,8 @@ impl Hash for ValueRef {
         match self {
             ValueRef::Immediate(packed) => packed.hash(state),
             ValueRef::Heap(gc_ptr) => gc_ptr.hash(state),
-            ValueRef::Native(n) => {
-                "native".hash(state);
+            ValueRef::Handle(n) => {
+                "handle".hash(state);
                 n.hash(state);
             }
         }
@@ -66,7 +82,7 @@ impl PartialEq for ValueRef {
                 packed == other_packed
             }
             (ValueRef::Heap(gc_ptr), ValueRef::Heap(other_gc_ptr)) => gc_ptr == other_gc_ptr,
-            (ValueRef::Native(n), ValueRef::Native(other_n)) => n == other_n,
+            (ValueRef::Handle(n), ValueRef::Handle(other_n)) => n == other_n,
             _ => false,
         }
     }
@@ -101,21 +117,28 @@ impl ValueRef {
 
     pub fn isolated_native_fn(boxed_fn: IsolatedNativeFn) -> Self {
         let ptr = Box::into_raw(Box::new(boxed_fn)) as *mut IsolatedNativeFn as usize;
-        debug_assert!(ptr & 1 == 0, "Pointer must be aligned");
-        ValueRef::Native(ptr | 0) // Tag 0 for isolated
+        debug_assert!(ptr & 3 == 0, "Pointer must be 4-byte aligned");
+        ValueRef::Handle(ptr | ISOLATED_FN_TAG)
     }
 
     pub fn contextual_native_fn(boxed_fn: ContextualNativeFn) -> Self {
         let ptr = Box::into_raw(Box::new(boxed_fn)) as *mut ContextualNativeFn as usize;
-        debug_assert!(ptr & 1 == 0, "Pointer must be aligned");
-        ValueRef::Native(ptr | 1) // Tag 1 for contextual
+        debug_assert!(ptr & 3 == 0, "Pointer must be 4-byte aligned");
+        ValueRef::Handle(ptr | CONTEXTUAL_FN_TAG)
+    }
+
+    pub fn future_handle(id: u64, generation: u32) -> Self {
+        // Pack: 32 bits ID + 30 bits generation + 2 bits tag
+        debug_assert!(generation < (1 << 30), "Generation too large for 30 bits");
+        let packed = (id << 32) | ((generation as u64) << 2) | FUTURE_HANDLE_TAG as u64;
+        ValueRef::Handle(packed as usize)
     }
 
     pub fn type_tag(&self) -> &'static str {
         match self {
             ValueRef::Immediate(packed) => unpack_immediate(*packed).type_tag(),
             ValueRef::Heap(gc_ptr) => gc_ptr.type_tag().to_str(),
-            ValueRef::Native(_) => "native-function",
+            ValueRef::Handle(_) => "native-function",
         }
     }
 
@@ -197,13 +220,6 @@ impl ValueRef {
         }
     }
 
-    pub fn is_future(&self) -> bool {
-        match self {
-            ValueRef::Heap(gc_ptr) => gc_ptr.type_tag() == TypeTag::Future,
-            _ => false,
-        }
-    }
-
     pub fn is_truthy(&self) -> bool {
         match self {
             ValueRef::Immediate(packed) => {
@@ -222,19 +238,45 @@ impl ValueRef {
     // Value extraction
     // ------------------------------------------------------------
 
-    pub fn get_future(&self) -> Option<BlinkFuture> {
-        if self.is_future() {
-            match self {
-                ValueRef::Heap(gc_ptr) => match gc_ptr.to_heap_value() {
-                    HeapValue::Future(future) => Some(future.clone()),
+    pub fn get_native_fn(&self) -> Option<&NativeFn> {
+        match self {
+            ValueRef::Handle(tagged_ptr) => {
+                let tag = tagged_ptr & 3;
+                let ptr = tagged_ptr & !3; // Clear tag bits
+                
+                match tag {
+                    ISOLATED_FN_TAG => {
+                        let fn_ptr = ptr as *const NativeFn;
+                        Some(unsafe { &*fn_ptr })
+                    }
+                    CONTEXTUAL_FN_TAG => {
+                        let fn_ptr = ptr as *const NativeFn;
+                        Some(unsafe { &*fn_ptr })
+                    }
                     _ => None,
-                },
-                _ => None,
+                }
             }
-        } else {
-            None
+            _ => None,
         }
     }
+
+    pub fn get_future_handle(&self) -> Option<FutureHandle> {
+        match self {
+            ValueRef::Handle(tagged_ptr) => {
+                if tagged_ptr & 3 == FUTURE_HANDLE_TAG {
+                    let packed = *tagged_ptr as u64;
+                    let id = packed >> 32;
+                    let generation = ((packed >> 2) & 0x3FFFFFFF) as u32; // 30 bits
+                    Some(FutureHandle { id, generation })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    
 
     pub fn get_compiled_function(&self) -> Option<CompiledFunction> {
         match self {
@@ -368,7 +410,15 @@ impl ValueRef {
                 ImmediateValue::Keyword(_) => "keyword",
             },
             ValueRef::Heap(gc_ptr) => gc_ptr.type_tag().to_str(),
-            ValueRef::Native(_) => "native-function",
+            ValueRef::Handle(tagged_ptr) => {
+                let tag = tagged_ptr & 3;
+                match tag {
+                    ISOLATED_FN_TAG => "native-function",
+                    CONTEXTUAL_FN_TAG => "native-function",
+                    FUTURE_HANDLE_TAG => "future",
+                    _ => "unknown",
+                }
+            }
         }
     }
 
@@ -398,23 +448,17 @@ impl ValueRef {
         }
     }
 
-    pub fn get_native_fn(&self) -> Option<&NativeFn> {
-        match self {
-            ValueRef::Native(ptr) => {
-                let raw_ptr = ptr & !1; // Clear tag bit
-                if ptr & 1 == 0 {
-                    // Isolated function
-                    let fn_ptr = raw_ptr as *const NativeFn;
-                    Some(unsafe { &*fn_ptr })
-                } else {
-                    // Contextual function
-                    let fn_ptr = raw_ptr as *const NativeFn;
-                    Some(unsafe { &*fn_ptr })
-                }
-            }
-            _ => None,
-        }
+    // ------------------------------------------------------------
+    // Type checking
+    // ------------------------------------------------------------
+    pub fn is_future(&self) -> bool {
+        matches!(self, ValueRef::Handle(tagged_ptr) if tagged_ptr & 3 == FUTURE_HANDLE_TAG)
     }
+
+    pub fn is_native_fn(&self) -> bool {
+        matches!(self, ValueRef::Handle(tagged_ptr) if (tagged_ptr & 3) < 2)
+    }
+    
 
 
 }

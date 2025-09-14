@@ -313,7 +313,7 @@ impl BytecodeCompiler {
                     Ok(reg)
                 }
             }
-            ValueRef::Native(_) => {
+            ValueRef::Handle(_) => {
                 let reg = self.alloc_register();
                 self.emit_load_immediate(reg, expr);
                 Ok(reg)
@@ -2310,7 +2310,7 @@ impl BytecodeCompiler {
     fn has_unquotes(&self, expr: ValueRef) -> bool {
         match expr {
             ValueRef::Immediate(_) => false,
-            ValueRef::Native(_) => false,
+            ValueRef::Handle(_) => false,
             ValueRef::Heap(_) => {
                 if let Some(list_items) = expr.get_list() {
                     self.list_has_unquotes(&list_items)
@@ -2385,7 +2385,7 @@ impl BytecodeCompiler {
                     Ok(expr)
                 }
             }
-            ValueRef::Native(_) => Ok(expr),
+            ValueRef::Handle(_) => Ok(expr),
         }
     }
 

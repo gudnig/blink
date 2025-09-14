@@ -57,7 +57,7 @@ impl ValueRef {
             ValueRef::Heap(ptr) => {
                         ptr.object_id()
                     }
-            ValueRef::Native(ptr) => Some(*ptr as u64),
+            ValueRef::Handle(ptr) => Some(*ptr as u64),
         }
     }
 }

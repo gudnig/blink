@@ -6,6 +6,7 @@ mod native_fn;
 mod parsed_value;
 mod plugin;
 mod value_ref;
+mod future_handle;
 
 pub use gc_ptr::*;
 pub use heap_value::*;
@@ -15,6 +16,7 @@ pub use native_fn::*;
 pub use parsed_value::*;
 pub use plugin::*;
 pub use value_ref::*;
+pub use future_handle::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {

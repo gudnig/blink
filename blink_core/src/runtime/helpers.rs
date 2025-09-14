@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, future::BlinkFuture, runtime::{BlinkVM, CompiledFunction, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
+use crate::{collections::{BlinkHashMap, BlinkHashSet}, error::BlinkError, runtime::{BlinkVM, CompiledFunction, ExecutionContext, TypeTag}, value::{unpack_immediate, Callable, GcPtr, HeapValue, ImmediateValue, NativeFn, ValueRef}};
 use crate::env::Env;
 
 impl BlinkVM {
@@ -90,10 +90,6 @@ impl BlinkVM {
         ValueRef::Heap(GcPtr::new(object_ref))
     }
 
-    pub fn future_value( &self, future: BlinkFuture) -> ValueRef {
-        let object_ref = self.alloc_future(future);
-        ValueRef::Heap(GcPtr::new(object_ref))
-    }
 
     pub fn native_function_value( &self, func: NativeFn) -> ValueRef {
         match func {

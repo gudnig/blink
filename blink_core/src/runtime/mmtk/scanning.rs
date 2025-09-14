@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use mmtk::{scheduler::{GCWork, ProcessEdgesWork, WorkBucketStage}, util::{Address, ObjectReference}, vm::{slot::{self, MemorySlice}, RootsWorkFactory, Scanning, VMBinding}, Mutator};
 
-use crate::{runtime::{ BlinkObjectModel, BlinkSlot, BlinkVM, FunctionRef, TypeTag, GLOBAL_RUNTIME}, value::ValueRef};
+use crate::{runtime::{BlinkObjectModel, BlinkSlot, BlinkVM, FunctionRef, TypeTag, GLOBAL_RUNTIME}, value::ValueRef, GLOBAL_VM};
 
 
 // Minimal Scanning implementation for NoGC
@@ -31,7 +32,6 @@ impl Scanning<BlinkVM> for BlinkScanning {
             },
             TypeTag::Set => Self::scan_set_object(slot_visitor, object),
             TypeTag::Error => Self::scan_error_object(slot_visitor, object),
-            TypeTag::Future => todo!(),
             TypeTag::Closure => todo!(),
             TypeTag::Macro => Self::scan_callable(slot_visitor, object),
         }
@@ -60,6 +60,7 @@ impl Scanning<BlinkVM> for BlinkScanning {
     ) {
         const CHUNK: usize = 1024;
         let mut batch: Vec<BlinkSlot> = Vec::with_capacity(CHUNK);
+        let mut reachable_handles = HashSet::new();
     
         let runtime = GLOBAL_RUNTIME.get().expect("BlinkRuntime not initialized");
         let exec = &runtime.execution_context;
@@ -90,15 +91,46 @@ impl Scanning<BlinkVM> for BlinkScanning {
                 if batch.len() == CHUNK {
                     factory.create_process_roots_work(std::mem::take(&mut batch));
                 }
+            } else if let ValueRef::Handle(handle) = reg_cell {
+                reachable_handles.insert(handle);
             }
         }
     
-        // 3) Any other VM roots stored out-of-heap (example: your module exports)
+        // 3) Module variables
         {
             let modules = runtime.vm.module_registry.read();
             for module in modules.modules.values() {
                 for value in module.exports.values() {
                     if let ValueRef::Heap(_) = value {
+                        let cell_addr = Address::from_ptr(value as *const ValueRef);
+                        batch.push(BlinkSlot::ValueRef(cell_addr));
+                        if batch.len() == CHUNK {
+                            factory.create_process_roots_work(std::mem::take(&mut batch));
+                        }
+                    } else if let ValueRef::Handle(handle) = value {
+                        reachable_handles.insert(handle);
+                    }
+                }
+            }
+        }
+
+        // Future registry
+        let registry = runtime.vm.handle_registry.read();
+        for entry in registry.futures.values() {
+            if let Some(result) = entry.result.lock().as_ref() {
+                if let ValueRef::Heap(gc_ptr) = result {
+                    let cell_addr = Address::from_ptr(result as *const ValueRef);
+                    batch.push(BlinkSlot::ValueRef(cell_addr));
+                    if batch.len() == CHUNK {
+                        factory.create_process_roots_work(std::mem::take(&mut batch));
+                    }
+                }
+            }
+
+            let waiters = entry.waiters.lock();
+            for continuation in &waiters.continuations {
+                for value in &continuation.register_stack {
+                    if let ValueRef::Heap(gc_ptr) = value {
                         let cell_addr = Address::from_ptr(value as *const ValueRef);
                         batch.push(BlinkSlot::ValueRef(cell_addr));
                         if batch.len() == CHUNK {
@@ -187,6 +219,10 @@ impl BlinkScanning {
                     let slot = BlinkSlot::ValueRef(Address::from_ptr(value_ptr));
                     slot_visitor.visit_slot(slot);
                 }
+                ValueRef::Handle(handle) => {
+                    let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+                    vm.mark_future_handle_reachable(value)
+                }
                 _ => {} // Skip immediate/native values
             }
             offset += std::mem::size_of::<ValueRef>();
@@ -250,6 +286,10 @@ impl BlinkScanning {
                         let slot = BlinkSlot::ValueRef(Address::from_ptr(value_ptr));
                         slot_visitor.visit_slot(slot);
                     }
+                    ValueRef::Handle(handle) => {
+                        let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+                        vm.mark_future_handle_reachable(value)
+                    }
                     _ => {} // Skip immediate/native values
                 }
             }
@@ -285,6 +325,10 @@ impl BlinkScanning {
                     ValueRef::Heap(_) => {
                         let slot = BlinkSlot::ValueRef(Address::from_ptr(value_ref_ptr));
                         slot_visitor.visit_slot(slot);
+                    }
+                    ValueRef::Handle(handle) => {
+                        let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+                        vm.mark_future_handle_reachable(value_ref)
                     }
                     _ => {} // Skip immediate/native values
                 }
@@ -358,7 +402,7 @@ impl BlinkScanning {
         slot_visitor: &mut SV,
         _object: ObjectReference
     ) {
-        // TODO: Implement based on your error object structure
+        // TODO: Implement based on error object structure
         // For now, assume no references to scan
     }
 
@@ -378,6 +422,10 @@ impl BlinkScanning {
                     ValueRef::Heap(_) => {
                         let slot = BlinkSlot::ValueRef(Address::from_ptr(value_ref_ptr));
                         slot_visitor.visit_slot(slot);
+                    }
+                    ValueRef::Handle(handle) => {
+                        let vm = GLOBAL_VM.get().expect("BlinkVM not initialized");
+                        vm.mark_future_handle_reachable(value_ref)
                     }
                     _ => {} // Skip immediate/native values
                 }
