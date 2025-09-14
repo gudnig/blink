@@ -270,142 +270,142 @@ impl ExecutionContext {
     ) -> Result<(), String> {
         match instruction_result {
             InstructionResult::Continue => {
-                        // Update the frame in the stack
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                // Update the frame in the stack
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
             InstructionResult::Return => {
-                        self.handle_function_completion()?;
-                    }
+                self.handle_function_completion()?;
+            }
             InstructionResult::Call(new_frame) => {
-                        // Update current frame PC, then push new frame
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                        self.call_stack.push(new_frame);
-                    }
+                // Update current frame PC, then push new frame
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+                self.call_stack.push(new_frame);
+            }
             InstructionResult::SetupSelfReference(reg) => {
-                        // Handle self-reference setup here where we have access to function context
-                        if let FunctionRef::CompiledFunction(_, Some(obj_ref))
-                        | FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func
-                        {
-                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
-                            self.register_stack[current_frame.reg_start + reg as usize] = function_value;
-                        } else {
-                            return Err("SetupSelfReference: no function object available".to_string());
-                        }
+                // Handle self-reference setup here where we have access to function context
+                if let FunctionRef::CompiledFunction(_, Some(obj_ref))
+                | FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func
+                {
+                    let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                    self.register_stack[current_frame.reg_start + reg as usize] = function_value;
+                } else {
+                    return Err("SetupSelfReference: no function object available".to_string());
+                }
 
-                        // Update frame PC and continue
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
+                // Update frame PC and continue
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
             InstructionResult::LoadUpvalue {
-                        dest_register,
-                        upvalue_index,
-                    } => {
-                        match &current_frame.func {
-                            FunctionRef::Closure(closure_obj, _) => {
-                                if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
-                                    self.register_stack[current_frame.reg_start + dest_register as usize] =
-                                        *upvalue;
-                                } else {
-                                    return Err(format!("Upvalue index {} out of bounds", upvalue_index));
-                                }
-                            }
-                            FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
-                                let closure = GcPtr(*obj_ref).read_closure();
-                                if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
-                                    self.register_stack[current_frame.reg_start + dest_register as usize] =
-                                        *upvalue;
-                                } else {
-                                    return Err(format!("Upvalue index {} out of bounds", upvalue_index));
-                                }
-                            }
-                            _ => return Err("LoadUpvalue called on non-closure function".to_string()),
-                        }
-
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
-            InstructionResult::StoreUpvalue {
-                        upvalue_index,
-                        src_register,
-                    } => {
-                        let value = self.register_stack[current_frame.reg_start + src_register as usize];
-
-                        match &current_frame.func {
-                            FunctionRef::Closure(_, Some(obj_ref))
-                            | FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
-                                GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
-                            }
-                            _ => {
-                                return Err(
-                                    "StoreUpvalue called on function without object reference".to_string()
-                                )
-                            }
-                        }
-
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
-                        }
-                    }
-            InstructionResult::CreateClosure {
-                        dest_register,
-                        template_register,
-                        captures,
-                    } => {
-                        // Get template
-                        let template_value =
-                            self.register_stack[current_frame.reg_start + template_register as usize];
-                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
-                            heap_ptr.0
+                dest_register,
+                upvalue_index,
+            } => {
+                match &current_frame.func {
+                    FunctionRef::Closure(closure_obj, _) => {
+                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                *upvalue;
                         } else {
-                            return Err("Template must be a heap object".to_string());
-                        };
-
-                        // Capture upvalues directly from registers
-                        let mut upvalues = Vec::new();
-                        for (parent_reg, _symbol_id) in captures {
-                            let captured_value =
-                                self.register_stack[current_frame.reg_start + parent_reg as usize];
-                            upvalues.push(captured_value);
-                        }
-
-                        // Create closure
-                        let closure_obj = ClosureObject {
-                            template: template_obj_ref,
-                            upvalues,
-                        };
-
-                        let closure_ref = self.vm.alloc_closure(closure_obj);
-                        self.register_stack[current_frame.reg_start + dest_register as usize] =
-                            ValueRef::Heap(GcPtr::new(closure_ref));
-
-                        if let Some(frame) = self.call_stack.last_mut() {
-                            frame.pc = current_frame.pc;
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
                         }
                     }
+                    FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
+                        let closure = GcPtr(*obj_ref).read_closure();
+                        if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                *upvalue;
+                        } else {
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                        }
+                    }
+                    _ => return Err("LoadUpvalue called on non-closure function".to_string()),
+                }
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::StoreUpvalue {
+                upvalue_index,
+                src_register,
+            } => {
+                let value = self.register_stack[current_frame.reg_start + src_register as usize];
+
+                match &current_frame.func {
+                    FunctionRef::Closure(_, Some(obj_ref))
+                    | FunctionRef::CompiledFunction(_, Some(obj_ref)) => {
+                        GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                    }
+                    _ => {
+                        return Err(
+                            "StoreUpvalue called on function without object reference".to_string()
+                        )
+                    }
+                }
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
+            InstructionResult::CreateClosure {
+                dest_register,
+                template_register,
+                captures,
+            } => {
+                // Get template
+                let template_value =
+                    self.register_stack[current_frame.reg_start + template_register as usize];
+                let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                    heap_ptr.0
+                } else {
+                    return Err("Template must be a heap object".to_string());
+                };
+
+                // Capture upvalues directly from registers
+                let mut upvalues = Vec::new();
+                for (parent_reg, _symbol_id) in captures {
+                    let captured_value =
+                        self.register_stack[current_frame.reg_start + parent_reg as usize];
+                    upvalues.push(captured_value);
+                }
+
+                // Create closure
+                let closure_obj = ClosureObject {
+                    template: template_obj_ref,
+                    upvalues,
+                };
+
+                let closure_ref = self.vm.alloc_closure(closure_obj);
+                self.register_stack[current_frame.reg_start + dest_register as usize] =
+                    ValueRef::Heap(GcPtr::new(closure_ref));
+
+                if let Some(frame) = self.call_stack.last_mut() {
+                    frame.pc = current_frame.pc;
+                }
+            }
             InstructionResult::Suspend => {
 
 
 
 
-                        // For single-step execution, we should return an error to signal suspension
-                        return Err("SUSPENDED".to_string());
-                    }
+                // For single-step execution, we should return an error to signal suspension
+                return Err("SUSPENDED".to_string());
+            }
 
         }
         Ok(())
     }
 
     // Main execution loop - processes all frames until stack is empty
+    // Main execution loop - processes all frames until stack is empty
     pub fn execute(&mut self) -> Result<ValueRef, String> {
         while !self.call_stack.is_empty() {
             // Get current frame (don't pop yet)
-
             let mut current_frame = if let Some(frame) = self.call_stack.last().cloned() {
                 frame
             } else {
@@ -437,6 +437,7 @@ impl ExecutionContext {
                 current_frame.pc += 1;
 
                 let instruction_result = self.execute_instruction(
+
                     opcode,
                     &compiled_fn.bytecode,
                     &compiled_fn.constants,
@@ -456,9 +457,143 @@ impl ExecutionContext {
 
                 let instruction_result = instruction_result?;
 
-                self.handle_instruction_result(instruction_result, current_frame)?;
+                match instruction_result {
+                    InstructionResult::Continue => {
+                        // Update the frame in the stack
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::Return => {
+                        // Get return value from register 0 of completed frame
+                        let completed_frame = self.call_stack.pop().unwrap();
+                        let return_value = self.register_stack[completed_frame.reg_start];
 
+                        // Clean up registers used by completed frame
+                        self.register_stack.truncate(completed_frame.reg_start);
 
+                        // If no more frames, we're done
+                        if self.call_stack.is_empty() {
+                            return Ok(return_value);
+                        }
+
+                        // Store return value in caller's register 0
+                        if let Some(caller_frame) = self.call_stack.last() {
+                            self.register_stack[caller_frame.reg_start] = return_value;
+                        }
+                    }
+                    InstructionResult::Call(new_frame) => {
+                        // Update current frame PC, then push new frame
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                        self.call_stack.push(new_frame);
+                    }
+                    InstructionResult::SetupSelfReference(reg) => {
+                        // Handle self-reference setup here where we have access to function context
+                        if let Some(obj_ref) = obj_ref {
+                            let function_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                            self.register_stack[current_frame.reg_start + reg as usize] =
+                                function_value;
+                        } else {
+                            return Err(
+                                "SetupSelfReference: no function object available".to_string()
+                            );
+                        }
+
+                        // Update frame PC and continue
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::LoadUpvalue {
+                        dest_register,
+                        upvalue_index,
+                    } => {
+                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
+                            // Changed here
+                            let closure = GcPtr(*obj_ref).read_closure();
+                            if let Some(upvalue) = closure.upvalues.get(upvalue_index as usize) {
+                                self.register_stack
+                                    [current_frame.reg_start + dest_register as usize] = *upvalue;
+                            } else {
+                                return Err(format!(
+                                    "Upvalue index {} out of bounds",
+                                    upvalue_index
+                                ));
+                            }
+                        } else {
+                            return Err("LoadUpvalue called on non-closure function".to_string());
+                        }
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::StoreUpvalue {
+                        upvalue_index,
+                        src_register,
+                    } => {
+                        let value =
+                            self.register_stack[current_frame.reg_start + src_register as usize];
+
+                        if let FunctionRef::Closure(_, Some(obj_ref)) = &current_frame.func {
+                            // Changed here
+                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                        } else {
+                            return Err("StoreUpvalue called on non-closure function".to_string());
+                        }
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::CreateClosure {
+                        dest_register,
+                        template_register,
+                        captures,
+                    } => {
+                        println!("DEBUG: CreateClosure with {} captures: ", captures.len());
+                        for capture in captures.iter() {
+                            print!(" {:?} ", capture);
+                        }
+                        // Get template
+                        let template_value = self.register_stack
+                            [current_frame.reg_start + template_register as usize];
+                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                            heap_ptr.0
+                        } else {
+                            return Err("Template must be a heap object".to_string());
+                        };
+
+                        // Capture upvalues directly from registers
+                        let mut upvalues = Vec::new();
+                        for (parent_reg, _symbol_id) in captures {
+                            let captured_value =
+                                self.register_stack[current_frame.reg_start + parent_reg as usize];
+                            upvalues.push(captured_value);
+                        }
+                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                        for upvalue in upvalues.iter() {
+                            println!(" {}", upvalue);
+                        }
+
+                        // Create closure
+                        let closure_obj = ClosureObject {
+                            template: template_obj_ref,
+                            upvalues,
+                        };
+
+                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                        self.register_stack[current_frame.reg_start + dest_register as usize] =
+                            ValueRef::Heap(GcPtr::new(closure_ref));
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::Suspend => todo!(),
+                }
             } else if let FunctionRef::Native(tagged_ptr) = &current_frame.func {
                 // Handle native function execution using tagged pointer
 
@@ -558,7 +693,127 @@ impl ExecutionContext {
                     &mut current_frame.pc,
                 )?;
 
-                self.handle_instruction_result(instruction_result, current_frame)?;
+                // Handle instruction results (same logic as CompiledFunction)
+                match instruction_result {
+                    InstructionResult::Continue => {
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::Return => {
+                        let completed_frame = self.call_stack.pop().unwrap();
+                        let return_value = self.register_stack[completed_frame.reg_start];
+
+                        self.register_stack.truncate(completed_frame.reg_start);
+
+                        if self.call_stack.is_empty() {
+                            return Ok(return_value);
+                        }
+
+                        if let Some(caller_frame) = self.call_stack.last() {
+                            self.register_stack[caller_frame.reg_start] = return_value;
+                        }
+                    }
+                    InstructionResult::Call(new_frame) => {
+                        // Update current frame PC, then push new frame
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                        self.call_stack.push(new_frame);
+                    }
+                    InstructionResult::SetupSelfReference(reg) => {
+                        // Handle self-reference setup for closures
+                        if let Some(obj_ref) = obj_ref {
+                            let closure_value = ValueRef::Heap(GcPtr::new(*obj_ref));
+                            self.register_stack[current_frame.reg_start + reg as usize] =
+                                closure_value;
+                        } else {
+                            return Err(
+                                "SetupSelfReference: no closure object available".to_string()
+                            );
+                        }
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::LoadUpvalue {
+                        dest_register,
+                        upvalue_index,
+                    } => {
+                        // Load upvalue from closure object
+                        if let Some(upvalue) = closure_obj.upvalues.get(upvalue_index as usize) {
+                            self.register_stack[current_frame.reg_start + dest_register as usize] =
+                                *upvalue;
+                        } else {
+                            return Err(format!("Upvalue index {} out of bounds", upvalue_index));
+                        }
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::StoreUpvalue {
+                        upvalue_index,
+                        src_register,
+                    } => {
+                        // Store upvalue back to closure object
+                        let value =
+                            self.register_stack[current_frame.reg_start + src_register as usize];
+
+                        if let Some(obj_ref) = obj_ref {
+                            GcPtr(*obj_ref).set_upvalue(upvalue_index as usize, value)?;
+                        } else {
+                            return Err("StoreUpvalue: no closure object available".to_string());
+                        }
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::CreateClosure {
+                        dest_register,
+                        template_register,
+                        captures,
+                    } => {
+                        // Handle nested closure creation (same as in CompiledFunction case)
+                        let template_value = self.register_stack
+                            [current_frame.reg_start + template_register as usize];
+                        let template_obj_ref = if let ValueRef::Heap(heap_ptr) = template_value {
+                            heap_ptr.0
+                        } else {
+                            return Err("Template must be a heap object".to_string());
+                        };
+
+                        // Capture upvalues directly from registers
+                        let mut upvalues = Vec::new();
+                        for (parent_reg, _symbol_id) in captures {
+                            let captured_value =
+                                self.register_stack[current_frame.reg_start + parent_reg as usize];
+                            upvalues.push(captured_value);
+                        }
+
+                        println!("DEBUG: Collected {} upvalues: ", upvalues.len());
+                        for upvalue in upvalues.iter() {
+                            println!("{}", upvalue);
+                        }
+
+                        // Create closure
+                        let closure_obj = ClosureObject {
+                            template: template_obj_ref,
+                            upvalues,
+                        };
+
+                        let closure_ref = self.vm.alloc_closure(closure_obj);
+                        self.register_stack[current_frame.reg_start + dest_register as usize] =
+                            ValueRef::Heap(GcPtr::new(closure_ref));
+
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            frame.pc = current_frame.pc;
+                        }
+                    }
+                    InstructionResult::Suspend => todo!(),
+                }
 
                 continue; // Continue to next iteration of the main execution loop
             }
