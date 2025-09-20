@@ -1272,9 +1272,11 @@ impl ExecutionContext {
 
                 // Handle different types gracefully
                 if let Some(handle) = value_ref.get_future_handle() {
+
                     // Fast path: check if already completed
                     if let Some(result) = handle.try_poll() {
                         self.register_stack[reg_base + result_reg] = result;
+
                         return Ok(InstructionResult::Continue);
                     }
 

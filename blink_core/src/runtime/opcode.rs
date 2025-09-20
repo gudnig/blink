@@ -75,10 +75,11 @@ pub enum Opcode {
 
     CreateFuture = 0xA0,    // Create a new future
     CompleteFuture = 0xA1,  // Complete a future with a value
+    Await = 0xA2,           // Suspend goroutine until future completes (deref)
     Suspend = 0xA3,         // Suspend current goroutine
     Resume = 0xA4,          // Resume suspended goroutine
     Spawn = 0xA5,           // Spawn new goroutine (go)
-    Await = 0xA6,           // Suspend goroutine until future completes (deref)
+
 
 
     

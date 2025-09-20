@@ -737,10 +737,10 @@ impl BytecodeCompiler {
                         .read()
                         .get_symbol(symbol_id)
                         .unwrap_or_default();
-                    println!("   → Found symbol: {} (id: {})", symbol_name, symbol_id);
+
 
                     let local_result = self.resolve_local_symbol(symbol_id);
-                    println!("     Local scope result: {}", local_result.unwrap_or(0));
+
 
                     if self.resolve_local_symbol(symbol_id).is_none() {
                         if let Some(parent_reg) = self.resolve_in_parent_scopes(symbol_id) {
@@ -749,21 +749,12 @@ impl BytecodeCompiler {
                                 .iter()
                                 .any(|(sym, _)| *sym == symbol_id)
                             {
-                                println!(
-                                    "     ✅ CAPTURING as upvalue: {} at register {}",
-                                    symbol_name, parent_reg
-                                );
+
                                 self.captured_symbols.push((symbol_id, parent_reg));
                                 // Store both!
                             }
-                        } else {
-                            println!("     → Not in parent scopes, might be global");
                         }
-                    } else {
-                        println!("     → Found in local scope, no capture needed");
                     }
-                } else {
-                    println!("   → Non-symbol immediate: {}", unpack_immediate(packed));
                 }
             }
             ValueRef::Heap(_) => {
@@ -1313,23 +1304,34 @@ impl BytecodeCompiler {
     }
 
     fn compile_go(&mut self, args: &[ValueRef]) -> Result<u8, String> {
-        if args.len() != 1 {
-            return Err("go expects exactly 1 argument: expression to run in goroutine".to_string());
+        if args.is_empty() {
+            return Err("go expects at least 1 argument: expression(s) to run in goroutine".to_string());
         }
 
-        let func_reg = if self.is_function_expression(args[0])? {
+        let body_expr = if args.len() == 1 {
+            // Single argument - use as-is
+            args[0]
+        } else {
+            // Multiple arguments - wrap in implicit (do ...)
+            let do_symbol = ValueRef::symbol(self.vm.symbol_table.write().intern("do"));
+            let mut do_args = vec![do_symbol];
+            do_args.extend_from_slice(args);
+            self.vm.list_value(do_args)
+        };
+
+        let func_reg = if self.is_function_expression(body_expr)? {
             // If it's already a function expression like (fn [] ...), use it directly
-            self.compile_expression(args[0])?
+            self.compile_expression(body_expr)?
         } else {
             // Otherwise, wrap the expression in an implicit (fn [] ...)
-            self.compile_implicit_goroutine_function(args[0])?
+            self.compile_implicit_goroutine_function(body_expr)?
         };
 
         let result_reg = self.alloc_register();
 
         // Emit Spawn opcode
         self.emit_u8(Opcode::Spawn as u8);
-        self.emit_u8(result_reg); // Result register (returns goroutine id) 
+        self.emit_u8(result_reg); // Result register (returns goroutine id)
         self.emit_u8(func_reg); // Function to execute in goroutine
 
         Ok(result_reg)
@@ -1723,6 +1725,7 @@ impl BytecodeCompiler {
                     | "future"
                     | "complete"
                     | "go"
+                    | "deref"
             )
         } else {
             false
