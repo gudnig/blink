@@ -2,10 +2,8 @@ use std::{future::Future, io::BufRead, pin::Pin, sync::Arc};
 
 use anyhow::Context;
 use blink_core::{
-    collections::{ContextualValueRef, ValueContext},
-    eval::{self, EvalContext, EvalResult},
-    native_functions::{register_builtin_macros, register_builtins, register_complex_macros},
-    parser::{parse, preload_builtin_reader_macros, tokenize_at},
+
+    parser::{parse, tokenize_at},
     runtime::SymbolTable,
     value::SourcePos,
     Env,

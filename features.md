@@ -214,6 +214,9 @@
   - [ ] Futures - (future ...) for concurrent computation
   - [ ] Goroutines - (go ...) for lightweight concurrency
   - [ ] Channels (CSP style) - Communication primitives for goroutines/futures
+    - [ ] Single threaded
+    - [ ] multithreaded mutex locked
+    - [ ] lock-free
   - [ ] Async I/O - File/network I/O, timers, etc.
   - [ ] Timers/sleep
   - [ ] Future compilation and storage

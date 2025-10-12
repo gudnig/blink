@@ -236,6 +236,14 @@ impl BlinkVM {
         ValueRef::future_handle(handle.id, handle.generation)
     }
 
+    pub fn create_channel(&self, capacity: Option<usize>) -> ValueRef {
+        let mut registry = self.handle_registry.write();
+        let handle = registry.create_channel(capacity);
+        ValueRef::channel_handle(handle.id, handle.generation) // You'll need this method
+    }
+
+    
+
 
     pub fn complete_future_value(&self, future_value: ValueRef, result: ValueRef) -> Result<(), String> {
         if let Some(handle) = future_value.get_future_handle() {

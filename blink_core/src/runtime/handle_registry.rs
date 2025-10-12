@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Waker;
 use dashmap::DashSet;
 use parking_lot::Mutex;
 
-use crate::value::{FunctionHandle, FutureHandle};
+use crate::value::{ChannelEntry, ChannelHandle, FunctionHandle, FutureHandle};
 use crate::ValueRef;
 
 #[derive(Debug)]
@@ -163,7 +163,8 @@ impl FutureEntry {
 
 pub struct HandleRegistry {
     pub functions: HashMap<u64, ValueRef>, // For native functions (unchanged)
-    pub futures: HashMap<u64, FutureEntry>, // For futures
+    pub futures: HashMap<u64, FutureEntry>, // For future
+    pub channels: HashMap<u64, ChannelEntry>, // Add this
     next_id: AtomicU64,
     next_generation: AtomicU32,
 }
@@ -173,6 +174,7 @@ impl HandleRegistry {
         HandleRegistry {
             functions: HashMap::new(),
             futures: HashMap::new(),
+            channels: HashMap::new(),
             next_id: AtomicU64::new(0),
             next_generation: AtomicU32::new(0),
         }
@@ -211,6 +213,33 @@ impl HandleRegistry {
             // Validate generation to detect stale handles
             if entry.generation == handle.generation {
                 Some(entry.clone())
+            } else {
+                None // Stale handle
+            }
+        })
+    }
+
+    pub fn create_channel(&mut self, capacity: Option<usize>) -> ChannelHandle {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) & 0x3FFFFFFF;
+        
+        let entry = ChannelEntry {
+            generation,
+            buffer: VecDeque::new(),
+            capacity,
+            waiting_senders: VecDeque::new(),
+            waiting_receivers: VecDeque::new(),
+            closed: false,
+        };
+        
+        self.channels.insert(id, entry);
+        ChannelHandle { id, generation }
+    }
+
+    pub fn resolve_channel(&mut self, handle: &ChannelHandle) -> Option<&mut ChannelEntry> {
+        self.channels.get_mut(&handle.id).and_then(|entry| {
+            if entry.generation == handle.generation {
+                Some(entry)
             } else {
                 None // Stale handle
             }

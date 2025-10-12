@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use blink_core::{ eval::EvalContext, runtime::SymbolTable, value::{unpack_immediate, ImmediateValue, ParsedValue, ParsedValueWithPos}, ValueRef};
+use blink_core::{ runtime::SymbolTable, value::{ParsedValue, ParsedValueWithPos}};
 
 use crate::session::{SymbolInfo, SymbolKind, SymbolSource};
 
@@ -32,7 +32,7 @@ pub fn get_var_representation(value: &ParsedValueWithPos, kind: &SymbolKind, nam
                 if elements.len() >= 3 {
                     let head = &elements[0];
                     if let ParsedValue::Symbol(sym) = head.value {
-                        if symbol_table.get_symbol(sym) == Some("def") {
+                        if symbol_table.get_symbol(sym) == Some("def".to_string()) {
 
                             let value_expr = &elements[2];
                             let inner_name = &elements[1];

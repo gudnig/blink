@@ -7,6 +7,7 @@ mod parsed_value;
 mod plugin;
 mod value_ref;
 mod future_handle;
+mod channel_handle;
 
 pub use gc_ptr::*;
 pub use heap_value::*;
@@ -17,7 +18,7 @@ pub use parsed_value::*;
 pub use plugin::*;
 pub use value_ref::*;
 pub use future_handle::*;
-
+pub use channel_handle::*;
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy)]
 pub struct SourcePos {
     pub line: usize,

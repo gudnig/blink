@@ -20,9 +20,9 @@ pub enum ValueRef {
 }
 
 // Handle type tags
-const ISOLATED_FN_TAG: usize = 0;
-const CONTEXTUAL_FN_TAG: usize = 1;
-const FUTURE_HANDLE_TAG: usize = 2;
+const FN_TAG: usize = 0;
+const FUTURE_HANDLE_TAG: usize = 1;
+const CHANNEL_HANDLE_TAG: usize = 2;
 const _RESERVED_TAG: usize = 3; // Reserved for future use
 
 #[derive(Debug)]
@@ -116,15 +116,21 @@ impl ValueRef {
     }
 
     pub fn isolated_native_fn(boxed_fn: IsolatedNativeFn) -> Self {
-        let ptr = Box::into_raw(Box::new(boxed_fn)) as *mut IsolatedNativeFn as usize;
-        debug_assert!(ptr & 3 == 0, "Pointer must be 4-byte aligned");
-        ValueRef::Handle(ptr | ISOLATED_FN_TAG)
+        let native_fn = NativeFn::Isolated(boxed_fn);
+        Self::native_function(native_fn)
     }
 
+
+
     pub fn contextual_native_fn(boxed_fn: ContextualNativeFn) -> Self {
-        let ptr = Box::into_raw(Box::new(boxed_fn)) as *mut ContextualNativeFn as usize;
+        let native_fn = NativeFn::Contextual(boxed_fn);
+        Self::native_function(native_fn)
+    }
+
+    pub fn native_function(func: NativeFn) -> Self {
+        let ptr = Box::into_raw(Box::new(func)) as usize;
         debug_assert!(ptr & 3 == 0, "Pointer must be 4-byte aligned");
-        ValueRef::Handle(ptr | CONTEXTUAL_FN_TAG)
+        ValueRef::Handle(ptr | FN_TAG)
     }
 
     pub fn future_handle(id: u64, generation: u32) -> Self {
@@ -134,11 +140,23 @@ impl ValueRef {
         ValueRef::Handle(packed as usize)
     }
 
+    pub fn channel_handle(id: u64, generation: u32) -> Self {
+        // Pack: 32 bits ID + 30 bits generation + 2 bits tag
+        debug_assert!(generation < (1 << 30), "Generation too large for 30 bits");
+        let packed = (id << 32) | ((generation as u64) << 2) | CHANNEL_HANDLE_TAG as u64;
+        ValueRef::Handle(packed as usize)
+    }
+
     pub fn type_tag(&self) -> &'static str {
         match self {
             ValueRef::Immediate(packed) => unpack_immediate(*packed).type_tag(),
             ValueRef::Heap(gc_ptr) => gc_ptr.type_tag().to_str(),
-            ValueRef::Handle(_) => "native-function",
+            ValueRef::Handle(handle) => match handle & 3 {
+                FN_TAG => "native-function",
+                FUTURE_HANDLE_TAG => "future",
+                CHANNEL_HANDLE_TAG => "channel",
+                _ => "unknown",
+            }
         }
     }
 
@@ -455,8 +473,12 @@ impl ValueRef {
         matches!(self, ValueRef::Handle(tagged_ptr) if tagged_ptr & 3 == FUTURE_HANDLE_TAG)
     }
 
+    pub fn is_channel(&self) -> bool {
+        matches!(self, ValueRef::Handle(tagged_ptr) if tagged_ptr & 3 == CHANNEL_HANDLE_TAG)
+    }
+
     pub fn is_native_fn(&self) -> bool {
-        matches!(self, ValueRef::Handle(tagged_ptr) if (tagged_ptr & 3) < 2)
+        matches!(self, ValueRef::Handle(tagged_ptr) if (tagged_ptr & 3) == FN_TAG)
     }
     
 

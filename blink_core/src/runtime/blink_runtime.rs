@@ -7,14 +7,13 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     runtime::{
-        BlinkVM, EvalResult, ExecutionContext,
-        SingleThreadedScheduler, Goroutine, SchedulerAction, GoroutineId
+        BlinkVM, EvalResult, ExecutionContext, Goroutine, GoroutineId, SchedulerAction, SingleThreadedScheduler
     },
-    value::{GcPtr, ValueRef},
+    value::{GcPtr, ValueRef}, GoroutineScheduler,
 };
 
 pub static TOKIO_HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
-pub static GLOBAL_RUNTIME: std::sync::OnceLock<Arc<BlinkRuntime>> = std::sync::OnceLock::new();
+pub static GLOBAL_RUNTIME: std::sync::OnceLock<Arc<BlinkRuntime<SingleThreadedScheduler>>> = std::sync::OnceLock::new();
 
 pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
     TOKIO_HANDLE
@@ -24,17 +23,37 @@ pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
 
 // Runtime owns both VM and concrete scheduler
 #[derive(Debug)]
-pub struct BlinkRuntime {
+pub struct BlinkRuntime<S: GoroutineScheduler> {
     pub vm: Arc<BlinkVM>,
-    pub scheduler: Mutex<SingleThreadedScheduler>,
+    pub scheduler: Mutex<S>,
     pub execution_context: ExecutionContext,
     scheduler_running: AtomicBool,
 }
 
-impl BlinkRuntime {
+unsafe impl<S: GoroutineScheduler> Send for BlinkRuntime<S> {}
+unsafe impl<S: GoroutineScheduler> Sync for BlinkRuntime<S> {}
+
+impl BlinkRuntime<SingleThreadedScheduler> {
+    /// Initialize the global runtime singleton (single-threaded only)
+    pub fn init_global(vm: Arc<BlinkVM>, current_module: u32) -> Result<Arc<Self>, String> {
+        let runtime = Arc::new(Self::new(vm, current_module));
+        runtime.init();
+        
+        // Start the background scheduler
+        runtime.start_background_scheduler();
+        
+        match GLOBAL_RUNTIME.set(runtime.clone()) {
+            Ok(()) => Ok(runtime),
+            Err(_) => Err("Global runtime already initialized".to_string()),
+        }
+    }
+}
+
+
+impl<S: GoroutineScheduler> BlinkRuntime<S> {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         let execution_context = ExecutionContext::new(vm.clone(), current_module);
-        let scheduler = Mutex::new(SingleThreadedScheduler::new());
+        let scheduler = Mutex::new(S::new());
         
         Self {
             vm,
@@ -49,19 +68,6 @@ impl BlinkRuntime {
         TOKIO_HANDLE.set(handle.clone()).ok();
     }
 
-    /// Initialize the global runtime singleton
-    pub fn init_global(vm: Arc<BlinkVM>, current_module: u32) -> Result<Arc<BlinkRuntime>, String> {
-        let runtime = Arc::new(BlinkRuntime::new(vm, current_module));
-        runtime.init();
-        
-        // Start the background scheduler
-        runtime.start_background_scheduler();
-        
-        match GLOBAL_RUNTIME.set(runtime.clone()) {
-            Ok(()) => Ok(runtime),
-            Err(_) => Err("Global runtime already initialized".to_string()),
-        }
-    }
 
     /// Start the background scheduler thread (native threads only)
     pub fn start_background_scheduler(self: &Arc<Self>) {
@@ -144,7 +150,7 @@ impl BlinkRuntime {
         vm: Arc<BlinkVM>,
     ) -> SchedulerAction {
         use crate::runtime::execution_context::{ExecutionContext, FunctionRef};
-        use crate::runtime::SchedulerAction;
+        use crate::runtime::blink_runtime::SchedulerAction;
 
         // Create a temporary execution context for this goroutine
         let mut temp_context = ExecutionContext::new(vm, goroutine.current_module);

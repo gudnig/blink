@@ -12,7 +12,8 @@ impl BlinkVM {
             |s: &str, f: fn(Vec<ValueRef>, ctx: &mut NativeContext) -> EvalResult, module: u32| -> ValueRef {
                 let sym = self.symbol_table.write().intern(s);
                 let boxed = Box::new(f);
-                let val = ValueRef::contextual_native_fn(boxed);
+                let native_fn = NativeFn::Contextual(boxed);
+                let val = ValueRef::native_function(native_fn);
                 
                 self.update_module(module, sym, val);
 

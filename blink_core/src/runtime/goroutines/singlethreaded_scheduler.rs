@@ -3,121 +3,13 @@
 
 use crate::runtime::execution_context::FunctionRef;
 use crate::runtime::{set_current_goroutine_id, BlinkVM, CallFrame, TypeTag};
-use crate::value::{FutureHandle, GcPtr, ValueRef};
+use crate::value::{ChannelHandle, FutureHandle, GcPtr, ValueRef};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use crate::{FutureEntry, SuspendedContinuation};
-
-pub type GoroutineId = u32;
-
-// === Goroutine State ===
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GoroutineState {
-    Ready,     // Can be scheduled
-    Running,   // Currently executing
-    Blocked,   // Waiting on future/channel
-    Completed, // Finished execution
-}
-
-#[derive(Debug)]
-pub struct Goroutine {
-    pub id: u32,
-    pub state: GoroutineState,
-    pub call_stack: Vec<crate::runtime::execution_context::CallFrame>,
-    pub register_stack: Vec<ValueRef>,
-    pub current_module: u32,
-    pub instruction_pointer: usize,
-}
-
-impl Goroutine {
-    pub fn new(id: u32, initial_function: ValueRef) -> Result<Self, String> {
-        // Create initial call frame from the function
-        let call_frame = Self::create_initial_frame(initial_function)?;
-        let current_module = call_frame.current_module;
-
-        // Allocate registers for the initial function
-        let mut register_stack = Vec::new();
-        let reg_count = match &call_frame.func {
-            crate::runtime::execution_context::FunctionRef::CompiledFunction(compiled_fn, _) => {
-                compiled_fn.register_count as usize
-            }
-            crate::runtime::execution_context::FunctionRef::Closure(closure_obj, _) => {
-                let template_fn = GcPtr::new(closure_obj.template).read_callable();
-                template_fn.register_count as usize
-            }
-            crate::runtime::execution_context::FunctionRef::Native(_) => {
-                1 // Native functions need at least 1 register for return value
-            }
-        };
-
-        // Pre-allocate registers with nil values (same as normal execution)
-        for _ in 0..reg_count {
-            register_stack.push(ValueRef::nil());
-        }
-
-        Ok(Self {
-            id,
-            state: GoroutineState::Ready,
-            call_stack: vec![call_frame],
-            register_stack,
-            current_module,
-            instruction_pointer: 0,
-        })
-    }
+use super::SchedulerAction;
+use crate::{FutureEntry, Goroutine, GoroutineId, GoroutineScheduler, GoroutineState, SuspendedContinuation};
 
 
-    fn create_initial_frame(func_value: ValueRef) -> Result<CallFrame, String> {
-        match func_value {
-            ValueRef::Heap(heap) => {
-                let type_tag = heap.type_tag();
-                let obj_ref = heap.0;
-                match type_tag {
-                    TypeTag::UserDefinedFunction | TypeTag::Macro => {
-                        let compiled_func = heap.read_callable();
-                        let module = compiled_func.module;
-                        Ok(CallFrame {
-                            func: FunctionRef::CompiledFunction(compiled_func, Some(obj_ref)),
-                            pc: 0,
-                            reg_start: 0,
-                            reg_count: 0, // Will be set when registers are allocated
-                            current_module: module,
-                        })
-                    }
-                    TypeTag::Closure => {
-                        let closure_obj = heap.read_closure();
-                        let template_fn = GcPtr::new(closure_obj.template).read_callable();
-                        let module = template_fn.module;
-                        Ok(CallFrame {
-                            func: FunctionRef::Closure(closure_obj, Some(obj_ref)),
-                            pc: 0,
-                            reg_start: 0,
-                            reg_count: 0, // Will be set when registers are allocated
-                            current_module: module,
-                        })
-                    }
-                    _ => Err(format!(
-                        "Invalid function value for goroutine: {:?}",
-                        func_value
-                    )),
-                }
-            }
-            ValueRef::Handle(native) => {
-                Ok(CallFrame {
-                    func: FunctionRef::Native(native),
-                    pc: 0,
-                    reg_start: 0,
-                    reg_count: 0,      // Will be set when registers are allocated
-                    current_module: 0, // Native functions don't have modules
-                })
-            }
-            _ => Err(format!(
-                "Invalid function value for goroutine: {:?}",
-                func_value
-            )),
-        }
-    }
-}
 
 // === Scheduler ===
 
@@ -129,39 +21,8 @@ pub struct SingleThreadedScheduler {
     next_id: AtomicU32,
 }
 
+
 impl SingleThreadedScheduler {
-    pub fn new() -> Self {
-        Self {
-            ready_queue: VecDeque::new(),
-            goroutines: Vec::new(),
-            current_goroutine: None,
-            next_id: AtomicU32::new(1),
-        }
-    }
-
-    /// Spawn a new goroutine
-    pub fn spawn(&mut self, function: ValueRef) -> Result<u32, String> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let goroutine = Goroutine::new(id, function)?;
-
-        // Set the goroutine ID for locking purposes
-        set_current_goroutine_id(id);
-
-        // Add to ready queue
-        self.ready_queue.push_back(id);
-
-        // Store in goroutines vector
-        // Make sure the goroutines vector is long enough
-        while id as usize >= self.goroutines.len() {
-            self.goroutines.push(None);
-        }
-        self.goroutines[id as usize] = Some(goroutine);
-
-        Ok(id)
-    }
-
-
-
 
     // Better version that accepts the result value
     pub fn resume_goroutine_with_result(&mut self, continuation: SuspendedContinuation, result: ValueRef) {
@@ -274,9 +135,43 @@ impl SingleThreadedScheduler {
         !self.ready_queue.is_empty() || self.current_goroutine.is_some()
     }
 
+    
+
+    
+}
+
+impl GoroutineScheduler for SingleThreadedScheduler {
+    fn new() -> Self {
+        Self {
+            ready_queue: VecDeque::new(),
+            goroutines: Vec::new(),
+            current_goroutine: None,
+            next_id: AtomicU32::new(1),
+        }
+    }
+
+    fn has_ready_goroutines(&self) -> bool {
+        !self.ready_queue.is_empty()
+    }
+
+    fn spawn(&mut self, function: ValueRef) -> Result<GoroutineId, String> {
+        // Your existing implementation
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let goroutine = Goroutine::new(id, function)?;
+        set_current_goroutine_id(id);
+        self.ready_queue.push_back(id);
+        
+        while id as usize >= self.goroutines.len() {
+            self.goroutines.push(None);
+        }
+        self.goroutines[id as usize] = Some(goroutine);
+        
+        Ok(id)
+    }
+
     /// Run scheduler until all goroutines complete
     /// Run a single iteration (execute one step of one goroutine) for background scheduling
-    pub fn run_single_iteration<F>(&mut self, mut execute_step: F) -> bool
+    fn run_single_iteration<F>(&mut self, mut execute_step: F) -> bool
     where
         F: FnMut(&mut Goroutine) -> SchedulerAction,
     {
@@ -308,7 +203,7 @@ impl SingleThreadedScheduler {
         }
     }
 
-    pub fn run_to_completion<F>(&mut self, mut execute_step: F)
+    fn run_to_completion<F>(&mut self, mut execute_step: F)
     where
         F: FnMut(&mut Goroutine) -> SchedulerAction,
     {
@@ -342,14 +237,36 @@ impl SingleThreadedScheduler {
             }
         }
     }
-}
 
-// === Scheduler Action ===
+    fn unblock(&mut self, goroutine_id: GoroutineId) {
+        // Your existing implementation (already there)
+        if let Some(goroutine) = &mut self.goroutines[goroutine_id as usize] {
+            if goroutine.state == GoroutineState::Blocked {
+                goroutine.state = GoroutineState::Ready;
+                self.ready_queue.push_back(goroutine_id);
+            }
+        }
+    }
 
-#[derive(Debug)]
-pub enum SchedulerAction {
-    Continue,           // Keep running current goroutine
-    Yield,              // Yield to other goroutines
-    Block,              // Block on future/channel
-    Complete(ValueRef), // Goroutine completed with result
+    // NEW: Channel operations (to be implemented)
+    fn channel_send(&mut self, handle: ChannelHandle, value: ValueRef) -> SchedulerAction {
+        // TODO: Implement channel send
+        todo!("Channel send not yet implemented")
+    }
+
+    fn channel_receive(&mut self, handle: ChannelHandle) -> (SchedulerAction, Option<ValueRef>) {
+        // TODO: Implement channel receive
+        todo!("Channel receive not yet implemented")
+    }
+
+    // NEW: Future operations (to be implemented)
+    fn future_add_waiter(&mut self, handle: FutureHandle, continuation: SuspendedContinuation) -> Option<ValueRef> {
+        // TODO: Move future logic from VM to here
+        todo!("Future add waiter not yet implemented")
+    }
+
+    fn complete_future(&mut self, handle: FutureHandle, value: ValueRef) -> Vec<GoroutineId> {
+        // TODO: Move future completion from VM to here
+        todo!("Future complete not yet implemented")
+    }
 }
