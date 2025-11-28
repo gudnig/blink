@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::runtime::Runtime;
 use crate::{env::Env, module::{Module, ModuleRegistry, SerializedModuleSource}, parser::ReaderContext, runtime::{
     CompiledFunction, HandleRegistry, SuspendedContinuation, SymbolTable, ValueMetadataStore
-}, telemetry::TelemetryEvent, value::{FunctionHandle, SourceRange, ValueRef}, BlinkRuntime, FutureState, GLOBAL_RUNTIME};
+}, telemetry::TelemetryEvent, value::{ChannelEntry, ChannelHandle, FunctionHandle, SourceRange, ValueRef}, BlinkRuntime, FutureState, GLOBAL_RUNTIME};
 use crate::value::FutureHandle;
 
 pub static GLOBAL_VM: OnceLock<Arc<BlinkVM>> = OnceLock::new();
@@ -240,6 +240,12 @@ impl BlinkVM {
         let mut registry = self.handle_registry.write();
         let handle = registry.create_channel(capacity);
         ValueRef::channel_handle(handle.id, handle.generation) // You'll need this method
+    }
+
+    pub fn resolve_channel(&self, handle: ChannelHandle) -> Option<&mut ChannelEntry> {
+        let mut registry = self.handle_registry.write();
+        let channel = registry.resolve_channel(&handle);
+        channel
     }
 
     

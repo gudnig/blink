@@ -3,9 +3,10 @@
 
 use crate::runtime::execution_context::FunctionRef;
 use crate::runtime::{set_current_goroutine_id, BlinkVM, CallFrame, TypeTag};
-use crate::value::{ChannelHandle, FutureHandle, GcPtr, ValueRef};
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::value::{ChannelEntry, ChannelHandle, FutureHandle, GcPtr, ValueRef};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use super::SchedulerAction;
 use crate::{FutureEntry, Goroutine, GoroutineId, GoroutineScheduler, GoroutineState, SuspendedContinuation};
 
@@ -15,10 +16,14 @@ use crate::{FutureEntry, Goroutine, GoroutineId, GoroutineScheduler, GoroutineSt
 
 #[derive(Debug)]
 pub struct SingleThreadedScheduler {
+    vm: Arc<BlinkVM>,
     ready_queue: VecDeque<u32>,
     goroutines: Vec<Option<Goroutine>>,
     current_goroutine: Option<u32>,
     next_id: AtomicU32,
+    channels: HashMap<u64, ChannelEntry>,
+    next_channel_id: AtomicU32,
+    next_generation: AtomicU32,
 }
 
 
@@ -141,12 +146,16 @@ impl SingleThreadedScheduler {
 }
 
 impl GoroutineScheduler for SingleThreadedScheduler {
-    fn new() -> Self {
+    fn new(vm: Arc<BlinkVM>) -> Self {
         Self {
             ready_queue: VecDeque::new(),
+            vm,
             goroutines: Vec::new(),
             current_goroutine: None,
             next_id: AtomicU32::new(1),
+            channels: HashMap::new(),
+            next_channel_id: AtomicU32::new(1),
+            next_generation: AtomicU32::new(1),
         }
     }
 
@@ -248,15 +257,119 @@ impl GoroutineScheduler for SingleThreadedScheduler {
         }
     }
 
-    // NEW: Channel operations (to be implemented)
+    fn create_channel(&mut self, capacity: Option<usize>) -> ChannelHandle {
+        let id = self.next_channel_id.fetch_add(1, Ordering::Relaxed);
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) & 0x3FFFFFFF;
+        
+        let entry = ChannelEntry {
+            generation,
+            buffer: VecDeque::new(),
+            capacity,
+            waiting_senders: VecDeque::new(),
+            waiting_receivers: VecDeque::new(),
+            closed: false,
+        };
+        
+        self.channels.insert(id, entry);
+        ChannelHandle { id, generation }
+    }
+
     fn channel_send(&mut self, handle: ChannelHandle, value: ValueRef) -> SchedulerAction {
-        // TODO: Implement channel send
-        todo!("Channel send not yet implemented")
+        let current_goroutine_id = self.current_goroutine
+            .expect("channel_send called without current goroutine");
+        
+        let channel = match self.channels.get_mut(&handle.id) {
+            Some(ch) if ch.generation == handle.generation => ch,
+            _ => return SchedulerAction::Complete(ValueRef::nil()),
+        };
+        
+        if channel.closed {
+            return SchedulerAction::Complete(ValueRef::nil());
+        }
+        
+        // Try direct handoff to waiting receiver
+        if let Some(receiver_id) = channel.waiting_receivers.pop_front() {
+            // Store value for receiver to pick up
+            // (We'll handle this via a pending_values map or similar)
+            self.unblock(receiver_id);
+            return SchedulerAction::Continue;
+        }
+        
+        // Try to buffer
+        match channel.capacity {
+            Some(capacity) if channel.buffer.len() < capacity => {
+                channel.buffer.push_back(value);
+                SchedulerAction::Continue
+            }
+            _ => {
+                // Must block (unbuffered or full)
+                channel.waiting_senders.push_back((current_goroutine_id, value));
+                SchedulerAction::Block
+            }
+        }
     }
 
     fn channel_receive(&mut self, handle: ChannelHandle) -> (SchedulerAction, Option<ValueRef>) {
-        // TODO: Implement channel receive
-        todo!("Channel receive not yet implemented")
+        let current_goroutine_id = self.current_goroutine
+            .expect("channel_receive called without current goroutine");
+        
+        let channel = match self.channels.get_mut(&handle.id) {
+            Some(ch) if ch.generation == handle.generation => ch,
+            _ => return (SchedulerAction::Complete(ValueRef::nil()), None),
+        };
+        
+        // Try buffer first
+        if let Some(value) = channel.buffer.pop_front() {
+            // Unblock a waiting sender if any
+            if let Some((sender_id, sender_value)) = channel.waiting_senders.pop_front() {
+                channel.buffer.push_back(sender_value);
+                self.unblock(sender_id);
+            }
+            return (SchedulerAction::Continue, Some(value));
+        }
+        
+        // Try direct handoff from waiting sender
+        if let Some((sender_id, value)) = channel.waiting_senders.pop_front() {
+            self.unblock(sender_id);
+            return (SchedulerAction::Continue, Some(value));
+        }
+        
+        // Channel closed and empty?
+        if channel.closed {
+            return (SchedulerAction::Continue, None);
+        }
+        
+        // Must block
+        channel.waiting_receivers.push_back(current_goroutine_id);
+        (SchedulerAction::Block, None)
+    }
+
+    fn close_channel(&mut self, handle: ChannelHandle) -> Result<(), String> {
+        let channel = match self.channels.get_mut(&handle.id) {
+            Some(ch) if ch.generation == handle.generation => ch,
+            _ => return Err("Invalid channel handle".to_string()),
+        };
+
+        channel.closed = true;
+
+        // Collect IDs to unblock (to avoid borrowing issues)
+        let receivers: Vec<_> = channel.waiting_receivers.drain(..).collect();
+        let senders: Vec<_> = channel.waiting_senders.drain(..).map(|(id, _)| id).collect();
+
+        // Drop the channel reference before calling unblock
+        drop(channel);
+
+        // Unblock all waiting receivers (they'll get None)
+        for receiver_id in receivers {
+            self.unblock(receiver_id);
+        }
+
+        // Unblock all waiting senders (their sends will return error)
+        for sender_id in senders {
+            self.unblock(sender_id);
+        }
+
+        Ok(())
     }
 
     // NEW: Future operations (to be implemented)
