@@ -241,14 +241,7 @@ impl BlinkVM {
         let handle = registry.create_channel(capacity);
         ValueRef::channel_handle(handle.id, handle.generation) // You'll need this method
     }
-
-    pub fn resolve_channel(&self, handle: ChannelHandle) -> Option<&mut ChannelEntry> {
-        let mut registry = self.handle_registry.write();
-        let channel = registry.resolve_channel(&handle);
-        channel
-    }
-
-    
+     
 
 
     pub fn complete_future_value(&self, future_value: ValueRef, result: ValueRef) -> Result<(), String> {

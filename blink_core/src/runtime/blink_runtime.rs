@@ -23,17 +23,17 @@ pub fn get_tokio_handle() -> &'static tokio::runtime::Handle {
 
 // Runtime owns both VM and concrete scheduler
 #[derive(Debug)]
-pub struct BlinkRuntime<S: GoroutineScheduler> {
+pub struct BlinkRuntime<'a, S: GoroutineScheduler> {
     pub vm: Arc<BlinkVM>,
     pub scheduler: Mutex<S>,
-    pub execution_context: ExecutionContext,
+    pub execution_context: ExecutionContext<'a>,
     scheduler_running: AtomicBool,
 }
 
-unsafe impl<S: GoroutineScheduler> Send for BlinkRuntime<S> {}
-unsafe impl<S: GoroutineScheduler> Sync for BlinkRuntime<S> {}
+unsafe impl<S: GoroutineScheduler> Send for BlinkRuntime<'_, S> {}
+unsafe impl<S: GoroutineScheduler> Sync for BlinkRuntime<'_, S> {}
 
-impl BlinkRuntime<SingleThreadedScheduler> {
+impl BlinkRuntime<'_, SingleThreadedScheduler> {
     /// Initialize the global runtime singleton (single-threaded only)
     pub fn init_global(vm: Arc<BlinkVM>, current_module: u32) -> Result<Arc<Self>, String> {
         let runtime = Arc::new(Self::new(vm, current_module));
@@ -50,10 +50,10 @@ impl BlinkRuntime<SingleThreadedScheduler> {
 }
 
 
-impl<S: GoroutineScheduler> BlinkRuntime<S> {
+impl<S: GoroutineScheduler> BlinkRuntime<'_, S> {
     pub fn new(vm: Arc<BlinkVM>, current_module: u32) -> Self {
         let execution_context = ExecutionContext::new(vm.clone(), current_module);
-        let scheduler = Mutex::new(S::new());
+        let scheduler = Mutex::new(S::new(vm.clone()));
         
         Self {
             vm,

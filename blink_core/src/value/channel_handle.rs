@@ -6,7 +6,6 @@ use crate::ValueRef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelHandle {
     pub id: u64,
-    pub generation: u32,
 }
 
 #[derive(Debug)]

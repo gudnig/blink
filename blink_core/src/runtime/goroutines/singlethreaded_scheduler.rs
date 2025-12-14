@@ -22,8 +22,7 @@ pub struct SingleThreadedScheduler {
     current_goroutine: Option<u32>,
     next_id: AtomicU32,
     channels: HashMap<u64, ChannelEntry>,
-    next_channel_id: AtomicU32,
-    next_generation: AtomicU32,
+    next_channel_id: std::sync::atomic::AtomicU64,
 }
 
 
@@ -154,8 +153,7 @@ impl GoroutineScheduler for SingleThreadedScheduler {
             current_goroutine: None,
             next_id: AtomicU32::new(1),
             channels: HashMap::new(),
-            next_channel_id: AtomicU32::new(1),
-            next_generation: AtomicU32::new(1),
+            next_channel_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -259,19 +257,18 @@ impl GoroutineScheduler for SingleThreadedScheduler {
 
     fn create_channel(&mut self, capacity: Option<usize>) -> ChannelHandle {
         let id = self.next_channel_id.fetch_add(1, Ordering::Relaxed);
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) & 0x3FFFFFFF;
-        
+
         let entry = ChannelEntry {
-            generation,
+            generation: 0,
             buffer: VecDeque::new(),
             capacity,
             waiting_senders: VecDeque::new(),
             waiting_receivers: VecDeque::new(),
             closed: false,
         };
-        
+
         self.channels.insert(id, entry);
-        ChannelHandle { id, generation }
+        ChannelHandle { id }
     }
 
     fn channel_send(&mut self, handle: ChannelHandle, value: ValueRef) -> SchedulerAction {
@@ -279,7 +276,7 @@ impl GoroutineScheduler for SingleThreadedScheduler {
             .expect("channel_send called without current goroutine");
         
         let channel = match self.channels.get_mut(&handle.id) {
-            Some(ch) if ch.generation == handle.generation => ch,
+            Some(ch) => ch,
             _ => return SchedulerAction::Complete(ValueRef::nil()),
         };
         
@@ -289,8 +286,7 @@ impl GoroutineScheduler for SingleThreadedScheduler {
         
         // Try direct handoff to waiting receiver
         if let Some(receiver_id) = channel.waiting_receivers.pop_front() {
-            // Store value for receiver to pick up
-            // (We'll handle this via a pending_values map or similar)
+            channel.buffer.push_back(value);
             self.unblock(receiver_id);
             return SchedulerAction::Continue;
         }
@@ -314,7 +310,7 @@ impl GoroutineScheduler for SingleThreadedScheduler {
             .expect("channel_receive called without current goroutine");
         
         let channel = match self.channels.get_mut(&handle.id) {
-            Some(ch) if ch.generation == handle.generation => ch,
+            Some(ch) => ch,
             _ => return (SchedulerAction::Complete(ValueRef::nil()), None),
         };
         
@@ -346,7 +342,7 @@ impl GoroutineScheduler for SingleThreadedScheduler {
 
     fn close_channel(&mut self, handle: ChannelHandle) -> Result<(), String> {
         let channel = match self.channels.get_mut(&handle.id) {
-            Some(ch) if ch.generation == handle.generation => ch,
+            Some(ch) => ch,
             _ => return Err("Invalid channel handle".to_string()),
         };
 

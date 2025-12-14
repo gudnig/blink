@@ -1,18 +1,15 @@
 use crate::compiler::{BytecodeCompiler, MacroExpander};
 use crate::runtime::{BlinkRuntime, SuspendedContinuation};
-use crate::{
-    error::BlinkError,
-    runtime::{
-        blink_runtime::GLOBAL_RUNTIME, BlinkVM, ClosureObject, CompiledFunction,
-        ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary,
-    },
-    value::{
-        unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn,
-        NativeContext, ValueRef,
-    },
-};
+use crate::{error::BlinkError, runtime::{
+    blink_runtime::GLOBAL_RUNTIME, BlinkVM, ClosureObject, CompiledFunction,
+    ContextualBoundary, EvalResult, Opcode, TypeTag, ValueBoundary,
+}, value::{
+    unpack_immediate, ContextualNativeFn, GcPtr, ImmediateValue, IsolatedNativeFn,
+    NativeContext, ValueRef,
+}, SingleThreadedScheduler};
 use mmtk::util::ObjectReference;
 use std::sync::Arc;
+use parking_lot::Mutex;
 use crate::value::FutureHandle;
 
 // Updated call frame for byte-sized bytecode
@@ -63,11 +60,12 @@ struct PendingUpvalue {
 }
 
 #[derive(Clone, Debug)]
-pub struct ExecutionContext {
+pub struct ExecutionContext<'a> {
     pub vm: Arc<BlinkVM>,
     pub current_module: u32,
     pub register_stack: Vec<ValueRef>,
     pub call_stack: Vec<CallFrame>,
+    pub scheduler: &'a Mutex<SingleThreadedScheduler>,
     pub current_goroutine_id: Option<u32>, // Track the current goroutine ID
 }
 
